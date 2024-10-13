@@ -1,0 +1,12 @@
+#!/usr/bin/bash
+
+# Date
+date=$(date "+%Y-%m-%d %X")
+
+# Battery
+batterynum=$(cat /sys/class/power_supply/BAT0/capacity)
+batterystatus=$(cat /sys/class/power_supply/BAT0/status)
+battery="${batterynum}% [$batterystatus]"
+
+# Status bar
+echo $battery "|" $date
