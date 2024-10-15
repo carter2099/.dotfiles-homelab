@@ -16,20 +16,8 @@ compinit
 
 # User config
 
-# git info in prompt
-autoload -Uz vcs_info
-zstyle ':vcs_info:*' enable git
-#zstyle ':vcs_info:*' check-for-changes true
-#zstyle ':vcs_info:git*' actionformats "- %B%F{red}%r%f on %F{green}[%b]%f %m%u%c"
-zstyle ':vcs_info:git*' formats "- %B%F{red}%r%f on %F{green}[%b]%f"
-precmd() {
-    vcs_info
-}
-setopt prompt_subst
 # prompt
-PS1='%B%n%b @ %F{cyan}%B%/%b%f ${vcs_info_msg_0_}%b $ '
-
-
+PS1='%B%n%b @ %F{cyan}%B%/%b%f $ '
 
 # add ~/.zfunc to fpath, then lazy autoload
 # every file in there as a function
