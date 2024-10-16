@@ -17,7 +17,8 @@ compinit
 # User config
 
 # prompt
-PS1='%B%n%b @ %F{cyan}%B%/%b%f $ '
+# using starship instead
+#PS1='%B%n%b @ %F{cyan}%B%/%b%f $ '
 
 # add ~/.zfunc to fpath, then lazy autoload
 # every file in there as a function
@@ -43,6 +44,7 @@ alias cdnvim="cd ~/.config/nvim"
 # dotfiles sync
 alias dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles/" --work-tree="$HOME"'
 
+eval "$(starship init zsh)"
 
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
