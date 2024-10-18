@@ -111,6 +111,11 @@ input "10182:480:GXTP5140:00_27C6:01E0_Touchpad" {
 
     # Take screenshot
     bindsym $mod+Shift+p exec GRIM_DEFAULT_DIR=/home/carter/documents/screenshots grim
+
+    # Volume controls
+    bindsym XF86AudioRaiseVolume exec amixer set Master 5%+
+    bindsym XF86AudioLowerVolume exec amixer set Master 5%-
+    bindsym XF86AudioMute exec amixer set Master toggle
 #
 # Moving around:
 #
