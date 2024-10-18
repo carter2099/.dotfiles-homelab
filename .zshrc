@@ -43,6 +43,7 @@ alias mountusb2="sudo mount -v /dev/usb2 /mnt/usb2"
 alias cdnvim="cd ~/.config/nvim"
 # dotfiles sync
 alias dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles/" --work-tree="$HOME"'
+alias carterhelp='nvim ~/README.md'
 
 eval "$(starship init zsh)"
 
