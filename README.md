@@ -49,7 +49,7 @@
       - `<leader>ps` text search
       - `<leader>f` lsp format current buffer
 ## Backlight
-  - Run `setbright [percentage]` to set the backlight brightness to [percentage]
+  - Run `setbright [percentage]` to set the backlight brightness to \[percentage\]
 ## Clipboard
   - Use command substitution to paste contents in a shell command: `$(wl-paste)`
   - Pipe into `wl-copy` store in clipboard
