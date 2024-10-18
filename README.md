@@ -42,7 +42,7 @@
   - Run `zs` to source ~/.zshrc
 ## tmux
   - See ~/.tmux.conf
-  - **prefix** is set to <C-space>
+  - **prefix** is set to \<C-space>
   - New window: **prefix + c**
   - Next window: **prefix + n**
   - Previous window: **prefix + p**
