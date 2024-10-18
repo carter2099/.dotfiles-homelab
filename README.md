@@ -40,6 +40,17 @@
 ## zsh
   - Run `ez` to view/edit ~/.zshrc
   - Run `zs` to source ~/.zshrc
+## tmux
+  - See ~/.tmux.conf
+  - **prefix** is set to <C-space>
+  - New window: **prefix + c**
+  - Next window: **prefix + n**
+  - Previous window: **prefix + p**
+  - Split current pane into top and bottom: **prefix + "**
+  - Split current pane into left and right: **prefix + %**
+  - Move between panes:
+    - Show pane indexes: **prefix + q**
+    - Press number shown on pane to swap to it
 ## nvim
   - `:Lazy` for package manager
   - `:Mason` for lsp package manager
