@@ -54,9 +54,10 @@
   - Use command substitution to paste contents in a shell command: `$(wl-paste)`
   - Pipe into `wl-copy` store in clipboard
 ## Screenshot
-  - mod + shift + p
+  - **mod + shift + p**
     - mod is Sway mod
   - Saved in ~/documents/screenshots
+  - Uses `grim`
 ## Misc alias
   - `refreshmirrors`: refresh pacman mirrors
   - `checkbat`: echo battery percentage
