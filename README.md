@@ -33,6 +33,8 @@
           - Vertical: **mod + v**
       - Use stacking layout: **mod + s**
       - Use tabbed layout: **mod + w**
+## Sound
+  - Run `alsamixer` for tui mixer
 ## Backup
   - ~/documents/backup
   - Run ./full.sh to backup to /mnt/usb1 and then copy it to /mnt/usb2
