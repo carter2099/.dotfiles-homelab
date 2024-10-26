@@ -34,6 +34,9 @@ opt.colorcolumn = "80"
 -- If this many ms nothing is typed the swap file will be written to disk
 opt.updatetime = 100
 
+-- Highlight line at cursor
+opt.cursorline = true
+
 -- *** Netrw config
 -- Set to 0 to hide banner
 vim.g.netrw_banner = 1
