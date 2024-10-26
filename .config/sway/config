@@ -78,9 +78,8 @@ output * bg /home/carter/documents/wallpapers/archmountain.jpg fill
 #
 # You can get the names of your inputs by running: swaymsg -t get_inputs
 # Read `man 5 sway-input` for more information about this section.
-input "10182:480:GXTP5140:00_27C6:01E0_Touchpad" {
-  natural_scroll enabled
-  pointer_accel 0.20
+input "10182:480:GXTP5140:00_27C6:01E0" {
+    natural_scroll enabled
 }
 
 ### Key bindings
@@ -116,6 +115,10 @@ input "10182:480:GXTP5140:00_27C6:01E0_Touchpad" {
     bindsym XF86AudioRaiseVolume exec amixer set Master 5%+
     bindsym XF86AudioLowerVolume exec amixer set Master 5%-
     bindsym XF86AudioMute exec amixer set Master toggle
+
+    # Brightness
+    bindsym XF86MonBrightnessUp exec brightnessctl s +10%
+    bindsym XF86MonBrightnessDown exec brightnessctl s 10%-
 #
 # Moving around:
 #
