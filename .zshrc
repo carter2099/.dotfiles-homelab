@@ -44,6 +44,7 @@ alias cdnvim="cd ~/.config/nvim"
 # dotfiles sync
 alias dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles/" --work-tree="$HOME"'
 alias carterhelp='nvim ~/README.md'
+alias ytmp3='yt-dlp -x --audio-format=mp3 '
 
 eval "$(starship init zsh)"
 
