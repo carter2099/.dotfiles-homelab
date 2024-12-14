@@ -31,6 +31,8 @@ A single node Kubernetes cluster (k3s) hosting
         - `helm uninstall`
 
 ## TODO
+- System
+    - Move off of `helm`
 - Applications
     - FreshRss
 - Infrastructure
