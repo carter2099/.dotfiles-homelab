@@ -3,7 +3,7 @@ return {
 	config = function()
 		vim.opt.showmode = false
 		vim.g.lightline = {
-			colorscheme = "nord",
+			colorscheme = "rosepine_moon",
 		}
 	end,
 }

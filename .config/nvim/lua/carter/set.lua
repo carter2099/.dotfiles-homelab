@@ -29,7 +29,7 @@ opt.termguicolors = true
 opt.scrolloff = 8
 
 -- makes that line at the right
-opt.colorcolumn = "80"
+opt.colorcolumn = "84"
 
 -- If this many ms nothing is typed the swap file will be written to disk
 opt.updatetime = 100

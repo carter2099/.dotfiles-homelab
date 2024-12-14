@@ -18,36 +18,32 @@ compinit
 
 # prompt
 # using starship instead
-#PS1='%B%n%b @ %F{cyan}%B%/%b%f $ '
+# not on homelab (yet)
+PS1='%B%n%b @ %F{green}%B%/%b%f $ '
 
 # add ~/.zfunc to fpath, then lazy autoload
 # every file in there as a function
-fpath=(~/.zfunc $fpath)
-autoload -U $fpath[1]/*(.:t)
+# ** no functions yet on homelab so this errors
+#fpath=(~/.zfunc $fpath)
+#autoload -U $fpath[1]/*(.:t)
 
 # alias
-alias cdwork="cd ~/workspace"
-#alias cdsand="cd ~/workspace/sandbox"
 alias cdconfig="cd ~/.config"
-#alias cdnotes="cd ~/Documents/notes"
 alias ls="ls --color=auto"
-alias checkmirrors="nvim /etc/pacman.d/mirrorlist"
-alias refreshmirrors="sudo systemctl start reflector.service"
 alias zs="source ~/.zshrc"
 alias ez="nvim ~/.zshrc"
-alias checkbat="cat /sys/class/power_supply/BAT0/capacity"
-#alias colorpick="grim -g \"$(slurp -p)\" -t ppm - | convert - -format '%[pixel:p{0,0}]' txt:-"
 alias cmatrix="cmatrix -b -C blue -u 5"
-alias mountusb1="sudo mount -v /dev/usb1 /mnt/usb1"
-alias mountusb2="sudo mount -v /dev/usb2 /mnt/usb2"
 alias cdnvim="cd ~/.config/nvim"
 # dotfiles sync
 alias dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles/" --work-tree="$HOME"'
 alias carterhelp='nvim ~/README.md'
-alias ytmp3='yt-dlp -x --audio-format=mp3 '
 
-eval "$(starship init zsh)"
+# fnm
+FNM_PATH="/home/carter/.local/share/fnm"
+if [ -d "$FNM_PATH" ]; then
+  export PATH="$FNM_PATH:$PATH"
+  eval "`fnm env`"
+fi
 
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
-[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+eval "$(fnm env --use-on-cd --shell zsh)"
+

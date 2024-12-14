@@ -1,10 +1,9 @@
 return {
 	{
-		"nordtheme/vim",
-		name = "nord",
+		"rose-pine/neovim",
+		name = "rose-pine",
 		config = function()
-			--vim.g.nord_cursor_line_number_background = 1
-			vim.cmd.colorscheme("nord")
+			vim.cmd.colorscheme("rose-pine-moon")
 		end,
 	},
 }

@@ -1,6 +1,0 @@
-zmodload zsh/mathfunc
-percent=$(($1*0.01))
-max=$(cat /sys/class/backlight/amdgpu_bl1/max_brightness)
-val=$(($max*$percent))
-integer valint=$((rint(val)))
-sudo bash -c "echo $valint > /sys/class/backlight/amdgpu_bl1/brightness"
