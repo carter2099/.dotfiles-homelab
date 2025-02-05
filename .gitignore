@@ -1,3 +1,5 @@
 .sudo_as_admin_successful
 .kube/cache
+.zcompdump
+.config/nvim/lazy-lock.json
 
