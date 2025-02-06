@@ -10,7 +10,7 @@
 
 A single node Kubernetes cluster (k3s) hosting
 - Grafana and Prometheus
-- Nextcloud
+- FreshRSS
 
 ## Kubernetes
 - Use `kubectl` to control cluster
@@ -25,16 +25,10 @@ A single node Kubernetes cluster (k3s) hosting
     - Restart pod
         - Kubernetes will automatically recreate deleted pods
         - `kubectl delete [pod_name]`
-- Use `helm` package manager
-    - Install and uninstall
-        - `helm install`
-        - `helm uninstall`
 
 ## TODO
-- System
-    - Move off of `helm`
-- Applications
-    - FreshRss
 - Infrastructure
     - NAS to support Nextcloud
+- Configuration
+    - Separate configs to be gitignored that contain credentials
 

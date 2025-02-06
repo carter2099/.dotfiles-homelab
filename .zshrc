@@ -38,6 +38,10 @@ alias cdnvim="cd ~/.config/nvim"
 alias dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles/" --work-tree="$HOME"'
 alias carterhelp='nvim ~/README.md'
 
+
+export KUBECONFIG=~/.kube/config
+
+
 # fnm
 FNM_PATH="/home/carter/.local/share/fnm"
 if [ -d "$FNM_PATH" ]; then
