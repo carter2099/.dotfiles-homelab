@@ -40,7 +40,7 @@ k3s/
 │   └── service1-service.yaml
 ├── service2/
 │   ├── service2-deployment.yaml
-│   ├── service2-configmap.yaml
+│   ├── service2-config.yaml
 │   └── service2-ingress.yaml
 ...
 ```
