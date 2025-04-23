@@ -12,6 +12,7 @@ A single node Kubernetes cluster (k3s) hosting
 - Grafana and Prometheus
 - FreshRSS
 - Uptime Kuma
+- A few self hosted webapps including a blog
 
 ## Kubernetes
 - Use `kubectl` to control cluster
@@ -44,12 +45,3 @@ k3s/
 │   └── service2-ingress.yaml
 ...
 ```
-
-## TODO
-- Applications
-    - Media server
-    - Cloud storage
-    - Home surveillance
-- Infrastructure
-    - NAS to support cloud storage and media server
-
