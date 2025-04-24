@@ -7,6 +7,7 @@
     - 8GB RAM
 - OS: Ubuntu Server
 - Shell: zsh
+- Editor: nvim
 - Hostname: mbp-ubuntu-server
 
 A single node Kubernetes cluster (k3s) hosting
