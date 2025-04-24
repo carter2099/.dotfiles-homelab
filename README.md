@@ -1,6 +1,7 @@
-# System Notes
+# Notes
 
 ## General
+#### For now, single device cluster
 - Device: 2017 14" Macbook Pro
     - Intel i5-7360U (4) @ 3.600GHz
     - 8GB RAM
