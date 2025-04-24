@@ -1,0 +1,51 @@
+# service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: stickies-external-service-server
+  namespace: default
+spec:
+  ports:
+    - name: web
+      port: 3011
+      targetPort: 3011
+      protocol: TCP
+  type: ClusterIP
+
+---
+# endpoints.yaml
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: stickies-external-service-server  # Must match service name
+  namespace: default
+subsets:
+  - addresses:
+      - ip: 172.20.0.4  # Your Docker container IP
+    ports:
+      - name: web
+        port: 3001
+        protocol: TCP
+
+---
+# ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: stickies-ingress-server
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: stickiesapi.carter2099.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: stickies-external-service-server
+                port:
+                  number: 3011
