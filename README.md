@@ -1,4 +1,4 @@
-# Notes
+# Homelab Notes
 
 ## General
 #### For now, single device cluster
