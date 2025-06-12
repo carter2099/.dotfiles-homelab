@@ -5,7 +5,7 @@ metadata:
   annotations:
     kubernetes.io/ingress.class: traefik
     traefik.ingress.kubernetes.io/service.external.name: host.k3d.internal
-    traefik.ingress.kubernetes.io/service.external.port: "3000"
+    traefik.ingress.kubernetes.io/service.external.port: "13000"
 spec:
   rules:
   - host: tbitt.carter2099.com
@@ -17,4 +17,4 @@ spec:
           service:
             name: external-service  # This is just a placeholder
             port:
-              number: 3000
+              number: 13000

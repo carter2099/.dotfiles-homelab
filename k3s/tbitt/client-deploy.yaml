@@ -7,8 +7,8 @@ metadata:
 spec:
   ports:
     - name: web
-      port: 3000
-      targetPort: 3000
+      port: 13000
+      targetPort: 13000
       protocol: TCP
   type: ClusterIP
 
@@ -21,10 +21,10 @@ metadata:
   namespace: default
 subsets:
   - addresses:
-      - ip: 172.18.0.2  # Your Docker container IP
+      - ip: 192.168.4.102
     ports:
       - name: web
-        port: 3000
+        port: 13000
         protocol: TCP
 
 ---
@@ -48,4 +48,4 @@ spec:
               service:
                 name: external-service
                 port:
-                  number: 3000
+                  number: 13000
