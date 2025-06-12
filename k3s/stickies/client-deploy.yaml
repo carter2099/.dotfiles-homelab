@@ -7,8 +7,8 @@ metadata:
 spec:
   ports:
     - name: web
-      port: 3010
-      targetPort: 3010
+      port: 23010
+      targetPort: 23010
       protocol: TCP
   type: ClusterIP
 
@@ -21,10 +21,10 @@ metadata:
   namespace: default
 subsets:
   - addresses:
-      - ip: 172.20.0.2  # Your Docker container IP
+      - ip: 192.168.4.102
     ports:
       - name: web
-        port: 3000
+        port: 23010
         protocol: TCP
 
 ---
@@ -48,4 +48,4 @@ spec:
               service:
                 name: stickies-external-service
                 port:
-                  number: 3010
+                  number: 23010
