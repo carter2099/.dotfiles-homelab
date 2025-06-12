@@ -1,0 +1,51 @@
+# service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: blog-external-service
+  namespace: default
+spec:
+  ports:
+    - name: web
+      port: 33099
+      targetPort: 33099
+      protocol: TCP
+  type: ClusterIP
+
+---
+# endpoints.yaml
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: blog-external-service
+  namespace: default
+subsets:
+  - addresses:
+      - ip: 192.168.4.102
+    ports:
+      - name: web
+        port: 33099
+        protocol: TCP
+
+---
+# ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: blog-ingress
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: blog.carter2099.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: blog-external-service
+                port:
+                  number: 33099
