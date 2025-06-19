@@ -6,7 +6,7 @@ echo 'Pulling changes from remote'
 git pull
 
 echo 'Bringing app down...'
-docker-compose down
+docker-compose -f docker-compose.prod.yml down
 
 echo 'Starting app back up'
 ../up.sh
