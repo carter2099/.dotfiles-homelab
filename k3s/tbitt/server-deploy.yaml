@@ -17,7 +17,7 @@ spec:
 apiVersion: v1
 kind: Endpoints
 metadata:
-  name: external-service-server  # Must match service name
+  name: external-service-server
   namespace: default
 subsets:
   - addresses:
