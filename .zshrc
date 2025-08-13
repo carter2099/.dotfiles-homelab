@@ -51,6 +51,3 @@ if [ -d "$FNM_PATH" ]; then
 fi
 
 eval "$(fnm env --use-on-cd --shell zsh)"
-
-eval "$(~/.local/bin/mise activate zsh)"
-source "/etc/profile.d/rvm.sh"
