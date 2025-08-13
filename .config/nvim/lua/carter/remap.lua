@@ -31,10 +31,17 @@ map.set("n", "<leader>f", vim.lsp.buf.format)
 
 -- Map :so to <leader><leader>
 map.set("n", "<leader><leader>", function()
-	vim.cmd("so")
+    vim.cmd("so")
 end)
 
 -- Open lazy with <leader>L
 map.set("n", "<leader>l", function()
-	vim.cmd("Lazy")
+    vim.cmd("Lazy")
+end)
+
+-- telescope
+local telescope_builtin = require('telescope.builtin')
+vim.keymap.set('n', '<leader>pf', telescope_builtin.find_files, {})
+vim.keymap.set('n', '<leader>ps', function()
+    telescope_builtin.grep_string({ search = vim.fn.input("Grep > ") })
 end)
