@@ -21,7 +21,7 @@ metadata:
   namespace: default
 subsets:
   - addresses:
-      - ip: 192.168.4.102
+      - ip: 192.168.4.92
     ports:
       - name: web
         port: 33099
