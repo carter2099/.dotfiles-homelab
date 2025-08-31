@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hub-ingress
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    traefik.ingress.kubernetes.io/service.external.name: host.k3d.internal
+    traefik.ingress.kubernetes.io/service.external.port: "13000"
+spec:
+  rules:
+  - host: carter2099.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: external-service
+            port:
+              number: 13000
