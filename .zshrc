@@ -52,3 +52,4 @@ fi
 
 eval "$(fnm env --use-on-cd --shell zsh)"
 eval "$(rbenv init -)"
+export PATH="$HOME/.local/bin:$PATH"
