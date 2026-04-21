@@ -16,6 +16,9 @@ compinit
 
 # User config
 
+# XDG RUNTIME DIR
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+
 # prompt
 # using starship instead
 # not on homelab (yet)
