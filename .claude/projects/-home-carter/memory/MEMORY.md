@@ -5,3 +5,4 @@
 - [Do not run aa-remove-unknown](feedback_no_aa_remove_unknown.md) — Removes snap Docker's AppArmor profiles, breaking Docker entirely.
 - [Notes vault at ~/notes](notes_vault.md) — Claude-maintained markdown knowledge vault; topic dirs + INDEX.md + frontmatter; auto-commit-and-push.
 - [Email digest archives at ~/digests/](digest_archives.md) — Each daily digest saves a summary to `~/digests/<topic>/YYYY-MM-DD.md`; read these before asking Carter to re-describe digest content.
+- [Always use /create-skill to make new skills](feedback_create_skill.md) — Writing skill files directly skips dotfiles tracking; use the skill to bake in the commit step.
