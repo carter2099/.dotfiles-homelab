@@ -261,3 +261,4 @@ This guarantees the next session has context for what happened. If the skill isn
 - **Node:** managed via fnm
 - **Tmux prefix:** Ctrl+Space
 - **Git user:** carter2099 <carter2099@pm.me>
+- **GitHub CLI:** `gh` authenticated as carter2099 (HTTPS, broad scopes)
