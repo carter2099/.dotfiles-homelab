@@ -1,0 +1,13 @@
+[Unit]
+Description=Dependabot webhook receiver
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/carter/.local/bin/dependabot-webhook
+EnvironmentFile=/home/carter/.config/dependabot-webhook/env
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

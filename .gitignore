@@ -5,3 +5,4 @@
 .config/cloudflare/
 k3s/middleware/auth/
 
+.config/dependabot-webhook/

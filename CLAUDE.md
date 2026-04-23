@@ -37,6 +37,7 @@ This is the home directory, managed as a bare git repo for dotfiles:
 - `stickies/` - Sticky notes app, **not live** (stickiesapi.carter2099.com)
 - `delta_neutral/` - Rails 8 Hyperliquid rebalancer (deltaneutral.carter2099.com)
 - `homelab-backup/` - Go backup service (daily R2 backups of blog content, DBs, FreshRSS)
+- `dev/dependabot-webhook/` - Go webhook receiver for automated dependabot PR handling
 - `k3s/` - Kubernetes manifests organized by service
 - `ddns/` - Cloudflare DDNS updater for WireGuard endpoint
 - `build/` - Source builds (neovim)
@@ -173,6 +174,23 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Local archives written to `~/backups/`; R2 credentials via env vars `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`
 - Use the `backup-health` skill to check last run status, next scheduled run, and R2 bucket contents
 
+### Dependabot Webhook (Go)
+- Always-on systemd user service (`dependabot-webhook.service`) listening on `localhost:9099`
+- Receives GitHub `pull_request` webhooks via Cloudflare tunnel at `hooks.carter2099.com/webhook`
+- Verifies HMAC-SHA256 signature, then spawns a sandboxed Claude agent to handle bundler bumps
+- Agent runs with narrow permission allowlist (`~/.claude/dependabot-agent-settings.json`) — no sudo, no docker, no deploy
+- 90-second coalesce window so a burst of PRs is handled in one agent run
+- Source: `~/dev/dependabot-webhook/`; config (with webhook secret): `~/.config/dependabot-webhook/env`
+- Logs: `journalctl --user -u dependabot-webhook -f`
+- Release: `cd ~/dev/dependabot-webhook && bash release.sh`
+
+### Cloudflare API Access
+- Account-owned API token at `~/.config/cloudflare/api-token` (gitignored, 600 perms)
+- Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone)
+- Supporting IDs in `~/.config/cloudflare/`: `account-id`, `zone-id`, `homelab-tunnel-id`
+- Env vars (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_HOMELAB_TUNNEL_ID`) exported from `.zshrc`
+- To add a new public hostname to the homelab tunnel: PUT `/accounts/{id}/cfd_tunnel/{tunnel_id}/configurations` with updated ingress array, then POST DNS CNAME to `/zones/{zone_id}/dns_records`
+
 ## Email Digests
 
 Four daily HTML email digests are scheduled via systemd user timers. Each spawns a headless Claude agent that searches the web for recent news on its topic and emails Carter a summary.
@@ -192,7 +210,7 @@ Carter often references these by topic when chatting ("I saw something in the ag
 
 This homelab runs a **persistent Claude Code agent** accessible from the Claude mobile app. It is a `claude remote-control` process in server mode, running as a systemd user service (`claude-homelab.service`) under the `carter` user with `loginctl enable-linger` so it survives reboots. Authenticated via claude.ai OAuth (Pro plan). The mobile app's Code tab lists it as `homelab`; tapping spawns a session that executes commands on this host.
 
-Permissions are intentionally wide-open (`Bash(*)` in `.claude/settings.local.json`, `NOPASSWD: ALL` in `/etc/sudoers.d/claude-homelab`) because the only inbound path is the mobile app — no email/SMS/webhook ingress, no prompt-injection surface. If a channel with untrusted text is ever added (Telegram, Discord, email triggers), this stance must be revisited.
+Permissions are intentionally wide-open (`Bash(*)` in `.claude/settings.local.json`, `NOPASSWD: ALL` in `/etc/sudoers.d/claude-homelab`) because the only inbound path is the mobile app — no email/SMS/webhook ingress, no prompt-injection surface. The `dependabot-webhook` service is a separate, narrowly-sandboxed agent and does NOT use the daemon's permissions.
 
 - **Service unit:** `~/.config/systemd/user/claude-homelab.service`
 - **Logs:** `journalctl --user -u claude-homelab -f`
