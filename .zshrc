@@ -56,3 +56,9 @@ fi
 eval "$(fnm env --use-on-cd --shell zsh)"
 eval "$(rbenv init -)"
 export PATH="$HOME/.local/bin:$PATH"
+
+# Cloudflare API credentials
+export CLOUDFLARE_API_TOKEN=$(cat ~/.config/cloudflare/api-token 2>/dev/null | tr -d '\n')
+export CLOUDFLARE_ACCOUNT_ID=$(cat ~/.config/cloudflare/account-id 2>/dev/null | tr -d '\n')
+export CLOUDFLARE_ZONE_ID=$(cat ~/.config/cloudflare/zone-id 2>/dev/null | tr -d '\n')
+export CLOUDFLARE_HOMELAB_TUNNEL_ID=$(cat ~/.config/cloudflare/homelab-tunnel-id 2>/dev/null | tr -d '\n')

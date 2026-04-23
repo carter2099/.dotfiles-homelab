@@ -2,5 +2,6 @@
 .kube/cache
 .zcompdump
 .config/nvim/lazy-lock.json
+.config/cloudflare/
 k3s/middleware/auth/
 
