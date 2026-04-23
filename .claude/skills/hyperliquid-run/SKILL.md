@@ -52,7 +52,14 @@ Compare to the SHAs in the state file. For any source whose SHA has changed (or 
   ```
   For any gap you plan to implement this run, fetch the full upstream method body to understand its parameters and behaviour.
 
-- **TS SDK (nktkas)**: List the `src/` directory structure first, then extract method signatures from the relevant client files. Do not fetch full file contents unless implementing a specific method.
+- **TS SDK (nktkas)**: The repo uses one file per method. List the method directories directly — no file fetching needed for the comparison pass:
+  ```bash
+  curl -s "https://api.github.com/repos/nktkas/hyperliquid/contents/src/api/info/_methods" \
+    | python3 -c "import sys,json; [print(f['name'].replace('.ts','')) for f in json.load(sys.stdin)]"
+  curl -s "https://api.github.com/repos/nktkas/hyperliquid/contents/src/api/exchange/_methods" \
+    | python3 -c "import sys,json; [print(f['name'].replace('.ts','')) for f in json.load(sys.stdin)]"
+  ```
+  Compare the resulting method names against the Ruby SDK. For any gap you plan to implement, fetch the specific `.ts` file to understand parameters and return type.
 
 - **HL API docs**: WebFetch the Hyperliquid GitBook docs for new endpoint types, new action types, new subscription channels.
 
