@@ -1,0 +1,7 @@
+[Unit]
+Description=Hyperliquid Ruby SDK autonomous maintenance run via Claude agent
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/run_hyperliquid_sdk.sh
+TimeoutStartSec=1800
