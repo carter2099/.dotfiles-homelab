@@ -16,7 +16,7 @@ Read `~/agent-state/hyperliquid-sdk.md` in full. Note:
 - Current SDK version
 - Last run date and outcome
 - Upstream reference SHAs (Python SDK, TS SDK, docs)
-- All known gaps and their statuses
+- All known gaps and their statuses (🔧 bugs, 🟡 queued, 🔴 needs_approval)
 - Any approved architectural changes ready to implement
 - Todos/housekeeping items
 
@@ -40,8 +40,20 @@ curl -s "https://api.github.com/repos/nktkas/hyperliquid/commits/main" | python3
 
 Compare to the SHAs in the state file. For any source whose SHA has changed (or was never scanned):
 
-- **Python SDK**: Fetch key source files via GitHub raw URLs. Focus on `hyperliquid/info.py`, `hyperliquid/exchange.py`. Look for methods/endpoints not present in `lib/hyperliquid/info.rb` and `lib/hyperliquid/exchange.rb`.
-- **TS SDK (nktkas)**: Fetch `src/clients/public.ts`, `src/clients/wallet.ts`. Same comparison.
+- **Python SDK**: Extract method signatures only — do NOT fetch full files:
+  ```bash
+  curl -s "https://raw.githubusercontent.com/hyperliquid-dex/hyperliquid-python-sdk/master/hyperliquid/info.py" | grep -E "^\s+def " | sed 's/^\s*//'
+  curl -s "https://raw.githubusercontent.com/hyperliquid-dex/hyperliquid-python-sdk/master/hyperliquid/exchange.py" | grep -E "^\s+def " | sed 's/^\s*//'
+  ```
+  Compare against Ruby SDK signatures:
+  ```bash
+  grep -E "^\s+def " ~/dev/hyperliquid/lib/hyperliquid/info.rb
+  grep -E "^\s+def " ~/dev/hyperliquid/lib/hyperliquid/exchange.rb
+  ```
+  For any gap you plan to implement this run, fetch the full upstream method body to understand its parameters and behaviour.
+
+- **TS SDK (nktkas)**: List the `src/` directory structure first, then extract method signatures from the relevant client files. Do not fetch full file contents unless implementing a specific method.
+
 - **HL API docs**: WebFetch the Hyperliquid GitBook docs for new endpoint types, new action types, new subscription channels.
 
 For each gap found:
@@ -55,9 +67,9 @@ Update the upstream SHA and scan date in the state file for any source actually 
 
 From the state file, select gaps to implement this session. Apply these constraints:
 - Max 3 gaps per run (session time budget).
-- Prioritise: approved architectural changes first, then oldest-queued 🟡 gaps, then housekeeping todos.
+- **Priority order**: 🔧 bugs first → approved architectural changes → oldest-queued 🟡 gaps → housekeeping todos.
 - Skip anything marked 🔴 needs_approval that is not yet approved.
-- If there is nothing to implement, skip to Step 8 (update state + email).
+- If there is nothing to implement, skip to Step 9 (update state + email).
 
 Write a brief scope summary (1–3 bullet points) to refer back to during the run.
 
@@ -94,18 +106,18 @@ source ~/.config/hyperliquid-agent/env
 RBENV_VERSION=3.4.8 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY ruby scripts/test_automated.rb
 ```
 
-If integration tests fail:
-- Investigate the failure. If it's caused by this run's changes, fix before committing.
-- If it's a pre-existing testnet flake (oracle price error, network timeout), note it in the email but do not block the commit.
+Before investigating any failures, cross-reference against the **Known Pre-existing Failures** section in the state file. If a failure matches a known pre-existing issue, note it in the email but do not spend tool calls re-investigating it. Only investigate genuinely new failures.
+
+If a new failure is caused by this run's changes, fix before committing. If it's an unrelated flake, note it.
 
 ## Step 8: Commit and push
 
 ```bash
 cd ~/dev/hyperliquid
-git add -p   # stage thoughtfully — do not stage test_automated.rb separately, it should be committed
+git add lib/hyperliquid/info.rb spec/hyperliquid/info_spec.rb  # stage specific files
 git commit -m "feat: <concise description of what was implemented>
 
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 git push origin dev
 ```
 
@@ -116,7 +128,7 @@ If nothing was implemented (no gaps or scope was zero), skip the commit.
 Edit `~/agent-state/hyperliquid-sdk.md`:
 - Update **Last run** date and outcome.
 - Update upstream SHA/scan dates for any sources scanned this run.
-- Update gap statuses (🟡→✅, new gaps added, etc.).
+- Update gap statuses (🟡→✅, new gaps added, 🔧 bugs fixed, etc.).
 - Append a row to the Run History table.
 
 ## Step 10: Email summary
