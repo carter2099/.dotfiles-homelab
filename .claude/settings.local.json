@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Edit",
+      "Write",
+      "WebFetch",
+      "WebSearch",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Skill(schedule)",
+      "Skill(schedule:*)"
+    ]
+  }
+}

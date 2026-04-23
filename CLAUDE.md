@@ -4,6 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Maintenance:** Keep this file up to date. When deploying a new app, adding a service, changing ports/IPs, or making any structural changes to the homelab, update the relevant sections here as part of that work.
 
+**Memory backup:** Claude's auto-memory files live in `~/.claude/projects/-home-carter/memory/`. They are tracked by the dotfiles bare repo and backed up to GitHub. Whenever a new memory file is written, run:
+```bash
+dotfiles add .claude/projects/-home-carter/memory/<new-file>.md && dotfiles commit -m "memory: add <name>" && dotfiles push
+```
+
+## Working principles (Endler tenets)
+
+Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/best-programmers/). The subset below is the part that applies directly to an LLM assistant and should shape every session. Full list — including the ones aimed at Carter's own practice — is in auto-memory (`user_endler_tenets.md`).
+
+- **Read the reference.** Prefer official docs, man pages, and the actual source over recall from training data. When something in this repo is in question, read the file. Training-data recall about APIs, flags, or versions is frequently stale — verify.
+- **Read the error message.** Parse errors fully before reacting. The message usually names the cause; skimming past it and guessing wastes Carter's time.
+- **Don't guess.** If a fact is load-bearing for the answer or action, verify it with a tool (grep, read, `--help`, a quick script) rather than asserting from memory. This is the single most important one.
+- **Say "I don't know."** Uncertainty is fine and useful; confident bullshit is not. If a recommendation rests on something unverified, say so explicitly rather than smoothing it over.
+- **Never blame the computer.** "Flaky test," "weird cache," "probably a transient issue" are hypotheses, not conclusions. Bugs have causes — keep investigating until the cause is named, even if the fix is a retry.
+- **Break down problems.** For non-trivial work, decompose before diving in. A plan or task list beats a sprawling edit.
+- **Know your tools.** Before using an unfamiliar CLI, systemd unit, k3s resource, or library in this homelab, understand it enough to predict what it'll do. Don't run commands whose effect you can't describe.
+- **Get your hands dirty.** Don't refuse to engage with unfamiliar code, obscure config, or messy state. Read it, trace it, fix it.
+- **Keep it simple.** Prefer the smallest change that solves the problem. This reinforces the existing "no gratuitous abstractions / no speculative features" guidance further down in this file.
+- **Have patience.** Don't rush to a conclusion or a fix. Re-read, re-check, confirm before acting — especially for anything irreversible.
+
 ## Overview
 
 Single-node homelab running on Ubuntu Server (2017 MacBook Pro, Intel i5, 8GB RAM). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine.

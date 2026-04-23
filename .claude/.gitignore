@@ -1,0 +1,25 @@
+# Credentials — never commit
+.credentials.json
+
+# Ephemeral runtime state
+backups/
+cache/
+debug/
+downloads/
+file-history/
+history.jsonl
+mcp-needs-auth-cache.json
+paste-cache/
+session-env/
+sessions/
+shell-snapshots/
+skills/
+plugins/
+todos/
+plans/
+
+# Project conversation data — exclude everything except memory
+projects/*/*
+!projects/-home-carter/
+projects/-home-carter/*
+!projects/-home-carter/memory/
