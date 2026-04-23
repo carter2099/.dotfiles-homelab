@@ -1,0 +1,51 @@
+schedule: "0 3 * * *"
+backup_dir: /home/carter/backups
+
+# 14 daily + 1 monthly + 1 yearly ≈ 168 MB max (well under R2 free 10 GB)
+retention:
+  daily_days: 14
+  monthly_count: 1
+  yearly_count: 1
+
+s3:
+  endpoint: "https://a77d31afd0d47d93f186059514689751.r2.cloudflarestorage.com"
+  bucket: "homelab-backup"
+  region: "auto"
+  # Set via env: R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+  access_key_id: ""
+  secret_access_key: ""
+
+targets:
+  - name: blog-posts
+    type: directory
+    source: /home/carter/blog/blog/app/posts
+
+  - name: blog-reviews
+    type: directory
+    source: /home/carter/blog/blog/app/reviews
+
+  - name: blog-images
+    type: directory
+    source: /home/carter/blog/blog/app/assets/images
+
+  - name: blog-db
+    type: sqlite-docker
+    container: blog-web-1
+    db_path: /rails/storage/production.sqlite3
+
+  - name: agent-state
+    type: directory
+    source: /home/carter/agent-state
+
+  - name: freshrss-db
+    type: sqlite-host
+    source: /var/lib/rancher/k3s/storage/pvc-a666fb67-3dc4-4aae-9d6f-37631a777005_freshrss_freshrss-data/users/carter2099/db.sqlite
+    sudo: true
+
+  - name: freshrss-config
+    type: directory
+    source: /var/lib/rancher/k3s/storage/pvc-a666fb67-3dc4-4aae-9d6f-37631a777005_freshrss_freshrss-data
+    sudo: true
+    excludes:
+      - cache
+      - "*.log"
