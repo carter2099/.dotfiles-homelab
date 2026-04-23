@@ -26,7 +26,7 @@ Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/bes
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (2017 MacBook Pro, Intel i5, 8GB RAM). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine.
+Single-node homelab running on Ubuntu Server (2017 MacBook Pro, Intel i5, 8GB RAM). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server has two IP addresses (`192.168.4.92` and `192.168.4.102`) used to route different apps — both point to the same physical machine.
 
 ## Repository Structure
 
@@ -34,12 +34,18 @@ This is the home directory, managed as a bare git repo for dotfiles:
 - `blog/` - Rails 8 blog app (blog.carter2099.com)
 - `hub/` - React + Rails API landing page/portfolio (carter2099.com)
 - `tbitt/` - React + Express memecoin tracker, **deprecated** (tbitt.carter2099.com)
-- `stickies/` - Sticky notes app (stickiesapi.carter2099.com)
+- `stickies/` - Sticky notes app, **not live** (stickiesapi.carter2099.com)
 - `delta_neutral/` - Rails 8 Hyperliquid rebalancer (deltaneutral.carter2099.com)
+- `homelab-backup/` - Go backup service (daily R2 backups of blog content, DBs, FreshRSS)
 - `k3s/` - Kubernetes manifests organized by service
 - `ddns/` - Cloudflare DDNS updater for WireGuard endpoint
 - `build/` - Source builds (neovim)
 - `dev/` - Scratch space for cloning GitHub repos, running tests, and doing development work
+- `scripts/` - Digest run scripts (`run_<topic>_digest.sh`, `send_digest.py`)
+- `notes/` - Claude-maintained markdown knowledge vault
+- `digests/` - Daily digest archives (`<topic>/YYYY-MM-DD.md`)
+- `agent-state/` - Cross-reboot task persistence (`pending.md`)
+- `backups/` - Local backup archives (written by homelab-backup service)
 - `.dotfiles-homelab/` - Bare git repo tracking dotfiles
 
 ## Dev Workflow (`dev/`)
@@ -123,7 +129,7 @@ k delete pod <name>  # k3s auto-recreates
 ```
 
 **Architecture pattern:** Two deployment models coexist:
-- **Self-developed webapps** (blog, hub, tbitt, stickies, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92, hub/tbitt/stickies at 192.168.4.102).
+- **Self-developed webapps** (blog, hub, tbitt, stickies, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92, hub/tbitt/stickies at 192.168.4.102). Note: stickies is not currently live; tbitt is deprecated.
 - **Third-party services** (grafana, prometheus, node-exporter, freshrss, uptime-kuma, traefik) run natively as k3s Deployments/DaemonSets.
 
 Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.).
@@ -147,6 +153,10 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Server: Express + TypeScript + PostgreSQL (port 3001/13001)
 - Deprecated Aug 2025 (Jupiter API discontinued)
 
+### Stickies - Not live
+- Previously a sticky notes app at stickiesapi.carter2099.com
+- Code remains on disk but the service is not running
+
 ### Delta Neutral (Rails 8 + SQLite)
 - Port: 80 (internal) / 43080 (exposed)
 - Automated rebalancer for Hyperliquid short hedges on Uniswap V3 positions
@@ -155,6 +165,13 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Required env vars: `HYPERLIQUID_PRIVATE_KEY`, `HYPERLIQUID_WALLET_ADDRESS`, `UNISWAP_SUBGRAPH_URL`, `THEGRAPH_API_KEY`
 - Dockerfile requires extra build deps: `autoconf automake libtool libsecp256k1-dev libssl-dev` (for `rbsecp256k1` gem)
 - Ruby 3.4.8, Thruster, Propshaft, Tailwind
+
+### Homelab Backup (Go)
+- Runs daily at 03:00 UTC via systemd user timer (`homelab-backup.service`/`.timer`)
+- Backs up to Cloudflare R2 bucket (`homelab-backup`) with 14-day daily + 1 monthly + 1 yearly retention
+- Targets: blog posts, reviews, images, blog SQLite DB, FreshRSS SQLite DB + config
+- Local archives written to `~/backups/`; R2 credentials via env vars `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`
+- Use the `backup-health` skill to check last run status, next scheduled run, and R2 bucket contents
 
 ## Email Digests
 
