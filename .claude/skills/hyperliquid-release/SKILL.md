@@ -1,6 +1,6 @@
 ---
 name: hyperliquid-release
-description: Release the Hyperliquid Ruby SDK — merges dev into main, bumps version, updates CHANGELOG, runs full test suite + integration tests, creates a git tag (triggers GitHub Release), and prompts for RubyGems MFA to push the gem.
+description: Release the Hyperliquid Ruby SDK — merges dev into main, bumps version, updates CHANGELOG, runs full test suite + integration tests, creates a git tag (triggers GitHub Release), pushes the gem to RubyGems, and verifies GitHub Actions workflows succeed.
 ---
 
 # hyperliquid-release
@@ -8,31 +8,50 @@ description: Release the Hyperliquid Ruby SDK — merges dev into main, bumps ve
 Repo: `~/dev/hyperliquid`
 Ruby: always use `RBENV_VERSION=3.4.8`
 
-## Step 1: Confirm intent
+## Operating principles (bake these in — do not ask Carter to repeat them)
 
-Ask Carter: "Ready to release. What version bump — patch, minor, or major?" Wait for answer before proceeding.
+- **All tests run.** Unit + rubocop + integration. Don't skip any step.
+- **Never write off a test failure silently.** If anything fails — unit, integration, or CI — stop, investigate (read error, check git log for whether the affected code changed in this release window, check `~/agent-state/hyperliquid-sdk.md` "Known Pre-existing Integration Test Failures"), then present the diagnosis to Carter and ask before proceeding. Do not assume "environmental" or "flaky" without evidence.
+- **Recommend the version bump — don't ask for it cold.** Before anything else, gather the change summary from git log and pitch major/minor/patch with reasoning. Let Carter confirm or override.
+- **Verify CI, don't just trigger it.** After pushing tag + main, watch the `Ruby` and `GitHub Release` workflows to completion. Green on both is a release requirement.
 
-## Step 2: Ensure dev is clean and up to date
+## Step 1: Gather changes and recommend a version bump
 
 ```bash
 cd ~/dev/hyperliquid
 git checkout dev
 git pull origin dev
-git status
+git status     # must be clean; if not, stop and ask
+git tag --sort=-v:refname | head -1         # current/previous tag
+git log <previous-tag>..HEAD --stat --no-merges
 ```
 
-There must be no uncommitted changes. If there are, stop and ask Carter how to handle them.
+Read `lib/hyperliquid/version.rb` for the current version.
 
-## Step 3: Run full unit test suite on dev
+Summarize the changes for Carter in this shape:
+
+- New public API (list added classes/methods)
+- Bugfixes
+- Breaking changes (if any)
+- Tooling / scripts (not shipped in the gem)
+
+Then recommend **major / minor / patch** with one-line SemVer reasoning:
+- **major**: public API removed or signature-breaking changes
+- **minor**: new public API added, no breakage
+- **patch**: bugfixes + internal refactors only
+
+Wait for Carter's confirmation (or override) before continuing.
+
+## Step 2: Run full unit test suite on dev
 
 ```bash
 cd ~/dev/hyperliquid
 RBENV_VERSION=3.4.8 bundle exec rake
 ```
 
-All tests must pass. Fix failures or abort — do not release with failing unit tests.
+All specs + RuboCop must pass. If anything fails, stop and surface to Carter — do not release with failing unit tests.
 
-## Step 4: Run integration tests on dev
+## Step 3: Run integration tests on dev
 
 ```bash
 cd ~/dev/hyperliquid
@@ -40,9 +59,13 @@ source ~/.config/hyperliquid-agent/env
 RBENV_VERSION=3.4.8 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY ruby scripts/test_automated.rb
 ```
 
-All integration tests must pass. Investigate failures before proceeding.
+If any integration test fails:
+1. Re-run the failing test in isolation to capture its exact error.
+2. Cross-reference `~/agent-state/hyperliquid-sdk.md` → "Known Pre-existing Integration Test Failures" table.
+3. Check `git log <previous-tag>..HEAD -- <relevant lib file>` to see whether this release touched the affected code.
+4. Present diagnosis to Carter: what failed, why you think it's not a regression (or that it is), and ask whether to waive or abort. **Never waive unilaterally.**
 
-## Step 5: Merge dev → main
+## Step 4: Merge dev → main
 
 ```bash
 cd ~/dev/hyperliquid
@@ -53,29 +76,42 @@ git merge --no-ff dev -m "Merge dev into main for release"
 
 If there are conflicts, resolve them and confirm with Carter before continuing.
 
-## Step 6: Bump version
-
-Read `lib/hyperliquid/version.rb` to see the current version. Calculate the new version based on Carter's answer in Step 1.
+## Step 5: Bump version
 
 Edit `lib/hyperliquid/version.rb` to set the new version string.
 
+## Step 6: Regenerate Gemfile.lock
+
+**Critical — don't skip.** `lib/hyperliquid/version.rb` feeds the `hyperliquid` gemspec, and `Gemfile.lock` pins that version. Bumping the version without regenerating the lockfile will cause CI (`Ruby` workflow) to fail with:
+
+> The gemspecs for path gems changed, but the lockfile can't be updated because frozen mode is set
+
+```bash
+cd ~/dev/hyperliquid
+RBENV_VERSION=3.4.8 bundle install
+```
+
+Confirm the lockfile now shows `hyperliquid (X.Y.Z)` matching the new version.
+
 ## Step 7: Update CHANGELOG.md
 
-Read the CHANGELOG.md. Prepend a new section at the top (below the title line) in the format:
+Prepend a new section below the title line in this format:
 
 ```
 ## [X.Y.Z] - YYYY-MM-DD
 
-- <summary of changes since last release, drawn from git log>
+### <Section heading — e.g. "New endpoints", "Fixes", "Breaking">
+
+- <human-readable bullet, not raw commit message>
 ```
 
-Use `git log <previous-tag>..HEAD --oneline` to get the list of commits. Write human-readable bullet points, not raw commit messages.
+Use the change summary from Step 1 — don't re-derive from git log.
 
-## Step 8: Commit version bump
+## Step 8: Commit version bump + lockfile
 
 ```bash
 cd ~/dev/hyperliquid
-git add lib/hyperliquid/version.rb CHANGELOG.md
+git add lib/hyperliquid/version.rb Gemfile.lock CHANGELOG.md
 git commit -m "version to X.Y.Z"
 ```
 
@@ -96,25 +132,49 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-This triggers the GitHub Actions release workflow, which creates a GitHub Release from the CHANGELOG.
+The tag triggers the `GitHub Release` workflow; the main push triggers the `Ruby` workflow.
 
-## Step 11: Push gem to RubyGems (requires MFA)
+## Step 11: Verify GitHub Actions workflows succeed
+
+```bash
+cd ~/dev/hyperliquid
+gh run list --branch main --limit 3
+gh run list --workflow "GitHub Release" --limit 3
+```
+
+Identify the two new runs (one `Ruby` on main, one `GitHub Release` on vX.Y.Z). Watch each to completion:
+
+```bash
+gh run watch <run-id> --exit-status
+```
+
+**Both must finish `success`.** If either fails:
+- Read the failure log: `gh run view <run-id> --log-failed | tail -80`
+- Diagnose the root cause (don't retry blindly — Endler: never blame the computer).
+- Fix it in a follow-up commit on dev, merge to main, push. The tag stays as-is (re-tagging is destructive); the fix commit sits on top of the release commit. Re-verify the `Ruby` workflow.
+- If `GitHub Release` failed, the tag will need deleting and recreating after the fix — flag to Carter before doing that.
+
+Do not proceed to Step 12 until both workflows are green.
+
+## Step 12: Push gem to RubyGems (requires MFA)
 
 ```bash
 cd ~/dev/hyperliquid
 RBENV_VERSION=3.4.8 bundle exec rake build
 ```
 
-Then tell Carter: "Gem built. Run `gem push pkg/hyperliquid-X.Y.Z.gem` and enter your RubyGems OTP when prompted — or give me the OTP and I'll run it."
+Then tell Carter: "Gem built at `pkg/hyperliquid-X.Y.Z.gem`. Paste your RubyGems OTP and I'll push, or run `gem push` yourself."
 
 If Carter provides the OTP, run:
+
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.8 gem push pkg/hyperliquid-X.Y.Z.gem
+RBENV_VERSION=3.4.8 gem push pkg/hyperliquid-X.Y.Z.gem --otp <OTP>
 ```
-Enter the OTP when prompted.
 
-## Step 12: Sync dev with main
+If credentials are missing (`Invalid credentials / 401`), tell Carter: "No RubyGems credentials on this host. Either push from another machine or run `gem signin` here first, then give me a fresh OTP." OTPs expire in ~30s — always ask for a new one after a setup detour.
+
+## Step 13: Sync dev with main
 
 ```bash
 cd ~/dev/hyperliquid
@@ -123,12 +183,17 @@ git merge main
 git push origin dev
 ```
 
-## Step 13: Update state file
+## Step 14: Update state file
 
 Edit `~/agent-state/hyperliquid-sdk.md`:
 - Update **SDK version** to the new version.
-- Note the release date in Run History.
+- Add a row to **Run History** noting: date, scope, unit test count + rubocop status, integration pass/fail counts (and which were waived), CI status, gem push status.
 
-## Step 14: Confirm
+## Step 15: Confirm to Carter
 
-Tell Carter: "Released hyperliquid vX.Y.Z. GitHub Release created. Gem pushed to RubyGems." (or note if gem push was skipped.)
+Report in this shape:
+- Released `hyperliquid vX.Y.Z`.
+- GitHub Release: ✅ published.
+- Ruby CI on main: ✅ green.
+- RubyGems: ✅ pushed (or note if deferred).
+- State file updated.
