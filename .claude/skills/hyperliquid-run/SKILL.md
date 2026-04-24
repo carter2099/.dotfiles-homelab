@@ -117,11 +117,25 @@ Before investigating any failures, cross-reference against the **Known Pre-exist
 
 If a new failure is caused by this run's changes, fix before committing. If it's an unrelated flake, note it.
 
-## Step 8: Commit and push
+## Step 8: Sync CLAUDE.md if needed
+
+Before staging the commit, decide whether `~/dev/hyperliquid/CLAUDE.md` needs updating. CLAUDE.md is the canonical source of truth for the repo and should stay current.
+
+Update it whenever this run:
+- Bumps the SDK version (the "currently vX.Y.Z" line).
+- Adds a new pattern, transport, dependency, constant, or convention a future agent reading the repo cold would want to know (e.g. a new base URL, a new signing variant, a new test harness file).
+- Changes how something documented in CLAUDE.md actually works (architecture, request flow, signing, numeric conversion, code style, CI matrix, release flow).
+- Introduces a new gotcha worth preserving (the `dump_status` String-response guard is the canonical example).
+
+Routine additions that fit cleanly into existing patterns (one more Info method, one more Exchange action that uses the existing signer) generally do **not** need a CLAUDE.md update. Skip it rather than churn the file.
+
+If you do edit CLAUDE.md, include it in the same commit as the code change.
+
+## Step 9: Commit and push
 
 ```bash
 cd ~/dev/hyperliquid
-git add lib/hyperliquid/info.rb spec/hyperliquid/info_spec.rb  # stage specific files
+git add lib/hyperliquid/info.rb spec/hyperliquid/info_spec.rb  # stage specific files (include CLAUDE.md if updated)
 git commit -m "feat: <concise description of what was implemented>
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
@@ -130,7 +144,7 @@ git push origin dev
 
 If nothing was implemented (no gaps or scope was zero), skip the commit.
 
-## Step 9: Update state file
+## Step 10: Update state file
 
 Edit `~/agent-state/hyperliquid-sdk.md`:
 - Update **Last run** date and outcome.
@@ -138,7 +152,7 @@ Edit `~/agent-state/hyperliquid-sdk.md`:
 - Update gap statuses (🟡→✅, new gaps added, 🔧 bugs fixed, etc.).
 - Append a row to the Run History table.
 
-## Step 10: Email summary
+## Step 11: Email summary
 
 Send an email to carter2099@pm.me with subject `Hyperliquid SDK run — <date>`.
 
@@ -160,6 +174,6 @@ Email body should include:
 
 Keep it concise. Carter reads these on mobile.
 
-## Step 11: Backup state file reminder
+## Step 12: Backup state file reminder
 
 The state file is backed up by homelab-backup nightly. No action needed — just don't delete it.

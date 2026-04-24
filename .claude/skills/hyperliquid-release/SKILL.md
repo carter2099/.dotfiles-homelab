@@ -107,15 +107,28 @@ Prepend a new section below the title line in this format:
 
 Use the change summary from Step 1 — don't re-derive from git log.
 
-## Step 8: Commit version bump + lockfile
+## Step 8: Sync CLAUDE.md if needed
+
+`~/dev/hyperliquid/CLAUDE.md` is the canonical source of truth for the repo and should stay current. Right after a `dev → main` merge is a natural checkpoint — review it against what just landed across this release window.
+
+Update CLAUDE.md whenever this release:
+- Adds a new pattern, transport, dependency, constant, or convention a future agent reading the repo cold would want to know (new base URL, new signing variant, new test harness file, etc.).
+- Changes how something documented in CLAUDE.md actually works (architecture, request flow, signing, numeric conversion, code style, CI, release flow).
+- Introduces a new gotcha worth preserving.
+
+Routine additions that fit cleanly into existing patterns (more Info methods, more Exchange actions using the existing signer) generally do **not** need a CLAUDE.md update. Skip rather than churn the file.
+
+If you do edit CLAUDE.md, include it in the next commit (Step 9) — don't commit it separately.
+
+## Step 9: Commit version bump + lockfile
 
 ```bash
 cd ~/dev/hyperliquid
-git add lib/hyperliquid/version.rb Gemfile.lock CHANGELOG.md
+git add lib/hyperliquid/version.rb Gemfile.lock CHANGELOG.md   # add CLAUDE.md too if updated in Step 8
 git commit -m "version to X.Y.Z"
 ```
 
-## Step 9: Run tests one final time on main
+## Step 10: Run tests one final time on main
 
 ```bash
 RBENV_VERSION=3.4.8 bundle exec rake
@@ -123,7 +136,7 @@ RBENV_VERSION=3.4.8 bundle exec rake
 
 Must pass. If anything broke in the merge, fix it now.
 
-## Step 10: Push main and create tag
+## Step 11: Push main and create tag
 
 ```bash
 cd ~/dev/hyperliquid
@@ -134,7 +147,7 @@ git push origin vX.Y.Z
 
 The tag triggers the `GitHub Release` workflow; the main push triggers the `Ruby` workflow.
 
-## Step 11: Verify GitHub Actions workflows succeed
+## Step 12: Verify GitHub Actions workflows succeed
 
 ```bash
 cd ~/dev/hyperliquid
@@ -154,9 +167,9 @@ gh run watch <run-id> --exit-status
 - Fix it in a follow-up commit on dev, merge to main, push. The tag stays as-is (re-tagging is destructive); the fix commit sits on top of the release commit. Re-verify the `Ruby` workflow.
 - If `GitHub Release` failed, the tag will need deleting and recreating after the fix — flag to Carter before doing that.
 
-Do not proceed to Step 12 until both workflows are green.
+Do not proceed to Step 13 until both workflows are green.
 
-## Step 12: Push gem to RubyGems (requires MFA)
+## Step 13: Push gem to RubyGems (requires MFA)
 
 ```bash
 cd ~/dev/hyperliquid
@@ -174,7 +187,7 @@ RBENV_VERSION=3.4.8 gem push pkg/hyperliquid-X.Y.Z.gem --otp <OTP>
 
 If credentials are missing (`Invalid credentials / 401`), tell Carter: "No RubyGems credentials on this host. Either push from another machine or run `gem signin` here first, then give me a fresh OTP." OTPs expire in ~30s — always ask for a new one after a setup detour.
 
-## Step 13: Sync dev with main
+## Step 14: Sync dev with main
 
 ```bash
 cd ~/dev/hyperliquid
@@ -183,13 +196,13 @@ git merge main
 git push origin dev
 ```
 
-## Step 14: Update state file
+## Step 15: Update state file
 
 Edit `~/agent-state/hyperliquid-sdk.md`:
 - Update **SDK version** to the new version.
 - Add a row to **Run History** noting: date, scope, unit test count + rubocop status, integration pass/fail counts (and which were waived), CI status, gem push status.
 
-## Step 15: Confirm to Carter
+## Step 16: Confirm to Carter
 
 Report in this shape:
 - Released `hyperliquid vX.Y.Z`.
