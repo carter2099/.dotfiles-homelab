@@ -1,6 +1,6 @@
 ---
 name: hyperliquid-run
-description: Autonomous 6h development run for the Hyperliquid Ruby SDK — reads state file, scans upstream refs for API gaps, implements a fixed scope of changes with tests, runs test suite, commits to dev branch, updates state, and emails a progress summary.
+description: Autonomous daily development run for the Hyperliquid Ruby SDK — reads state file, scans upstream refs for API gaps, implements a fixed scope of changes with tests, runs test suite, commits to dev branch, updates state, and emails a progress summary.
 ---
 
 # hyperliquid-run

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Spawns a headless Claude agent to run the Hyperliquid Ruby SDK maintenance cycle.
-# Scheduled via systemd timer (hyperliquid-sdk.timer) every 6 hours.
+# Scheduled via systemd timer (hyperliquid-sdk.timer) daily at 4am.
 # Model + effortLevel come from ~/.claude/settings.json (claude-opus-4-7, xhigh).
 
 set -euo pipefail

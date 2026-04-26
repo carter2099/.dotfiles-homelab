@@ -1,8 +1,8 @@
 [Unit]
-Description=Run Hyperliquid SDK maintenance every 6 hours
+Description=Run Hyperliquid SDK maintenance daily at 4am
 
 [Timer]
-OnCalendar=*-*-* 00,06,12,18:00:00
+OnCalendar=*-*-* 04:00:00
 Persistent=true
 
 [Install]
