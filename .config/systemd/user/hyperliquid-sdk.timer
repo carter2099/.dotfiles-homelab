@@ -2,7 +2,7 @@
 Description=Run Hyperliquid SDK maintenance daily at 4am
 
 [Timer]
-OnCalendar=*-*-* 04:00:00
+OnCalendar=*-*-* 04:00:00 America/New_York
 Persistent=true
 
 [Install]
