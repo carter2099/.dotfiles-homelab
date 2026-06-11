@@ -1,5 +1,5 @@
 [Unit]
-Description=Hyperliquid Ruby SDK autonomous maintenance run via Claude agent
+Description=Hyperliquid Ruby SDK autonomous maintenance run via opencode (Qwen 3.7 Max)
 
 [Service]
 Type=oneshot

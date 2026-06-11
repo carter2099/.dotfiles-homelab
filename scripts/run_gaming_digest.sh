@@ -28,7 +28,6 @@ Fetch reputable gaming news sources and follow links to specific articles. Start
 - https://www.polygon.com/
 - https://www.eurogamer.net/
 - https://www.pcgamer.com/
-- https://www.gamespot.com/news/
 
 Cover these angles:
 - Major game releases, announcements, and trailers

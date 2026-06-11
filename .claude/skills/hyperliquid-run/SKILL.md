@@ -138,7 +138,7 @@ cd ~/dev/hyperliquid
 git add lib/hyperliquid/info.rb spec/hyperliquid/info_spec.rb  # stage specific files (include CLAUDE.md if updated)
 git commit -m "feat: <concise description of what was implemented>
 
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+Co-Authored-By: hyperliquid-run agent <noreply@carter2099.com>"
 git push origin dev
 ```
 
@@ -156,13 +156,14 @@ Edit `~/agent-state/hyperliquid-sdk.md`:
 
 Send an email to carter2099@pm.me with subject `Hyperliquid SDK run — <date>`.
 
-Use the `send_digest.py` script pattern:
+First write the HTML email body to `/home/carter/agent-state/.hyperliquid_email.html` using your Write tool (opencode blocks writes outside `/home/carter`), then send it with `--body-file` and delete it afterward:
 
 ```bash
 python3 ~/scripts/send_digest.py \
   --to carter2099@pm.me \
   --subject "Hyperliquid SDK run — $(date +%Y-%m-%d)" \
-  --body "<html body>"
+  --body-file /home/carter/agent-state/.hyperliquid_email.html
+rm /home/carter/agent-state/.hyperliquid_email.html
 ```
 
 Email body should include:
