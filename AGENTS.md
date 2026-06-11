@@ -251,6 +251,16 @@ Never `sudo reboot` directly. Use the `homelab-reboot` skill, which:
 
 This guarantees the next session has context for what happened. If the skill isn't available for some reason, do the two steps manually in that order.
 
+### Startup check (cross-reboot continuity)
+
+At the start of every interactive session, check `~/agent-state/pending.md`. If it exists:
+1. Read it.
+2. If `mtime` is within the last 30 minutes, summarize its contents to the user up front ("Last reboot was at X for reason Y; in-flight task was Z").
+3. Delete the file (`rm ~/agent-state/pending.md`) once acknowledged so it doesn't re-surface next session.
+4. If mtime is older than 30 min, the file is stale — surface it briefly and delete.
+
+This is the mechanism by which tasks survive reboots. It is the *only* expectation of cross-reboot continuity.
+
 ## Environment
 
 - **Shell:** zsh with vim keybindings
