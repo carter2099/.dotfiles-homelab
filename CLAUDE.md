@@ -26,7 +26,7 @@ Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/bes
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (2017 MacBook Pro, Intel i5, 8GB RAM). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server has two IP addresses (`192.168.4.92` and `192.168.4.102`) used to route different apps — both point to the same physical machine.
+Single-node homelab running on Ubuntu Server (2017 MacBook Pro, Intel i5, 16GB RAM). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server has two IP addresses (`192.168.4.92` and `192.168.4.102`) used to route different apps — both point to the same physical machine.
 
 ## Repository Structure
 
@@ -184,9 +184,18 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Logs: `journalctl --user -u dependabot-webhook -f`
 - Release: `cd ~/dev/dependabot-webhook && bash release.sh`
 
+### Open WebUI (Homelab Chat)
+- ChatGPT/Claude-style self-hosted chat UI at `https://chat.carter2099.com`. Not an agent — a general chat front-end.
+- Docker Compose in `~/open-webui/` (`ghcr.io/open-webui/open-webui:main`), bound **`127.0.0.1:48100`** (loopback-only).
+- **Backend = the OpenCode Go endpoint** (`OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1`) so chat usage rides the **flat-sub session-cap billing**, NOT `zen/v1` pay-as-you-go. The 18 Go models populate automatically; a few (e.g. `qwen3.7-max`) 401 as "not supported for format oa-compat" and are opencode-native-only — just pick another. (See the Zen-vs-Go endpoint note: same account key, the base URL picks product/billing.)
+- Secrets (`OPENAI_API_KEY` = the Go key, `WEBUI_SECRET_KEY`) in gitignored `~/open-webui/.env` (600). Compose + `up.sh` are tracked; `.env` is not.
+- **Routing: direct-tunnel pattern** (like `opencode-homelab`/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
+- **Auth: two layers.** CF Access (edge SSO, manually configured in Zero Trust) + Open WebUI's own login (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`). Admin `carter2099@pm.me`, created over loopback so there was never an open-signup window.
+- Manage: `cd ~/open-webui && bash up.sh` (pull + restart); `docker compose -f ~/open-webui/docker-compose.yml logs -f`.
+
 ### Cloudflare API Access
 - Account-owned API token at `~/.config/cloudflare/api-token` (gitignored, 600 perms)
-- Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone)
+- Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone). **No Zero Trust / Access scope** — so Access apps/policies (the SSO gate in front of tunneled hostnames) must be configured **manually in the Zero Trust dashboard**; the API token returns 403 on `/access/apps`. To automate Access too, add "Access: Apps and Policies: Edit" (Account) to the token.
 - Supporting IDs in `~/.config/cloudflare/`: `account-id`, `zone-id`, `homelab-tunnel-id`
 - Env vars (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_HOMELAB_TUNNEL_ID`) exported from `.zshrc`
 - To add a new public hostname to the homelab tunnel: PUT `/accounts/{id}/cfd_tunnel/{tunnel_id}/configurations` with updated ingress array, then POST DNS CNAME to `/zones/{zone_id}/dns_records`
