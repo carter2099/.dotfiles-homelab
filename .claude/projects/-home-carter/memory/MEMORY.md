@@ -7,3 +7,4 @@
 - [Email digest archives at ~/digests/](digest_archives.md) — Each daily digest saves a summary to `~/digests/<topic>/YYYY-MM-DD.md`; read these before asking Carter to re-describe digest content.
 - [Always use /create-skill to make new skills](feedback_create_skill.md) — Writing skill files directly skips dotfiles tracking; use the skill to bake in the commit step.
 - [Always commit and push before deploying](feedback_commit_before_deploy.md) — Never run release.sh off a dirty working tree; deploys must match origin/main.
+- [Migrating homelab agents to opencode](opencode-agent-migration.md) — Provider-agnostic move off Claude for automation; Go sub, M3 digests / Qwen coding; digests done 2026-06-11, remote-control + hyperliquid/dependabot pending.
