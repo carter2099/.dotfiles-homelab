@@ -9,11 +9,11 @@ Deploy one of the self-hosted apps via its standard `release.sh` → `up.sh` pip
 
 ## Required input
 
-- **app** (string): one of `blog`, `hub`, `stickies`, `delta_neutral`. (Do not deploy `tbitt` — it's deprecated per `CLAUDE.md`.)
+- **app** (string): one of `blog`, `hub`, `stickies`, `delta_neutral`. (Do not deploy `tbitt` — it's deprecated per `AGENTS.md`.)
 
 ## Pre-flight: is a deploy actually warranted?
 
-**Before running anything**, if the user's motivation is "the site looks wrong" / "feature X is missing" / "shows old UI", do *not* assume a redeploy is the fix. Per CLAUDE.md's "Missing feature symptom" section, the near-universal cause is a Cloudflare/browser cache hit while origin is down — and a redeploy *extends* the cache-hit window.
+**Before running anything**, if the user's motivation is "the site looks wrong" / "feature X is missing" / "shows old UI", do *not* assume a redeploy is the fix. Per AGENTS.md's "Missing feature symptom" section, the near-universal cause is a Cloudflare/browser cache hit while origin is down — and a redeploy *extends* the cache-hit window.
 
 Run this check first:
 
@@ -39,7 +39,7 @@ curl -s http://localhost:<port>/ | grep <feature>  # does origin have the featur
 
 1. **cd to the app.** `cd ~/<app>`.
 2. **Run release.** `bash release.sh` and stream output. This does: `git pull`, `docker compose down`, `docker image rm`, then invokes `../up.sh` or local `up.sh`.
-3. **If `up.sh` fails with "address already in use":** apply the orphaned-docker-proxy recipe from `CLAUDE.md`:
+3. **If `up.sh` fails with "address already in use":** apply the orphaned-docker-proxy recipe from `AGENTS.md`:
    - `docker ps -a` — confirm the container shows `Exited`.
    - `ps aux | grep docker-proxy` — find proxy PIDs holding the stuck port.
    - `sudo kill <pids>` — free the port.
@@ -51,7 +51,7 @@ curl -s http://localhost:<port>/ | grep <feature>  # does origin have the featur
 
 ## Known post-deploy failure mode: exit 255 within ~10 min
 
-Containers on this host occasionally exit 255 shortly after a successful deploy — no stack trace, clean logs, typical of OOM or SIGKILL. See CLAUDE.md's "Exit 255 is a known intermittent" section. If a user reports issues in the window just after deploy:
+Containers on this host occasionally exit 255 shortly after a successful deploy — no stack trace, clean logs, typical of OOM or SIGKILL. See AGENTS.md's "Exit 255 is a known intermittent" section. If a user reports issues in the window just after deploy:
 
 1. `docker ps -a --filter name=<app>` — is it Exited?
 2. `docker inspect <container> --format '{{.State.OOMKilled}}'` — was it OOM?

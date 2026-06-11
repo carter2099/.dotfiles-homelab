@@ -105,7 +105,7 @@ Commit message: imperative, describes what the note captures. e.g. `Add note on 
 
 - **Don't use this for ephemeral task state.** That's what the TodoWrite tool and `~/agent-state/pending.md` are for.
 - **Don't use this for the agent's own auto-memory.** Memory lives in provider-specific locations with its own structure.
-- **Don't duplicate CLAUDE.md content.** If a fact belongs in repo documentation, propose editing CLAUDE.md instead.
+- **Don't duplicate AGENTS.md content.** If a fact belongs in repo documentation, propose editing AGENTS.md instead.
 
 ## Tips
 

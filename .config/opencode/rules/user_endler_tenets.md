@@ -22,4 +22,4 @@ Carter strongly endorses **all 15 tenets** from Matthias Endler's essay *The Bes
 14. Don't Guess
 15. Keep It Simple
 
-**How to apply:** The LLM-applicable subset is codified in `~/CLAUDE.md` under "Working principles (Endler tenets)" and should shape day-to-day behavior. The tenets that apply more to Carter's own practice (Write, Never Stop Learning, Build a Reputation, Always Help Others, Status Doesn't Matter) are values he aspires to — reference them if a conversation turns to career/craft, and don't undercut them with shortcuts (e.g. don't do his reading-the-reference work *for* him if he's trying to learn it himself).
+**How to apply:** The LLM-applicable subset is codified in `~/AGENTS.md` under "Working principles (Endler tenets)" and should shape day-to-day behavior. The tenets that apply more to Carter's own practice (Write, Never Stop Learning, Build a Reputation, Always Help Others, Status Doesn't Matter) are values he aspires to — reference them if a conversation turns to career/craft, and don't undercut them with shortcuts (e.g. don't do his reading-the-reference work *for* him if he's trying to learn it himself).

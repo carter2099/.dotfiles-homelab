@@ -1,5 +1,5 @@
 - [Frame as personal assistant, not just code tool](user_assistant_framing.md) — Homelab + general personal assistant; non-code work is first-class.
-- [Endler's "Best Programmers" tenets resonate with Carter](user_endler_tenets.md) — All 15 tenets from endler.dev/2025/best-programmers/ are values Carter endorses; LLM subset in CLAUDE.md.
+- [Endler's "Best Programmers" tenets resonate with Carter](user_endler_tenets.md) — All 15 tenets from endler.dev/2025/best-programmers/ are values Carter endorses; LLM subset in AGENTS.md.
 - [Dev topology (Mac → homelab SSH)](dev_topology.md) — Carter SSHs in from a Mac; `/Users/...` paths aren't reachable here.
 - [claude-homelab agent has wide-open permissions](claude_homelab_permissions.md) — Intentional: mobile app is the only inbound, no prompt-injection surface.
 - [Do not run aa-remove-unknown](feedback_no_aa_remove_unknown.md) — Removes snap Docker's AppArmor profiles, breaking Docker entirely.

@@ -36,7 +36,7 @@ Safely reboot the homelab host. The only supported way for this agent to reboot 
 
 3. **Confirm with the user.** Before issuing the reboot, show them the state file contents and ask for explicit confirmation. This is a destructive action — do not skip confirmation, even if the user seems to have already said yes, unless they explicitly said something like "reboot now, no confirmation".
 
-4. **Reboot.** Run `sudo systemctl reboot`. The session will drop immediately. The systemd unit `opencode-homelab.service` will come back online automatically once the host is back. When the user opens a new session, the startup-check in `CLAUDE.md` will surface the state file.
+4. **Reboot.** Run `sudo systemctl reboot`. The session will drop immediately. The systemd unit `opencode-homelab.service` will come back online automatically once the host is back. When the user opens a new session, the startup-check in `AGENTS.md` will surface the state file.
 
 ## Safety notes
 

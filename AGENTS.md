@@ -1,17 +1,12 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI agents (opencode, Claude, etc.) when working with code in this repository.
 
 **Maintenance:** Keep this file up to date. When deploying a new app, adding a service, changing ports/IPs, or making any structural changes to the homelab, update the relevant sections here as part of that work.
 
-**Memory backup:** Claude's auto-memory files live in `~/.claude/projects/-home-carter/memory/`. They are tracked by the dotfiles bare repo and backed up to GitHub. Whenever a new memory file is written, run:
-```bash
-dotfiles add .claude/projects/-home-carter/memory/<new-file>.md && dotfiles commit -m "memory: add <name>" && dotfiles push
-```
-
 ## Working principles (Endler tenets)
 
-Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/best-programmers/). The subset below is the part that applies directly to an LLM assistant and should shape every session. Full list — including the ones aimed at Carter's own practice — is in auto-memory (`user_endler_tenets.md`).
+Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/best-programmers/). The subset below is the part that applies directly to an LLM assistant and should shape every session.
 
 - **Read the reference.** Prefer official docs, man pages, and the actual source over recall from training data. When something in this repo is in question, read the file. Training-data recall about APIs, flags, or versions is frequently stale — verify.
 - **Read the error message.** Parse errors fully before reacting. The message usually names the cause; skimming past it and guessing wastes Carter's time.
@@ -43,7 +38,7 @@ This is the home directory, managed as a bare git repo for dotfiles:
 - `build/` - Source builds (neovim)
 - `dev/` - Scratch space for cloning GitHub repos, running tests, and doing development work
 - `scripts/` - Digest run scripts (`run_<topic>_digest.sh`, `send_digest.py`)
-- `notes/` - Claude-maintained markdown knowledge vault
+- `notes/` - Agent-maintained markdown knowledge vault
 - `digests/` - Daily digest archives (`<topic>/YYYY-MM-DD.md`)
 - `agent-state/` - Cross-reboot task persistence (`pending.md`)
 - `backups/` - Local backup archives (written by homelab-backup service)
@@ -177,8 +172,8 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 ### Dependabot Webhook (Go)
 - Always-on systemd user service (`dependabot-webhook.service`) listening on `localhost:9099`
 - Receives GitHub `pull_request` webhooks via Cloudflare tunnel at `hooks.carter2099.com/webhook`
-- Verifies HMAC-SHA256 signature, then spawns a sandboxed **opencode agent (Qwen 3.7 Max)** to handle bundler bumps (migrated off Claude 2026-06-11)
-- Agent runs with a narrow permission sandbox (`~/.config/dependabot-webhook/opencode.json`, pointed to via the `OPENCODE_CONFIG` env var) — a default-deny bash floor + a git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified that headless `opencode run` enforces these deny rules (it drops the bash tool entirely on a full deny, and blocks non-allowlisted commands incl. non-`main` git push). The old Claude allowlist (`~/.claude/dependabot-agent-settings.json`) is the translation source, now unused.
+- Verifies HMAC-SHA256 signature, then spawns a sandboxed **opencode agent (Qwen 3.7 Max)** to handle bundler bumps
+- Agent runs with a narrow permission sandbox (`~/.config/dependabot-webhook/opencode.json`, pointed to via the `OPENCODE_CONFIG` env var) — a default-deny bash floor + a git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified that headless `opencode run` enforces these deny rules (it drops the bash tool entirely on a full deny, and blocks non-allowlisted commands incl. non-`main` git push).
 - 90-second coalesce window so a burst of PRs is handled in one agent run
 - Source: `~/dev/dependabot-webhook/`; config (with webhook secret): `~/.config/dependabot-webhook/env`
 - Logs: `journalctl --user -u dependabot-webhook -f`
@@ -202,7 +197,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ## Email Digests
 
-Four daily HTML email digests are scheduled via systemd user timers. As of 2026-06-11 each digest runs a **headless opencode agent on the OpenCode Go subscription, pinned to MiniMax M3** (`opencode-go/minimax-m3`) — migrated off Claude to avoid vendor lock-in. The agent researches via opencode's built-in **WebFetch** (there is *no* WebSearch tool in opencode), fills the shared `~/digests/template.html`, emails via `send_digest.py`, and writes a dedup/continuity summary to `~/digests/<topic>/`.
+Four daily HTML email digests are scheduled via systemd user timers. Each digest runs a **headless opencode agent on the OpenCode Go subscription, pinned to MiniMax M3** (`opencode-go/minimax-m3`). The agent researches via opencode's built-in **WebFetch** (there is *no* WebSearch tool in opencode), fills the shared `~/digests/template.html`, emails via `send_digest.py`, and writes a dedup/continuity summary to `~/digests/<topic>/`.
 
 | Timer | Fires (UTC) | Topic |
 |---|---|---|
@@ -213,46 +208,27 @@ Four daily HTML email digests are scheduled via systemd user timers. As of 2026-
 
 Service + timer units live in `~/.config/systemd/user/<name>.{service,timer}`; the actual run scripts are `~/scripts/run_<name>_digest.sh`. Manage with `systemctl --user list-timers`, `systemctl --user status <name>.timer`, `journalctl --user -u <name>.service`.
 
-Each script ends with `opencode run -m opencode-go/minimax-m3 "$PROMPT" < /dev/null`. **Headless opencode gotchas (learned the hard way):** (1) stdin MUST be closed (`< /dev/null`) or the process hangs after finishing the task; (2) opencode auto-rejects file writes *outside the working directory* in headless mode, so all I/O — including the temp HTML — must stay under `/home/carter` (not `/tmp`); (3) `opencode run` exits 0 even when the model skipped a step, so verify artifacts (the `Sent to …` journal line + the summary `.md`), never the exit code alone. Auth is an OpenCode Go API key in `~/.local/share/opencode/auth.json`. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`. NOTE: the `email-digest` skill still scaffolds *Claude*-based digests; adapt any new digest to this opencode pattern by hand until the skill is updated.
+Each script ends with `opencode run -m opencode-go/minimax-m3 "$PROMPT" < /dev/null`. **Headless opencode gotchas (learned the hard way):** (1) stdin MUST be closed (`< /dev/null`) or the process hangs after finishing the task; (2) opencode auto-rejects file writes *outside the working directory* in headless mode, so all I/O — including the temp HTML — must stay under `/home/carter` (not `/tmp`); (3) `opencode run` exits 0 even when the model skipped a step, so verify artifacts (the `Sent to …` journal line + the summary `.md`), never the exit code alone. Auth is an OpenCode Go API key in `~/.local/share/opencode/auth.json`. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`.
 
 Carter often references these by topic when chatting ("I saw something in the agentic digest about X"). When he does, note-taking into `~/notes/` is the likely follow-up.
 
 ## Remote Agent Operations
 
-This homelab runs a **persistent Claude Code agent** accessible from the Claude mobile app. It is a `claude remote-control` process in server mode, running as a systemd user service (`claude-homelab.service`) under the `carter` user with `loginctl enable-linger` so it survives reboots. Authenticated via claude.ai OAuth (Pro plan). The mobile app's Code tab lists it as `homelab`; tapping spawns a session that executes commands on this host.
-
-Permissions are intentionally wide-open (`Bash(*)` in `.claude/settings.local.json`, `NOPASSWD: ALL` in `/etc/sudoers.d/claude-homelab`) because the only inbound path is the mobile app — no email/SMS/webhook ingress, no prompt-injection surface. The `dependabot-webhook` service is a separate, narrowly-sandboxed agent and does NOT use the daemon's permissions.
-
-- **Service unit:** `~/.config/systemd/user/claude-homelab.service`
-- **Logs:** `journalctl --user -u claude-homelab -f`
-- **Restart self:** `systemctl --user restart claude-homelab` (disconnects the current mobile session; a new one will appear after ~10s)
-
-### opencode web remote agent (provider-neutral, parallel to the Claude daemon)
-
-As part of the off-Claude migration, a second always-on remote agent runs `opencode web` so the homelab can be driven from any browser (the opencode equivalent of the Claude mobile app). It is **additive** — the Claude daemon above still runs; both coexist on different ports. Like the Claude daemon it is **intentionally full-privilege** (no command denylist, no `NoNewPrivileges`); the trust anchor is just shifted from Anthropic OAuth to **Cloudflare Access** instead.
+This homelab runs an **always-on opencode web agent** accessible from any browser at `https://opencode.carter2099.com`. It runs `opencode web` as a systemd user service (`opencode-homelab.service`) under the `carter` user with `loginctl enable-linger` so it survives reboots. It is **intentionally full-privilege** (no command denylist, no `NoNewPrivileges`); the trust anchor is **Cloudflare Access**.
 
 - **Service unit:** `~/.config/systemd/user/opencode-homelab.service` → `opencode web --hostname 127.0.0.1 --port 48099`. **Loopback-only bind on purpose** — the sole ingress is the CF tunnel; it is NOT reachable on the LAN (so there's no path that bypasses Cloudflare Access).
 - **Access URL:** `https://opencode.carter2099.com` (browser → CF Access SSO → opencode UI).
 - **Two independent credentials (defense in depth):**
   1. **Cloudflare Access** (identity gate at the CF edge) — unauthenticated requests get a 302 to `carter2099.cloudflareaccess.com` and never reach the host. Policy is managed in the CF Zero Trust dashboard.
-  2. **`OPENCODE_SERVER_PASSWORD`** — opencode's own HTTP basic-auth, enforced server-side (401 without). Stored in `~/.config/opencode-homelab/env` (gitignored, 600). **Never commit this file.** ⚠️ The basic-auth **username MUST be `opencode`** (literal) — opencode's API rejects every other username even with the right password; the password is the `OPENCODE_SERVER_PASSWORD` value.
+  2. **`OPENCODE_SERVER_PASSWORD`** — opencode's own HTTP basic-auth, enforced server-side (401 without). Stored in `~/.config/opencode-homelab/env` (gitignored, 600). **Never commit this file.** The basic-auth **username MUST be `opencode`** (literal) — opencode's API rejects every other username even with the right password; the password is the `OPENCODE_SERVER_PASSWORD` value.
 - **Routing:** uses the **direct-tunnel (webhook) pattern, NOT Traefik** — deliberately, so the app stays off the LAN. Tunnel ingress `opencode.carter2099.com → http://localhost:48099` (cloudflared runs on the host and reaches loopback) → the `opencode web` process. No k3s manifest, no ExternalService/Endpoints, no Traefik hop. DNS: proxied CNAME `opencode` → `<tunnel-id>.cfargotunnel.com`. (This mirrors how `hooks.carter2099.com → localhost:9099` works for the dependabot webhook.)
 - **Wart:** `opencode web` tries to `xdg-open` a browser at startup (ENOENT on this headless host) — **non-fatal**, the server runs fine; it's just noise in the journal.
 - **Logs:** `journalctl --user -u opencode-homelab -f`
 - **Restart:** `systemctl --user restart opencode-homelab`
 
-### Which agent am I? (read this first)
-
-There are two possible identities for a Claude session reading this file:
-
-1. **The mobile daemon** — the persistent `claude-homelab.service` session driven from the mobile app. Environment variable `CLAUDE_HOMELAB_DAEMON=1` is set. Do the **Startup check** and **Reboot protocol** below. When asked to "debug the daemon," that's self-diagnosis — you can still check your own logs and restart yourself, but be aware `systemctl --user restart claude-homelab` will kill your current session.
-2. **An interactive SSH agent** — started by the user from a terminal (e.g. `ssh tp-server` → `claude`). `CLAUDE_HOMELAB_DAEMON` is unset. Do **not** do the startup check (the `pending.md` file is the daemon's recovery mechanism; an SSH agent surfacing it confuses the handoff). Your job when debugging is observing and fixing the daemon via the commands in "Debugging from an interactive SSH session" below.
-
-Check with `echo "${CLAUDE_HOMELAB_DAEMON:-unset}"` if unsure. If in doubt, assume interactive SSH — the daemon is the less common case.
-
 ### Debugging from an interactive SSH session
 
-If the mobile agent is misbehaving, unreachable, or crashlooping, an interactive agent SSH'd into the box diagnoses it. **First thing every SSH session should do** before `systemctl --user ...` commands:
+If the opencode web agent is misbehaving or unreachable, an interactive agent SSH'd into the box diagnoses it. **First thing every SSH session should do** before `systemctl --user ...` commands:
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)   # required for systemctl --user to reach the user bus
@@ -261,32 +237,11 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)   # required for systemctl --user to r
 Standard diagnosis sequence:
 
 ```bash
-systemctl --user status claude-homelab --no-pager -l     # running? crashlooping?
-journalctl --user -u claude-homelab -n 100 --no-pager    # why it failed
-ps -ef | grep -E 'claude (remote-control|--print)'       # parent + per-session SDK children
-ls -la ~/agent-state/                                    # pending reboot context, etc
-cat ~/.claude/settings.json                              # model + effort
-cat ~/.claude/settings.local.json                        # permissions
-claude auth status                                       # OAuth still valid?
+systemctl --user status opencode-homelab --no-pager -l     # running? crashlooping?
+journalctl --user -u opencode-homelab -n 100 --no-pager    # why it failed
+ls -la ~/agent-state/                                      # pending reboot context, etc
+cat ~/.config/opencode/opencode.jsonc                      # config
 ```
-
-**Known crashloop causes** (seen during initial bring-up — check logs for the exact error):
-- `Workspace not trusted` → `projects./home/carter.hasTrustDialogAccepted` in `~/.claude.json` is false. Either run `claude` once in `~` interactively to accept, or set the bit directly with a small Python edit.
-- `Enable Remote Control? (y/n)` then exit 0 → one-time consent not yet accepted. Run `claude remote-control --name homelab --spawn same-dir` once interactively, answer `y`, Ctrl+C, then restart the service.
-- `Unknown argument: --model` / `--effort` → `remote-control` subcommand doesn't accept those flags. Model + effort come from `~/.claude/settings.json` only; don't add them to ExecStart.
-- `Failed to connect to bus: No medium found` → the interactive shell is missing `XDG_RUNTIME_DIR`. Export it (see above).
-
-Flags the `remote-control` subcommand actually supports: `--name`, `--spawn {same-dir|worktree|session}`, `--capacity <N>`, `--permission-mode {acceptEdits|auto|bypassPermissions|default|dontAsk|plan}`, `--verbose`, `--debug-file <path>`.
-
-### Startup check (daemon only — do this first in every new session)
-
-**Applies only if `CLAUDE_HOMELAB_DAEMON=1` (see "Which agent am I?" above).** At the start of every new daemon session, check `~/agent-state/pending.md`. If it exists:
-1. Read it.
-2. If `mtime` is within the last 30 minutes, summarize its contents to the user up front ("Last reboot was at X for reason Y; in-flight task was Z").
-3. Delete the file (`rm ~/agent-state/pending.md`) once acknowledged so it doesn't re-surface next session.
-4. If mtime is older than 30 min, the file is stale — surface it briefly and delete.
-
-This is the mechanism by which tasks survive reboots. It is the *only* expectation of cross-reboot continuity.
 
 ### Reboot protocol
 

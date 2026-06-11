@@ -4,7 +4,7 @@ description: Each daily email digest saves a markdown summary at ~/digests/<topi
 type: reference
 originSessionId: a329b227-d261-4645-9ad4-83798b131d25
 ---
-Each daily email digest (see `email-digest` skill and the four systemd user timers documented in `~/CLAUDE.md`) writes a concise markdown summary of what it sent to `~/digests/<topic>/YYYY-MM-DD.md` at the end of each run. The scripts auto-delete summaries older than 7 days.
+Each daily email digest (see `email-digest` skill and the four systemd user timers documented in `~/AGENTS.md`) writes a concise markdown summary of what it sent to `~/digests/<topic>/YYYY-MM-DD.md` at the end of each run. The scripts auto-delete summaries older than 7 days.
 
 **Known topic directories:**
 - `~/digests/agentic-platform/` — agentic-digest (16:00 UTC)

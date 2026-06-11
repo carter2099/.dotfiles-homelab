@@ -22,7 +22,7 @@ cd ~/dev/<repo>
 git checkout main && git pull origin main
 ```
 
-Install dependencies using the project's conventions (check `AGENTS.md` or `CLAUDE.md` for the canonical command):
+Install dependencies using the project's conventions (check `AGENTS.md` for the canonical command):
 - Rails: `RBENV_VERSION=$(cat .ruby-version 2>/dev/null || echo 3.4.3) bundle install`
 - Go: `go mod download`
 - Node/React: `npm install` or `pnpm install`
@@ -31,7 +31,7 @@ Install dependencies using the project's conventions (check `AGENTS.md` or `CLAU
 
 ## Step 2: Do the work
 
-Implement the change in `~/dev/<repo>`. Read `AGENTS.md` (or `CLAUDE.md`) for code quality rules, architecture patterns, and anything project-specific before touching code.
+Implement the change in `~/dev/<repo>`. Read `AGENTS.md` for code quality rules, architecture patterns, and anything project-specific before touching code.
 
 Run tests as you go using the project's test command (canonical source: `AGENTS.md`):
 - Rails: `RBENV_VERSION=... bin/rake`
@@ -58,7 +58,7 @@ Do NOT push or release until the user explicitly approves.
 Once the user approves, release using **the project's own idioms** — do not invent a generic release process. Check in this order:
 
 1. **Project skill**: Does the repo have a skill for this? (e.g. delta_neutral has a `/release` skill). If yes, invoke it.
-2. **`AGENTS.md` / `CLAUDE.md`**: Look for a "Versioning" or "Release" section with specific instructions.
+2. **`AGENTS.md`**: Look for a "Versioning" or "Release" section with specific instructions.
 3. **`release.sh`**: Some repos have a release script — but confirm it's for the *dev* release (version bump + tag), not the deployment script.
 
 For dependency-only changes (bumps), use `/dependabot-release` instead of this skill.
