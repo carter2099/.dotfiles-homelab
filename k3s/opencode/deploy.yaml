@@ -1,0 +1,51 @@
+# service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencode-external-service
+  namespace: default
+spec:
+  ports:
+    - name: web
+      port: 48099
+      targetPort: 48099
+      protocol: TCP
+  type: ClusterIP
+
+---
+# endpoints.yaml
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: opencode-external-service
+  namespace: default
+subsets:
+  - addresses:
+      - ip: 192.168.4.92
+    ports:
+      - name: web
+        port: 48099
+        protocol: TCP
+
+---
+# ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opencode-ingress
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: opencode.carter2099.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: opencode-external-service
+                port:
+                  number: 48099

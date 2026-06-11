@@ -1,0 +1,23 @@
+[Unit]
+Description=opencode web (homelab remote agent) - full-privilege, behind Cloudflare Access + OPENCODE_SERVER_PASSWORD
+Documentation=https://opencode.ai/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/carter
+Environment=HOME=/home/carter
+# Full PATH so the agent can drive homelab ops (rbenv, fnm/node, kubectl, docker, git, etc.) - parity with the Claude daemon
+Environment=PATH=/home/carter/.opencode/bin:/home/carter/.local/bin:/home/carter/.rbenv/bin:/home/carter/.rbenv/shims:/home/carter/.fnm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# OPENCODE_SERVER_PASSWORD (HTTP basic-auth second credential, enforced server-side) lives here, gitignored 600
+EnvironmentFile=/home/carter/.config/opencode-homelab/env
+# Bind on all interfaces so the k3s Traefik (via Endpoints -> 192.168.4.92:48099) can reach it; LAN path still gated by OPENCODE_SERVER_PASSWORD
+ExecStart=/home/carter/.opencode/bin/opencode web --hostname 0.0.0.0 --port 48099
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
