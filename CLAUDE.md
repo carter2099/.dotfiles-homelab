@@ -177,8 +177,8 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 ### Dependabot Webhook (Go)
 - Always-on systemd user service (`dependabot-webhook.service`) listening on `localhost:9099`
 - Receives GitHub `pull_request` webhooks via Cloudflare tunnel at `hooks.carter2099.com/webhook`
-- Verifies HMAC-SHA256 signature, then spawns a sandboxed Claude agent to handle bundler bumps
-- Agent runs with narrow permission allowlist (`~/.claude/dependabot-agent-settings.json`) — no sudo, no docker, no deploy
+- Verifies HMAC-SHA256 signature, then spawns a sandboxed **opencode agent (Qwen 3.7 Max)** to handle bundler bumps (migrated off Claude 2026-06-11)
+- Agent runs with a narrow permission sandbox (`~/.config/dependabot-webhook/opencode.json`, pointed to via the `OPENCODE_CONFIG` env var) — a default-deny bash floor + a git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified that headless `opencode run` enforces these deny rules (it drops the bash tool entirely on a full deny, and blocks non-allowlisted commands incl. non-`main` git push). The old Claude allowlist (`~/.claude/dependabot-agent-settings.json`) is the translation source, now unused.
 - 90-second coalesce window so a burst of PRs is handled in one agent run
 - Source: `~/dev/dependabot-webhook/`; config (with webhook secret): `~/.config/dependabot-webhook/env`
 - Logs: `journalctl --user -u dependabot-webhook -f`
