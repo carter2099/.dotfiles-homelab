@@ -193,7 +193,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ## Email Digests
 
-Four daily HTML email digests are scheduled via systemd user timers. Each spawns a headless Claude agent that searches the web for recent news on its topic and emails Carter a summary.
+Four daily HTML email digests are scheduled via systemd user timers. As of 2026-06-11 each digest runs a **headless opencode agent on the OpenCode Go subscription, pinned to MiniMax M3** (`opencode-go/minimax-m3`) — migrated off Claude to avoid vendor lock-in. The agent researches via opencode's built-in **WebFetch** (there is *no* WebSearch tool in opencode), fills the shared `~/digests/template.html`, emails via `send_digest.py`, and writes a dedup/continuity summary to `~/digests/<topic>/`.
 
 | Timer | Fires (UTC) | Topic |
 |---|---|---|
@@ -202,7 +202,9 @@ Four daily HTML email digests are scheduled via systemd user timers. Each spawns
 | `gaming-digest` | 19:00 | Gaming news |
 | `world-digest` | 21:00 | U.S. / world events |
 
-Service + timer units live in `~/.config/systemd/user/<name>.{service,timer}`; the actual run scripts are `~/scripts/run_<name>_digest.sh`. Manage with `systemctl --user list-timers`, `systemctl --user status <name>.timer`, `journalctl --user -u <name>.service`. Created/edited via the `email-digest` skill.
+Service + timer units live in `~/.config/systemd/user/<name>.{service,timer}`; the actual run scripts are `~/scripts/run_<name>_digest.sh`. Manage with `systemctl --user list-timers`, `systemctl --user status <name>.timer`, `journalctl --user -u <name>.service`.
+
+Each script ends with `opencode run -m opencode-go/minimax-m3 "$PROMPT" < /dev/null`. **Headless opencode gotchas (learned the hard way):** (1) stdin MUST be closed (`< /dev/null`) or the process hangs after finishing the task; (2) opencode auto-rejects file writes *outside the working directory* in headless mode, so all I/O — including the temp HTML — must stay under `/home/carter` (not `/tmp`); (3) `opencode run` exits 0 even when the model skipped a step, so verify artifacts (the `Sent to …` journal line + the summary `.md`), never the exit code alone. Auth is an OpenCode Go API key in `~/.local/share/opencode/auth.json`. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`. NOTE: the `email-digest` skill still scaffolds *Claude*-based digests; adapt any new digest to this opencode pattern by hand until the skill is updated.
 
 Carter often references these by topic when chatting ("I saw something in the agentic digest about X"). When he does, note-taking into `~/notes/` is the likely follow-up.
 

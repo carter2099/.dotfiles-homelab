@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily AI & tech email digest via Claude agent
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/run_ai_tech_digest.sh
+TimeoutStartSec=600

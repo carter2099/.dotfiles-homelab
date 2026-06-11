@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily agentic platform email digest via Claude agent
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/run_agentic_digest.sh
+TimeoutStartSec=600

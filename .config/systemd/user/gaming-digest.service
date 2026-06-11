@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily gaming news email digest via Claude agent
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/run_gaming_digest.sh
+TimeoutStartSec=600

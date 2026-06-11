@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily U.S./World events email digest via Claude agent
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/run_world_digest.sh
+TimeoutStartSec=600
