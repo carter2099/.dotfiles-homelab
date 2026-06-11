@@ -12,8 +12,9 @@ Environment=HOME=/home/carter
 Environment=PATH=/home/carter/.opencode/bin:/home/carter/.local/bin:/home/carter/.rbenv/bin:/home/carter/.rbenv/shims:/home/carter/.fnm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # OPENCODE_SERVER_PASSWORD (HTTP basic-auth second credential, enforced server-side) lives here, gitignored 600
 EnvironmentFile=/home/carter/.config/opencode-homelab/env
-# Bind on all interfaces so the k3s Traefik (via Endpoints -> 192.168.4.92:48099) can reach it; LAN path still gated by OPENCODE_SERVER_PASSWORD
-ExecStart=/home/carter/.opencode/bin/opencode web --hostname 0.0.0.0 --port 48099
+# Bind loopback ONLY. The sole ingress is the CF tunnel (cloudflared runs on the host and reaches 127.0.0.1).
+# NOT reachable on the LAN -> no bypass of Cloudflare Access. Mirrors the dependabot-webhook routing pattern.
+ExecStart=/home/carter/.opencode/bin/opencode web --hostname 127.0.0.1 --port 48099
 Restart=always
 RestartSec=10
 StandardOutput=journal
