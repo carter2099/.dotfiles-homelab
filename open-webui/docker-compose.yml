@@ -1,0 +1,27 @@
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    # Loopback-only: reachable solely via the CF tunnel (cloudflared hits localhost), never the LAN.
+    ports:
+      - "127.0.0.1:48100:8080"
+    env_file:
+      - .env            # OPENAI_API_KEY (the OpenCode Go key) + WEBUI_SECRET_KEY — gitignored
+    environment:
+      # Backend = OpenCode Go endpoint (flat-sub / session-cap billing), NOT zen/v1 (pay-as-you-go)
+      - OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1
+      # Keep Open WebUI's own login as a second credential behind CF Access (first signup = admin)
+      - WEBUI_AUTH=True
+      - ENABLE_SIGNUP=False     # no self-registration; admin already created over loopback
+      - WEBUI_NAME=Homelab Chat
+    volumes:
+      - open-webui:/app/backend/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  open-webui:
