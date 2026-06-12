@@ -1,12 +1,12 @@
 ---
 name: Notes vault at ~/notes
-description: Carter's Claude-maintained knowledge vault — markdown repo where Claude organizes, indexes, and retrieves notes across sessions
+description: Carter's agent-maintained knowledge vault — markdown repo where the agent organizes, indexes, and retrieves notes across sessions
 type: project
 originSessionId: a329b227-d261-4645-9ad4-83798b131d25
 ---
-Carter keeps a private GitHub repo `carter2099/notes` cloned at `~/notes/`. It is a Claude-maintained knowledge vault: Carter surfaces things worth remembering (often from email digests or ad-hoc chats), and Claude writes/organizes the notes so they are retrievable in future sessions.
+Carter keeps a private GitHub repo `carter2099/notes` cloned at `~/notes/`. It is an agent-maintained knowledge vault: Carter surfaces things worth remembering (often from email digests or ad-hoc chats), and the agent writes/organizes the notes so they are retrievable in future sessions.
 
-**Why:** Carter wants a durable external memory that survives past the auto-memory system — structured markdown he can also read/edit himself, with Claude as the librarian.
+**Why:** Carter wants a durable external memory that survives past the auto-memory system — structured markdown he can also read/edit himself, with the agent as the librarian.
 
 **How to apply:**
 - Layout: topic directories at root (`crypto/`, `ai/`, `homelab/`, `reading/`, etc. — add new ones as needed). Atomic notes, one idea per file, `kebab-case-slug.md`.
