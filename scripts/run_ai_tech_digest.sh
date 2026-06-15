@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Researches and emails the daily AI & tech digest via opencode + MiniMax M3.
+# Researches and emails the daily AI & tech digest via opencode + DeepSeek V4 Flash.
 # Scheduled via systemd timer (ai-tech-digest.timer). Provider-agnostic: change
 # the -m model id to switch providers/models without touching anything else.
 
@@ -10,12 +10,14 @@ export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
 
 TODAY="$(date +%Y-%m-%d)"
+TEMPLATE_TEMP="$HOME/digests/ai-tech/.template_prefilled.html"
+sed -e 's/{{DIGEST_TITLE}}/AI & Tech Digest/g' -e "s/{{DATE}}/$TODAY/g" "$HOME/digests/template.html" > "$TEMPLATE_TEMP"
 
 PROMPT='You are a daily AI & tech news curator. Your job is to research and email a digest.
 
 ## Step 0: Read prior digest summaries and the HTML template
 
-First, read /home/carter/digests/template.html using the Read tool. You MUST use this template exactly for the email HTML — fill in the placeholders and use the story block HTML from the comment at the bottom. Do not invent your own layout or styling.
+First, read /home/carter/digests/ai-tech/.template_prefilled.html using the Read tool. You MUST use this template exactly for the email HTML — fill in the remaining placeholders ({{INTRO}}, {{FRESH_STORIES}}, {{RECENT_STORIES}}) and use the story block HTML from the comment at the bottom. Do not invent your own layout or styling.
 
 Then read all .md files in /home/carter/digests/ai-tech/ using the Read tool. These are summaries of stories you have already sent in recent days. Use them to:
 - Avoid repeating stories that have already been covered unless there is a meaningful update (new details, growing momentum, follow-up coverage, community reaction, adoption milestones).
@@ -47,8 +49,6 @@ Organize the email into two sections:
 **Recent & Relevant (past week):** Stories from the past 2-7 days that are still evolving, gaining momentum, or have meaningful new developments since last covered. For each, note what changed or why it'"'"'s still relevant. Only include if there'"'"'s something new to say — do not simply repeat old summaries. 2-5 stories.
 
 Build the HTML by filling in the template you read in Step 0:
-- Replace {{DIGEST_TITLE}} with "AI & Tech Digest"
-- Replace {{DATE}} with '"$TODAY"'
 - Replace {{INTRO}} with a 2-3 sentence editorial intro
 - Replace {{FRESH_STORIES}} with story blocks using the story block template from the HTML comment
 - Replace {{RECENT_STORIES}} with story blocks using the "Recent & Relevant" variant (with the WHY line)
@@ -76,4 +76,4 @@ Write a concise summary of what you sent to /home/carter/digests/ai-tech/'"$TODA
 
 Then delete any .md files in /home/carter/digests/ai-tech/ older than 7 days.'
 
-exec "$HOME/.opencode/bin/opencode" run -m opencode-go/minimax-m3 "$PROMPT" < /dev/null
+exec "$HOME/.opencode/bin/opencode" run -m opencode-go/deepseek-v4-flash "$PROMPT" < /dev/null

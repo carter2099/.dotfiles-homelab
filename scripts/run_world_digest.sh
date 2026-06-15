@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Researches and emails the daily world events digest via opencode + MiniMax M3.
+# Researches and emails the daily world events digest via opencode + DeepSeek V4 Flash.
 # Scheduled via systemd timer (world-digest.timer). Provider-agnostic: change
 # the -m model id to switch providers/models without touching anything else.
 
@@ -10,6 +10,8 @@ export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
 
 TODAY="$(date +%Y-%m-%d)"
+TEMPLATE_TEMP="$HOME/digests/world-digest/.template_prefilled.html"
+sed -e 's/{{DIGEST_TITLE}}/World Briefing/g' -e "s/{{DATE}}/$TODAY/g" "$HOME/digests/template.html" > "$TEMPLATE_TEMP"
 
 PROMPT='You are a daily U.S. and world events news curator. Your job is to research and email a digest.
 
@@ -25,7 +27,7 @@ This digest exists so the reader does NOT have to doom scroll, watch cable news,
 
 ## Step 0: Read prior digest summaries and the HTML template
 
-First, read /home/carter/digests/template.html using the Read tool. You MUST use this template exactly for the email HTML — fill in the placeholders and use the story block HTML from the comment at the bottom. Do not invent your own layout or styling.
+First, read /home/carter/digests/world-digest/.template_prefilled.html using the Read tool. You MUST use this template exactly for the email HTML — fill in the remaining placeholders ({{INTRO}}, {{FRESH_STORIES}}, {{RECENT_STORIES}}) and use the story block HTML from the comment at the bottom. Do not invent your own layout or styling.
 
 Then read all .md files in /home/carter/digests/world-digest/ using the Read tool. These are summaries of stories you have already sent in recent days. Use them to:
 - Avoid repeating stories that have already been covered unless there is a meaningful update (new details, resolution, escalation, official response).
@@ -65,8 +67,6 @@ Organize the email into two sections:
 **Recent & Relevant (past week):** Stories from the past 2-7 days that are still evolving or have meaningful new developments since last covered. For each, note what changed. Only include if there'"'"'s something new to say. 2-5 stories.
 
 Build the HTML by filling in the template you read in Step 0:
-- Replace {{DIGEST_TITLE}} with "World Briefing"
-- Replace {{DATE}} with '"$TODAY"'
 - Replace {{INTRO}} with a 1-2 sentence neutral summary of the day'"'"'s news landscape. No editorializing — just orient the reader on what kind of day it was (e.g. "A busy day for trade policy and Middle East diplomacy." or "Relatively quiet day — a few legislative moves and an ongoing humanitarian situation in East Africa.").
 - Replace {{FRESH_STORIES}} with story blocks using the story block template from the HTML comment
 - Replace {{RECENT_STORIES}} with story blocks using the "Recent & Relevant" variant (with the WHY line)
@@ -94,4 +94,4 @@ Write a concise summary of what you sent to /home/carter/digests/world-digest/'"
 
 Then delete any .md files in /home/carter/digests/world-digest/ older than 7 days.'
 
-exec "$HOME/.opencode/bin/opencode" run -m opencode-go/minimax-m3 "$PROMPT" < /dev/null
+exec "$HOME/.opencode/bin/opencode" run -m opencode-go/deepseek-v4-flash "$PROMPT" < /dev/null
