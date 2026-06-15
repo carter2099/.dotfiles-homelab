@@ -21,7 +21,7 @@ Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/bes
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server has two IP addresses (`192.168.4.92` and `192.168.4.102`) used to route different apps — both point to the same physical machine.
+Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static secondary IPs `192.168.4.92` (blog, delta_neutral, hub) and `192.168.4.102` (tbitt, stickies — both not live) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
 
 ## Hardware
 
@@ -39,8 +39,14 @@ Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PR
 | **BIOS** | R1YET47W (1.24), 08/04/2023 |
 
 **Notes:**
-- The wired NIC is `enp3s0f0` (Realtek). It is **unmanaged by default** (no netplan/systemd-networkd config). WiFi (`wlp6s0`) provides the primary uplink at `192.168.4.92`.
-- To use wired Ethernet: `sudo ip link set enp3s0f0 up && sudo dhcpcd enp3s0f0`, or create a systemd-networkd `.network` file for persistent management.
+- The wired NIC `enp3s0f0` (Realtek) is the **primary uplink**.
+- **WiFi is disabled** in netplan. The interface `wlp6s0` is down by default.
+- **Network config:** `/etc/netplan/50-cloud-init.yaml` (managed by systemd-networkd)
+  - `enp3s0f0`: DHCP primary (`192.168.4.100`), static secondary (`192.168.4.92/22`, `192.168.4.102/22`)
+  - `wlp6s0`: Removed from netplan — disabled
+- **Default route:** Via `enp3s0f0` (metric 100)
+- **k3s ingress IPs:** `192.168.4.92` (blog, delta_neutral, hub) and `192.168.4.102` (tbitt, stickies — both not live) are secondary IPs on the wired interface.
+- **Rollback:** To re-enable WiFi, restore `/etc/netplan/50-cloud-init.yaml.bak` and run `sudo netplan apply`.
 
 ## Repository Structure
 
