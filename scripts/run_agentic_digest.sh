@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Researches and emails the daily agentic platform digest via opencode + DeepSeek V4 Flash.
+# Researches and emails the daily agentic platform digest via Pi + DeepSeek V4 Pro.
 # Scheduled via systemd timer (agentic-digest.timer). Provider-agnostic: change
-# the -m model id to switch providers/models without touching anything else.
+# the --model id to switch providers/models without touching anything else.
 
 set -euo pipefail
 
 export HOME="/home/carter"
-export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
 
 TODAY="$(date +%Y-%m-%d)"
 # Second recipient is kept out of the (public) dotfiles repo — sourced from the
@@ -20,13 +18,13 @@ PROMPT='You are a daily agentic AI platform news curator. Your job is to researc
 
 ## Step 0: Read prior digest summaries and the HTML template
 
-First, read /home/carter/digests/agentic-platform/.template_prefilled.html using the Read tool. You MUST use this template exactly for the email HTML — fill in the remaining placeholders ({{INTRO}}, {{FRESH_STORIES}}, {{RECENT_STORIES}}) and use the story block HTML from the comment at the bottom. Do not invent your own layout or styling.
+First, read /home/carter/digests/agentic-platform/.template_prefilled.html using the read tool. You MUST use this template exactly for the email HTML — fill in the remaining placeholders ({{INTRO}}, {{FRESH_STORIES}}, {{RECENT_STORIES}}) and use the story block HTML from the comment at the bottom. Do not invent your own layout or styling.
 
-Then read all .md files in /home/carter/digests/agentic-platform/ using the Read tool. These are summaries of stories you have already sent in recent days. Use them to:
+Then read all .md files in /home/carter/digests/agentic-platform/ using the read tool. These are summaries of stories you have already sent in recent days. Use them to:
 - Avoid repeating stories that have already been covered unless there is a meaningful update (new details, growing momentum, follow-up coverage, community reaction, adoption milestones).
 - Identify evolving stories worth tracking in the "Recent & Relevant" section.
 
-## Step 1: Research (use your WebFetch tool — you do NOT have a web search tool)
+## Step 1: Research (use web_search to find articles, web_fetch to read them)
 
 Fetch reputable sources and follow links to specific articles to find the most important agentic AI platform developments. Start from several of these, then fetch the specific article/post pages you intend to cite:
 - https://news.ycombinator.com/
@@ -71,9 +69,8 @@ Build the HTML by filling in the template you read in Step 0:
 
 ## Step 3: Write and send
 
-IMPORTANT: write only inside /home/carter — writes outside it (e.g. /tmp) are blocked in headless mode.
 1. Write the HTML body to /home/carter/digests/agentic-platform/.daily_digest.html
-2. Send it by running this command with your Bash tool: python3 /home/carter/scripts/send_digest.py --subject "Agentic Platform Digest — '"$TODAY"'" --body-file /home/carter/digests/agentic-platform/.daily_digest.html --to carter2099@pm.me '"$AGENTIC_CC"'
+2. Send it by running this command with your bash tool: python3 /home/carter/scripts/send_digest.py --subject "Agentic Platform Digest — '"$TODAY"'" --body-file /home/carter/digests/agentic-platform/.daily_digest.html --to carter2099@pm.me '"$AGENTIC_CC"'
 3. Clean up: rm /home/carter/digests/agentic-platform/.daily_digest.html
 
 ## Step 4: Write summary for future runs
@@ -91,4 +88,4 @@ Write a concise summary of what you sent to /home/carter/digests/agentic-platfor
 
 Then delete any .md files in /home/carter/digests/agentic-platform/ older than 7 days.'
 
-exec "$HOME/.opencode/bin/opencode" run -m opencode-go/deepseek-v4-flash "$PROMPT" < /dev/null
+exec pi -p --model opencode-go/deepseek-v4-pro "$PROMPT"

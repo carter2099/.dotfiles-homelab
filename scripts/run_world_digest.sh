@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Researches and emails the daily world events digest via opencode + DeepSeek V4 Flash.
+# Researches and emails the daily world events digest via Pi + DeepSeek V4 Pro.
 # Scheduled via systemd timer (world-digest.timer). Provider-agnostic: change
-# the -m model id to switch providers/models without touching anything else.
+# the --model id to switch providers/models without touching anything else.
 
 set -euo pipefail
 
 export HOME="/home/carter"
-export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
 
 TODAY="$(date +%Y-%m-%d)"
 TEMPLATE_TEMP="$HOME/digests/world-digest/.template_prefilled.html"
@@ -27,13 +25,13 @@ This digest exists so the reader does NOT have to doom scroll, watch cable news,
 
 ## Step 0: Read prior digest summaries and the HTML template
 
-First, read /home/carter/digests/world-digest/.template_prefilled.html using the Read tool. You MUST use this template exactly for the email HTML — fill in the remaining placeholders ({{INTRO}}, {{FRESH_STORIES}}, {{RECENT_STORIES}}) and use the story block HTML from the comment at the bottom. Do not invent your own layout or styling.
+First, read /home/carter/digests/world-digest/.template_prefilled.html using the read tool. You MUST use this template exactly for the email HTML — fill in the remaining placeholders ({{INTRO}}, {{FRESH_STORIES}}, {{RECENT_STORIES}}) and use the story block HTML from the comment at the bottom. Do not invent your own layout or styling.
 
-Then read all .md files in /home/carter/digests/world-digest/ using the Read tool. These are summaries of stories you have already sent in recent days. Use them to:
+Then read all .md files in /home/carter/digests/world-digest/ using the read tool. These are summaries of stories you have already sent in recent days. Use them to:
 - Avoid repeating stories that have already been covered unless there is a meaningful update (new details, resolution, escalation, official response).
 - Identify evolving stories worth tracking in the "Recent & Relevant" section.
 
-## Step 1: Research (use your WebFetch tool — you do NOT have a web search tool)
+## Step 1: Research (use web_search to find articles, web_fetch to read them)
 
 Fetch reputable wire/news sources and follow links to specific articles. Start from several of these homepages, then fetch the specific article pages you intend to cite:
 - https://apnews.com/
@@ -74,9 +72,8 @@ Build the HTML by filling in the template you read in Step 0:
 
 ## Step 3: Write and send
 
-IMPORTANT: write only inside /home/carter — writes outside it (e.g. /tmp) are blocked in headless mode.
 1. Write the HTML body to /home/carter/digests/world-digest/.daily_digest.html
-2. Send it by running this command with your Bash tool: python3 /home/carter/scripts/send_digest.py --subject "World Briefing — '"$TODAY"'" --body-file /home/carter/digests/world-digest/.daily_digest.html --to carter2099@pm.me
+2. Send it by running this command with your bash tool: python3 /home/carter/scripts/send_digest.py --subject "World Briefing — '"$TODAY"'" --body-file /home/carter/digests/world-digest/.daily_digest.html --to carter2099@pm.me
 3. Clean up: rm /home/carter/digests/world-digest/.daily_digest.html
 
 ## Step 4: Write summary for future runs
@@ -94,4 +91,4 @@ Write a concise summary of what you sent to /home/carter/digests/world-digest/'"
 
 Then delete any .md files in /home/carter/digests/world-digest/ older than 7 days.'
 
-exec "$HOME/.opencode/bin/opencode" run -m opencode-go/deepseek-v4-flash "$PROMPT" < /dev/null
+exec pi -p --model opencode-go/deepseek-v4-pro "$PROMPT"
