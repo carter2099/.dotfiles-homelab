@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to AI agents (opencode, Claude, etc.) when working with code in this repository.
+This file provides guidance to AI agents (pi, opencode, Claude, etc.) when working with code in this repository.
 
 **Maintenance:** Keep this file up to date. When deploying a new app, adding a service, changing ports/IPs, or making any structural changes to the homelab, update the relevant sections here as part of that work.
 
@@ -18,6 +18,10 @@ Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/bes
 - **Get your hands dirty.** Don't refuse to engage with unfamiliar code, obscure config, or messy state. Read it, trace it, fix it.
 - **Keep it simple.** Prefer the smallest change that solves the problem. This reinforces the existing "no gratuitous abstractions / no speculative features" guidance further down in this file.
 - **Have patience.** Don't rush to a conclusion or a fix. Re-read, re-check, confirm before acting — especially for anything irreversible.
+
+## Scope
+
+Carter wants this agent framed as a **homelab assistant and general personal assistant**, not narrowly as a coding tool. Software engineering is a large part of the work, but non-code help (planning, notes, research, life admin, digests, correspondence drafting, scheduling) is equally in scope and should be treated as first-class. The same tenets about rigor, not-guessing, and admitting uncertainty apply regardless of domain.
 
 ## Overview
 
@@ -87,6 +91,10 @@ bundle exec rspec  # run tests
 
 Note: `.ruby-version` in cloned repos may request a Ruby version not installed locally. Use `RBENV_VERSION=<installed-version>` to override for testing if the patch version difference is minor, or install the exact version with `rbenv install <version>`.
 
+## Skills
+
+Always use the `/create-skill` skill when creating a new user-level skill. Writing a skill file directly (under `~/.pi/agent/skills/*/SKILL.md`) skips the `dotfiles add` + commit + push step, leaving the skill untracked and at risk of being lost if homelab storage is wiped. The skill bakes in the VCS step.
+
 ## Dotfiles Management
 
 ```bash
@@ -99,6 +107,14 @@ dotfiles push
 
 Alias defined in `.zshrc`: `dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles-homelab/" --work-tree="$HOME"'`
 
+**⚠️ Always use targeted `dotfiles add <path>` — never bare `dotfiles add -A` or `dotfiles add .`.** Since the work-tree is `$HOME`, an unqualified `add -A` would stage everything in `/home/carter/` that isn't gitignored. Scope adds to the specific file(s) being tracked.
+
+```bash
+dotfiles add .zshrc                                 # single file
+dotfiles add .config/systemd/user/homelab-backup.*  # glob pattern for related files
+dotfiles add -A .pi/                                # OK when scoped to a directory path
+```
+
 ## App Deployment Pattern
 
 All apps follow the same deploy flow:
@@ -106,6 +122,14 @@ All apps follow the same deploy flow:
 2. `up.sh` - starts Docker Compose in detached mode with production config
 
 Rails apps (blog, hub) pass `RAILS_MASTER_KEY` from `config/master.key` at startup.
+
+### Commit before deploy
+
+Always commit and push before deploying any homelab app. Never run `release.sh` (or trigger the `deploy-app` skill) while there are uncommitted changes in the app's repo, even though the docker build uses local files and would technically pick them up.
+
+**Why:** Carter wants the deployed state to match `origin/main` exactly. If the source on disk diverges from git, the next deploy from a fresh clone (or anyone else looking at GitHub) will see the wrong code, and rollbacks via git become unreliable. Deploys must be reproducible from the remote.
+
+**How to apply:** Before invoking the `deploy-app` skill or running `release.sh`, check `git status` in the app repo. If there are uncommitted changes related to the deploy, commit and push them first, then deploy. If there are unrelated dirty files, surface them and ask before proceeding.
 
 ### Orphaned docker-proxy / port-in-use on restart
 
@@ -141,6 +165,10 @@ If origin is healthy and the user still sees stale content, the fix is **not a r
 ### Exit 255 is a known intermittent on this host
 
 Documented for visibility: `blog-web` and other containers on this 16GB host occasionally exit 255 without warning, no stack trace in `docker logs`. Likely causes are OOM (check `docker inspect <container> --format '{{.State.OOMKilled}}'` next time it happens) or SIGKILL from a competing deploy. Don't rebuild in response — just restart with the existing image unless there's evidence the image itself is bad.
+
+### Never run aa-remove-unknown
+
+Never run `sudo aa-remove-unknown` on this host. Snap-installed Docker depends on AppArmor profiles (e.g. `snap.docker.dockerd`) that `aa-remove-unknown` classifies as "unknown" and deletes. This causes Docker to crashloop with "missing profile snap.docker.dockerd" and all containers go down. Recovery requires `sudo systemctl restart snapd.apparmor` to reload the profiles, then restarting Docker. If Docker containers can't be stopped/killed due to AppArmor "permission denied" errors, fix by restarting `snapd.apparmor` and then Docker (`sudo systemctl restart snapd.apparmor && sudo snap start docker.dockerd`) — not by clearing AppArmor profiles.
 
 ## Kubernetes (k3s)
 
@@ -297,3 +325,4 @@ This is the mechanism by which tasks survive reboots. It is the *only* expectati
 - **Tmux prefix:** Ctrl+Space
 - **Git user:** carter2099 <carter2099@pm.me>
 - **GitHub CLI:** `gh` authenticated as carter2099 (HTTPS, broad scopes)
+- **Client topology:** Carter develops from a Mac and SSHs into the homelab. When he mentions file paths like `/Users/carterbrown/...`, those are on his Mac and **not reachable** from this session. Don't try to read Mac paths directly — they'll 404. For screenshots or files on his Mac, suggest `scp`-ing to the homelab first, or ask him to describe the content in words. Everything under `/home/carter/` is local and readable.
