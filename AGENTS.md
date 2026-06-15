@@ -21,13 +21,32 @@ Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/bes
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (2017 MacBook Pro, Intel i5, 16GB RAM). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server has two IP addresses (`192.168.4.92` and `192.168.4.102`) used to route different apps — both point to the same physical machine.
+Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server has two IP addresses (`192.168.4.92` and `192.168.4.102`) used to route different apps — both point to the same physical machine.
+
+## Hardware
+
+| Component | Details |
+|---|---|
+| **Model** | ThinkPad L14 Gen 3 (AMD) |
+| **Machine Type** | 21C6 |
+| **Serial** | PW099A70 |
+| **CPU** | AMD Ryzen 5 PRO 5675U (6C/12T, 2.3–4.3GHz) |
+| **RAM** | 16GB DDR4-3200 (2x SO-DIMM slots, dual-channel) |
+| **Storage** | 500GB NVMe M.2 2242 SSD (PCIe 3.0 x4) |
+| **Display** | 14" FHD (1920×1080) IPS |
+| **Network** | Gigabit Ethernet (Realtek RTL8111HN/EPV), Wi-Fi 6E, Bluetooth 5.1 |
+| **Ports** | 2× USB-C (Gen 1 + Gen 2, both PD + DP), 2× USB-A 3.2 Gen 1, HDMI 2.0, RJ-45, microSD, 3.5mm combo |
+| **BIOS** | R1YET47W (1.24), 08/04/2023 |
+
+**Notes:**
+- The wired NIC is `enp3s0f0` (Realtek). It is **unmanaged by default** (no netplan/systemd-networkd config). WiFi (`wlp6s0`) provides the primary uplink at `192.168.4.92`.
+- To use wired Ethernet: `sudo ip link set enp3s0f0 up && sudo dhcpcd enp3s0f0`, or create a systemd-networkd `.network` file for persistent management.
 
 ## Repository Structure
 
 This is the home directory, managed as a bare git repo for dotfiles:
 - `blog/` - Rails 8 blog app (blog.carter2099.com)
-- `hub/` - React + Rails API landing page/portfolio (carter2099.com)
+- `hub/` - React + Rails API landing page/portfolio, **not live** (carter2099.com)
 - `tbitt/` - React + Express memecoin tracker, **deprecated** (tbitt.carter2099.com)
 - `stickies/` - Sticky notes app, **not live** (stickiesapi.carter2099.com)
 - `delta_neutral/` - Rails 8 Hyperliquid rebalancer (deltaneutral.carter2099.com)
@@ -45,6 +64,8 @@ This is the home directory, managed as a bare git repo for dotfiles:
 - `.dotfiles-homelab/` - Bare git repo tracking dotfiles
 
 ## Dev Workflow (`dev/`)
+
+**Hard rule:** Always develop in `~/dev/<repo>/`. Never edit files in the prod deploy folders (`/home/carter/blog/`, `/home/carter/delta_neutral/`, `/home/carter/hub/`, etc.) — those are deployment artifacts only. If a dev/ clone doesn't exist for a repo, pull a fresh one with `git clone git@github.com:carter2099/<repo>.git ~/dev/<repo>` before making changes.
 
 The `dev/` directory is for cloning GitHub repos (via SSH: `git@github.com:carter2099/<repo>.git`), running their test suites, making changes, and pushing back. It is **not** tracked by the dotfiles bare repo.
 
@@ -113,7 +134,7 @@ If origin is healthy and the user still sees stale content, the fix is **not a r
 
 ### Exit 255 is a known intermittent on this host
 
-Documented for visibility: `blog-web` and other containers on this 8GB host occasionally exit 255 without warning, no stack trace in `docker logs`. Likely causes are OOM (check `docker inspect <container> --format '{{.State.OOMKilled}}'` next time it happens) or SIGKILL from a competing deploy. Don't rebuild in response — just restart with the existing image unless there's evidence the image itself is bad.
+Documented for visibility: `blog-web` and other containers on this 16GB host occasionally exit 255 without warning, no stack trace in `docker logs`. Likely causes are OOM (check `docker inspect <container> --format '{{.State.OOMKilled}}'` next time it happens) or SIGKILL from a competing deploy. Don't rebuild in response — just restart with the existing image unless there's evidence the image itself is bad.
 
 ## Kubernetes (k3s)
 
