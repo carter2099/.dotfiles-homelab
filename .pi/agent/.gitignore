@@ -1,0 +1,11 @@
+# Secrets
+auth.json
+
+# Transient
+sessions/
+
+# Platform-specific binaries
+bin/
+
+# Dependency artifacts (track package.json/lock instead)
+npm/node_modules/

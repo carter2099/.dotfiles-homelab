@@ -1,0 +1,10 @@
+{
+  "lastChangelogVersion": "0.79.4",
+  "theme": "dark",
+  "defaultProvider": "opencode-go",
+  "defaultModel": "deepseek-v4-flash",
+  "defaultThinkingLevel": "high",
+  "packages": [
+    "npm:@juicesharp/rpiv-web-tools"
+  ]
+}
