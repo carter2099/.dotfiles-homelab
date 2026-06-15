@@ -156,7 +156,7 @@ Edit `~/agent-state/hyperliquid-sdk.md`:
 
 Send an email to carter2099@pm.me with subject `Hyperliquid SDK run — <date>`.
 
-First write the HTML email body to `/home/carter/agent-state/.hyperliquid_email.html` using your Write tool (opencode blocks writes outside `/home/carter`), then send it with `--body-file` and delete it afterward:
+First write the HTML email body to `/home/carter/agent-state/.hyperliquid_email.html` using your write tool, then send it with `--body-file` and delete it afterward:
 
 ```bash
 python3 ~/scripts/send_digest.py \
