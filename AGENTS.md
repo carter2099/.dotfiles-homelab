@@ -252,7 +252,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ## Email Digests
 
-Four daily HTML email digests are scheduled via systemd user timers. Each digest runs a **headless opencode agent on the OpenCode Go subscription, pinned to MiniMax M3** (`opencode-go/minimax-m3`). The agent researches via opencode's built-in **WebFetch** (there is *no* WebSearch tool in opencode), fills the shared `~/digests/template.html`, emails via `send_digest.py`, and writes a dedup/continuity summary to `~/digests/<topic>/`.
+Four daily HTML email digests are scheduled via systemd user timers. Each digest runs a **headless Pi agent** (`pi -p`) on the OpenCode Go subscription, using **deepseek-v4-flash**. The agent researches via `web_search` (for discovering articles) and `web_fetch` (for reading pages), fills the shared `~/digests/template.html`, emails via `send_digest.py`, and writes a URL-enriched dedup/continuity summary to `~/digests/<topic>/YYYY-MM-DD.md`.
 
 | Timer | Fires (UTC) | Topic |
 |---|---|---|
@@ -263,7 +263,19 @@ Four daily HTML email digests are scheduled via systemd user timers. Each digest
 
 Service + timer units live in `~/.config/systemd/user/<name>.{service,timer}`; the actual run scripts are `~/scripts/run_<name>_digest.sh`. Manage with `systemctl --user list-timers`, `systemctl --user status <name>.timer`, `journalctl --user -u <name>.service`.
 
-Each script ends with `opencode run -m opencode-go/minimax-m3 "$PROMPT" < /dev/null`. **Headless opencode gotchas (learned the hard way):** (1) stdin MUST be closed (`< /dev/null`) or the process hangs after finishing the task; (2) opencode auto-rejects file writes *outside the working directory* in headless mode, so all I/O — including the temp HTML — must stay under `/home/carter` (not `/tmp`); (3) `opencode run` exits 0 even when the model skipped a step, so verify artifacts (the `Sent to …` journal line + the summary `.md`), never the exit code alone. Auth is an OpenCode Go API key in `~/.local/share/opencode/auth.json`. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`.
+Each script runs `pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"`. Pi's `-p` mode is the equivalent of `opencode run` for headless/automated use — no stdin hacks needed, no write-path restrictions. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`.
+
+### Quality infrastructure
+
+Each digest produces three artifacts per run for retroactive quality analysis:
+
+| Artifact | Path | Purpose |
+|---|---|---|
+| **Summary** | `~/digests/<topic>/YYYY-MM-DD.md` | Stories with `[title](URL)` markdown links, model, and recipients — machine-readable for LLM quality review |
+| **HTML archive** | `~/digests/<topic>/YYYY-MM-DD.html` | Full email body as sent (no longer deleted after sending) |
+| **Run log** | `~/digests/<topic>/.runs.log` | Timestamps, wall-clock duration, and model per run — `grep`-able for performance analysis |
+
+To audit a digest retroactively, another Pi/LLM session can read the `.md` (story URLs), fetch the cited articles, and compare against the `.html` (what was actually sent). The `.runs.log` tracks performance trends.
 
 Carter often references these by topic when chatting ("I saw something in the agentic digest about X"). When he does, note-taking into `~/notes/` is the likely follow-up.
 
