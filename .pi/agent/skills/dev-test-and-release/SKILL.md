@@ -1,6 +1,6 @@
 ---
 name: dev-test-and-release
-description: Homelab dev workflow convention: work in ~/dev/, test there, get approval, then release using the project's own idioms. Tech-stack agnostic.
+description: "Homelab dev workflow convention: work in ~/dev/, test there, get approval, then release using the project's own idioms. Tech-stack agnostic."
 ---
 
 # Dev → Test → Release Convention
