@@ -1,6 +1,6 @@
 {
   "lastChangelogVersion": "0.79.4",
-  "theme": "dark",
+  "theme": "one-dark",
   "defaultProvider": "opencode-go",
   "defaultModel": "deepseek-v4-pro",
   "defaultThinkingLevel": "high",
