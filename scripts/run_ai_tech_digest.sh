@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Researches and emails the daily AI & tech digest via Pi + DeepSeek V4 Pro.
+# Researches and emails the daily AI & tech digest via Pi + DeepSeek V4 Flash.
 # Scheduled via systemd timer (ai-tech-digest.timer). Provider-agnostic: change
 # the --model id to switch providers/models without touching anything else.
 
@@ -8,6 +8,7 @@ set -euo pipefail
 export HOME="/home/carter"
 
 TODAY="$(date +%Y-%m-%d)"
+START_TS="$(date +%s)"
 TEMPLATE_TEMP="$HOME/digests/ai-tech/.template_prefilled.html"
 sed -e 's/{{DIGEST_TITLE}}/AI & Tech Digest/g' -e "s/{{DATE}}/$TODAY/g" "$HOME/digests/template.html" > "$TEMPLATE_TEMP"
 
@@ -29,7 +30,7 @@ Fetch reputable AI/tech news sources and follow links to specific articles. Star
 - https://arstechnica.com/ai/
 - https://news.ycombinator.com/
 
-Cover model releases, agentic platform features, open source projects, major announcements, new developer tools, and notable funding/launches. Prioritize model releases, new agentic platform features, and open source projects. If a source fails to fetch, try another reputable outlet.
+Cover model releases, agentic platform features, open source projects, major announcements, new developer tools, and notable funding/launches. Prioritize model releases, new agentic platform features, and open source projects. If a source fails to fetch, try another reputable outlet. Be concise — these are read on mobile.
 
 ## Accuracy Rules (apply to every story)
 
@@ -42,9 +43,9 @@ Cover model releases, agentic platform features, open source projects, major ann
 
 Organize the email into two sections:
 
-**Fresh (last 24 hours):** New stories from today. 6-10 stories.
+**Fresh (last 24 hours):** New stories from today. 5-7 stories.
 
-**Recent & Relevant (past week):** Stories from the past 2-7 days that are still evolving, gaining momentum, or have meaningful new developments since last covered. For each, note what changed or why it'"'"'s still relevant. Only include if there'"'"'s something new to say — do not simply repeat old summaries. 2-5 stories.
+**Recent & Relevant (past week):** Stories from the past 2-7 days that are still evolving, gaining momentum, or have meaningful new developments since last covered. For each, note what changed or why it'"'"'s still relevant. Only include if there'"'"'s something new to say — do not simply repeat old summaries. 1-3 stories.
 
 Build the HTML by filling in the template you read in Step 0:
 - Replace {{INTRO}} with a 2-3 sentence editorial intro
@@ -56,21 +57,28 @@ Build the HTML by filling in the template you read in Step 0:
 
 1. Write the HTML body to /home/carter/digests/ai-tech/.daily_digest.html
 2. Send it by running this command with your bash tool: python3 /home/carter/scripts/send_digest.py --subject "AI & Tech Digest — '"$TODAY"'" --body-file /home/carter/digests/ai-tech/.daily_digest.html --to carter2099@pm.me
-3. Clean up: rm /home/carter/digests/ai-tech/.daily_digest.html
+3. Archive the HTML: rename /home/carter/digests/ai-tech/.daily_digest.html to /home/carter/digests/ai-tech/'"$TODAY"'.html
 
 ## Step 4: Write summary for future runs
 
 Write a concise summary of what you sent to /home/carter/digests/ai-tech/'"$TODAY"'.md in this format:
 
+```
 # AI & Tech Digest — '"$TODAY"'
+**Model:** deepseek-v4-flash | **Sent to:** carter2099@pm.me
 
 ## Fresh
-- **Story title** — one-line summary
-- **Story title** — one-line summary
+- [Story title](URL) — one-line summary
+- [Story title](URL) — one-line summary
 
 ## Recent & Relevant
-- **Story title** — one-line summary (why still relevant)
+- [Story title](URL) — one-line summary (why still relevant)
+```
+
+IMPORTANT: every story must include its URL as a markdown link `[title](URL)`. This enables retroactive quality analysis.
 
 Then delete any .md files in /home/carter/digests/ai-tech/ older than 7 days.'
 
-exec pi -p --model opencode-go/deepseek-v4-pro "$PROMPT"
+pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"
+END_TS="$(date +%s)"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ai-tech-digest duration=$((END_TS - START_TS))s model=deepseek-v4-flash" >> "$HOME/digests/ai-tech/.runs.log"

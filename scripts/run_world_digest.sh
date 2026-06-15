@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Researches and emails the daily world events digest via Pi + DeepSeek V4 Pro.
+# Researches and emails the daily world events digest via Pi + DeepSeek V4 Flash.
 # Scheduled via systemd timer (world-digest.timer). Provider-agnostic: change
 # the --model id to switch providers/models without touching anything else.
 
@@ -8,6 +8,7 @@ set -euo pipefail
 export HOME="/home/carter"
 
 TODAY="$(date +%Y-%m-%d)"
+START_TS="$(date +%s)"
 TEMPLATE_TEMP="$HOME/digests/world-digest/.template_prefilled.html"
 sed -e 's/{{DIGEST_TITLE}}/World Briefing/g' -e "s/{{DATE}}/$TODAY/g" "$HOME/digests/template.html" > "$TEMPLATE_TEMP"
 
@@ -47,7 +48,7 @@ Cover these angles:
 - Science/health/environment (only major developments — new pandemic guidance, climate milestones, space missions)
 - Any breaking news of global significance
 
-Prioritize events where something concrete happened over stories that are just commentary or reaction. If a source fails to fetch, try another reputable outlet.
+Prioritize events where something concrete happened over stories that are just commentary or reaction. If a source fails to fetch, try another reputable outlet. Be concise — these are read on mobile.
 
 ## Accuracy Rules (apply to every story)
 
@@ -60,9 +61,9 @@ Prioritize events where something concrete happened over stories that are just c
 
 Organize the email into two sections:
 
-**Fresh (last 24 hours):** New stories from today. 6-10 stories.
+**Fresh (last 24 hours):** New stories from today. 5-7 stories.
 
-**Recent & Relevant (past week):** Stories from the past 2-7 days that are still evolving or have meaningful new developments since last covered. For each, note what changed. Only include if there'"'"'s something new to say. 2-5 stories.
+**Recent & Relevant (past week):** Stories from the past 2-7 days that are still evolving or have meaningful new developments since last covered. For each, note what changed. Only include if there'"'"'s something new to say. 1-3 stories.
 
 Build the HTML by filling in the template you read in Step 0:
 - Replace {{INTRO}} with a 1-2 sentence neutral summary of the day'"'"'s news landscape. No editorializing — just orient the reader on what kind of day it was (e.g. "A busy day for trade policy and Middle East diplomacy." or "Relatively quiet day — a few legislative moves and an ongoing humanitarian situation in East Africa.").
@@ -74,21 +75,28 @@ Build the HTML by filling in the template you read in Step 0:
 
 1. Write the HTML body to /home/carter/digests/world-digest/.daily_digest.html
 2. Send it by running this command with your bash tool: python3 /home/carter/scripts/send_digest.py --subject "World Briefing — '"$TODAY"'" --body-file /home/carter/digests/world-digest/.daily_digest.html --to carter2099@pm.me
-3. Clean up: rm /home/carter/digests/world-digest/.daily_digest.html
+3. Archive the HTML: rename /home/carter/digests/world-digest/.daily_digest.html to /home/carter/digests/world-digest/'"$TODAY"'.html
 
 ## Step 4: Write summary for future runs
 
 Write a concise summary of what you sent to /home/carter/digests/world-digest/'"$TODAY"'.md in this format:
 
+```
 # World Briefing — '"$TODAY"'
+**Model:** deepseek-v4-flash | **Sent to:** carter2099@pm.me
 
 ## Fresh
-- **Story title** — one-line summary
-- **Story title** — one-line summary
+- [Story title](URL) — one-line summary
+- [Story title](URL) — one-line summary
 
 ## Recent & Relevant
-- **Story title** — one-line summary (why still relevant)
+- [Story title](URL) — one-line summary (why still relevant)
+```
+
+IMPORTANT: every story must include its URL as a markdown link `[title](URL)`. This enables retroactive quality analysis.
 
 Then delete any .md files in /home/carter/digests/world-digest/ older than 7 days.'
 
-exec pi -p --model opencode-go/deepseek-v4-pro "$PROMPT"
+pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"
+END_TS="$(date +%s)"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) world-digest duration=$((END_TS - START_TS))s model=deepseek-v4-flash" >> "$HOME/digests/world-digest/.runs.log"

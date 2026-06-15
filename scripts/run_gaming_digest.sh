@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Researches and emails the daily gaming digest via Pi + DeepSeek V4 Pro.
+# Researches and emails the daily gaming digest via Pi + DeepSeek V4 Flash.
 # Scheduled via systemd timer (gaming-digest.timer). Provider-agnostic: change
 # the --model id to switch providers/models without touching anything else.
 
@@ -8,6 +8,7 @@ set -euo pipefail
 export HOME="/home/carter"
 
 TODAY="$(date +%Y-%m-%d)"
+START_TS="$(date +%s)"
 TEMPLATE_TEMP="$HOME/digests/gaming-digest/.template_prefilled.html"
 sed -e 's/{{DIGEST_TITLE}}/Gaming Digest/g' -e "s/{{DATE}}/$TODAY/g" "$HOME/digests/template.html" > "$TEMPLATE_TEMP"
 
@@ -37,7 +38,7 @@ Cover these angles:
 - Gaming PC hardware (GPUs, CPUs, peripherals, benchmarks)
 - Esports, industry news, and trending community topics
 
-Prioritize breaking news, major announcements, and stories generating significant community discussion. If a source fails to fetch, try another reputable outlet.
+Prioritize breaking news, major announcements, and stories generating significant community discussion. If a source fails to fetch, try another reputable outlet. Be concise — these are read on mobile.
 
 ## Accuracy Rules (apply to every story)
 
@@ -50,9 +51,9 @@ Prioritize breaking news, major announcements, and stories generating significan
 
 Organize the email into two sections:
 
-**Fresh (last 24 hours):** New stories from today. 6-10 stories.
+**Fresh (last 24 hours):** New stories from today. 5-7 stories.
 
-**Recent & Relevant (past week):** Stories from the past 2-7 days that are still evolving, gaining momentum, or have meaningful new developments since last covered. For each, note what changed or why it'"'"'s still relevant. Only include if there'"'"'s something new to say — do not simply repeat old summaries. 2-5 stories.
+**Recent & Relevant (past week):** Stories from the past 2-7 days that are still evolving, gaining momentum, or have meaningful new developments since last covered. For each, note what changed or why it'"'"'s still relevant. Only include if there'"'"'s something new to say — do not simply repeat old summaries. 1-3 stories.
 
 Build the HTML by filling in the template you read in Step 0:
 - Replace {{INTRO}} with a 2-3 sentence editorial intro highlighting the biggest stories of the day
@@ -64,21 +65,28 @@ Build the HTML by filling in the template you read in Step 0:
 
 1. Write the HTML body to /home/carter/digests/gaming-digest/.daily_digest.html
 2. Send it by running this command with your bash tool: python3 /home/carter/scripts/send_digest.py --subject "Gaming Digest — '"$TODAY"'" --body-file /home/carter/digests/gaming-digest/.daily_digest.html --to carter2099@pm.me
-3. Clean up: rm /home/carter/digests/gaming-digest/.daily_digest.html
+3. Archive the HTML: rename /home/carter/digests/gaming-digest/.daily_digest.html to /home/carter/digests/gaming-digest/'"$TODAY"'.html
 
 ## Step 4: Write summary for future runs
 
 Write a concise summary of what you sent to /home/carter/digests/gaming-digest/'"$TODAY"'.md in this format:
 
+```
 # Gaming Digest — '"$TODAY"'
+**Model:** deepseek-v4-flash | **Sent to:** carter2099@pm.me
 
 ## Fresh
-- **Story title** — one-line summary
-- **Story title** — one-line summary
+- [Story title](URL) — one-line summary
+- [Story title](URL) — one-line summary
 
 ## Recent & Relevant
-- **Story title** — one-line summary (why still relevant)
+- [Story title](URL) — one-line summary (why still relevant)
+```
+
+IMPORTANT: every story must include its URL as a markdown link `[title](URL)`. This enables retroactive quality analysis.
 
 Then delete any .md files in /home/carter/digests/gaming-digest/ older than 7 days.'
 
-exec pi -p --model opencode-go/deepseek-v4-pro "$PROMPT"
+pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"
+END_TS="$(date +%s)"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) gaming-digest duration=$((END_TS - START_TS))s model=deepseek-v4-flash" >> "$HOME/digests/gaming-digest/.runs.log"
