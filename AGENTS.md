@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to AI agents (pi, opencode, Claude, etc.) when working with code in this repository.
+This file provides guidance to AI agents (pi, Claude, etc.) when working with code in this repository.
 
 **Maintenance:** Keep this file up to date. When deploying a new app, adding a service, changing ports/IPs, or making any structural changes to the homelab, update the relevant sections here as part of that work.
 
@@ -229,8 +229,8 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 ### Dependabot Webhook (Go)
 - Always-on systemd user service (`dependabot-webhook.service`) listening on `localhost:9099`
 - Receives GitHub `pull_request` webhooks via Cloudflare tunnel at `hooks.carter2099.com/webhook`
-- Verifies HMAC-SHA256 signature, then spawns a sandboxed **opencode agent (Qwen 3.7 Max)** to handle bundler bumps
-- Agent runs with a narrow permission sandbox (`~/.config/dependabot-webhook/opencode.json`, pointed to via the `OPENCODE_CONFIG` env var) — a default-deny bash floor + a git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified that headless `opencode run` enforces these deny rules (it drops the bash tool entirely on a full deny, and blocks non-allowlisted commands incl. non-`main` git push).
+- Verifies HMAC-SHA256 signature, then spawns a sandboxed **Pi agent (Qwen 3.7 Max)** to handle bundler bumps
+- Agent runs with a narrow permission sandbox (`pi-sandbox.ts` + `--tools` flag) — default-deny bash floor + git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified via 4-test battery (allow, block, tool restriction, dry run).
 - 90-second coalesce window so a burst of PRs is handled in one agent run
 - Source: `~/dev/dependabot-webhook/`; config (with webhook secret): `~/.config/dependabot-webhook/env`
 - Logs: `journalctl --user -u dependabot-webhook -f`
@@ -241,7 +241,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Docker Compose in `~/open-webui/` (`ghcr.io/open-webui/open-webui:main`), bound **`127.0.0.1:48100`** (loopback-only).
 - **Backend = the OpenCode Go endpoint** (`OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1`) so chat usage rides the **flat-sub session-cap billing**, NOT `zen/v1` pay-as-you-go. The 18 Go models populate automatically; a few (e.g. `qwen3.7-max`) 401 as "not supported for format oa-compat" and are opencode-native-only — just pick another. (See the Zen-vs-Go endpoint note: same account key, the base URL picks product/billing.)
 - Secrets (`OPENAI_API_KEY` = the Go key, `WEBUI_SECRET_KEY`) in gitignored `~/open-webui/.env` (600). Compose + `up.sh` are tracked; `.env` is not.
-- **Routing: direct-tunnel pattern** (like `opencode-homelab`/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
+- **Routing: direct-tunnel pattern** (like pi-web/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
 - **Auth: two layers.** CF Access (edge SSO, manually configured in Zero Trust) + Open WebUI's own login (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`). Admin `carter2099@pm.me`, created over loopback so there was never an open-signup window.
 - Manage: `cd ~/open-webui && bash up.sh` (pull + restart); `docker compose -f ~/open-webui/docker-compose.yml logs -f`.
 
@@ -283,21 +283,20 @@ Carter often references these by topic when chatting ("I saw something in the ag
 
 ## Remote Agent Operations
 
-This homelab runs an **always-on opencode web agent** accessible from any browser at `https://opencode.carter2099.com`. It runs `opencode web` as a systemd user service (`opencode-homelab.service`) under the `carter` user with `loginctl enable-linger` so it survives reboots. It is **intentionally full-privilege** (no command denylist, no `NoNewPrivileges`); the trust anchor is **Cloudflare Access**.
+This homelab runs an **always-on pi-web agent** accessible from any browser at `https://opencode.carter2099.com`. It runs `pi-web` (installed via `npm install -g @jmfederico/pi-web`) as two systemd user services with `loginctl enable-linger` so they survive reboots. It is **intentionally full-privilege** (no command denylist, no `NoNewPrivileges`); the trust anchor is **Cloudflare Access**.
 
-- **Service unit:** `~/.config/systemd/user/opencode-homelab.service` → `opencode web --hostname 127.0.0.1 --port 48099`. **Loopback-only bind on purpose** — the sole ingress is the CF tunnel; it is NOT reachable on the LAN (so there's no path that bypasses Cloudflare Access).
-- **Access URL:** `https://opencode.carter2099.com` (browser → CF Access SSO → opencode UI).
-- **Two independent credentials (defense in depth):**
-  1. **Cloudflare Access** (identity gate at the CF edge) — unauthenticated requests get a 302 to `carter2099.cloudflareaccess.com` and never reach the host. Policy is managed in the CF Zero Trust dashboard.
-  2. **`OPENCODE_SERVER_PASSWORD`** — opencode's own HTTP basic-auth, enforced server-side (401 without). Stored in `~/.config/opencode-homelab/env` (gitignored, 600). **Never commit this file.** The basic-auth **username MUST be `opencode`** (literal) — opencode's API rejects every other username even with the right password; the password is the `OPENCODE_SERVER_PASSWORD` value.
-- **Routing:** uses the **direct-tunnel (webhook) pattern, NOT Traefik** — deliberately, so the app stays off the LAN. Tunnel ingress `opencode.carter2099.com → http://localhost:48099` (cloudflared runs on the host and reaches loopback) → the `opencode web` process. No k3s manifest, no ExternalService/Endpoints, no Traefik hop. DNS: proxied CNAME `opencode` → `<tunnel-id>.cfargotunnel.com`. (This mirrors how `hooks.carter2099.com → localhost:9099` works for the dependabot webhook.)
-- **Wart:** `opencode web` tries to `xdg-open` a browser at startup (ENOENT on this headless host) — **non-fatal**, the server runs fine; it's just noise in the journal.
-- **Logs:** `journalctl --user -u opencode-homelab -f`
-- **Restart:** `systemctl --user restart opencode-homelab`
+- **Services:** `pi-web-sessiond.service` (session daemon) + `pi-web.service` (web/API at `127.0.0.1:8504`). **Loopback-only bind on purpose** — the sole ingress is the CF tunnel; it is NOT reachable on the LAN (so there's no path that bypasses Cloudflare Access).
+- **Access URL:** `https://opencode.carter2099.com` (browser → CF Access SSO → pi-web UI). The old `pi.carter2099.com` hostname also routes to the same service.
+- **Auth:** Cloudflare Access (identity gate at the CF edge) — unauthenticated requests get a 302 to `carter2099.cloudflareaccess.com` and never reach the host. Policy is managed in the CF Zero Trust dashboard. No secondary password layer (unlike opencode-web which had `OPENCODE_SERVER_PASSWORD`).
+- **Routing:** direct-tunnel pattern — tunnel ingress `opencode.carter2099.com → http://localhost:8504` (cloudflared runs on the host and reaches loopback). No k3s manifest, no ExternalService/Endpoints, no Traefik hop. DNS: proxied CNAME `opencode` → `<tunnel-id>.cfargotunnel.com`.
+- **Config:** `~/.config/pi-web/config.json` (host, port, allowedHosts).
+- **Logs:** `journalctl --user -u pi-web -f` or `pi-web logs`
+- **Restart:** `systemctl --user restart pi-web pi-web-sessiond` or `pi-web restart`
+- **Shell dependency:** pi-web requires `node` on PATH in non-interactive login shells. The `~/.zprofile` file initializes fnm for this purpose.
 
 ### Debugging from an interactive SSH session
 
-If the opencode web agent is misbehaving or unreachable, an interactive agent SSH'd into the box diagnoses it. **First thing every SSH session should do** before `systemctl --user ...` commands:
+If pi-web is misbehaving or unreachable, an interactive agent SSH'd into the box diagnoses it. **First thing every SSH session should do** before `systemctl --user ...` commands:
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)   # required for systemctl --user to reach the user bus
@@ -306,10 +305,11 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)   # required for systemctl --user to r
 Standard diagnosis sequence:
 
 ```bash
-systemctl --user status opencode-homelab --no-pager -l     # running? crashlooping?
-journalctl --user -u opencode-homelab -n 100 --no-pager    # why it failed
-ls -la ~/agent-state/                                      # pending reboot context, etc
-cat ~/.config/opencode/opencode.jsonc                      # config
+pi-web status                                            # services running?
+journalctl --user -u pi-web -n 100 --no-pager            # why it failed
+journalctl --user -u pi-web-sessiond -n 100 --no-pager   # sessiond logs
+ls -la ~/agent-state/                                    # pending reboot context, etc
+cat ~/.config/pi-web/config.json                         # config
 ```
 
 ### Reboot protocol
