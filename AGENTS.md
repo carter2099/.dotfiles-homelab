@@ -185,6 +185,8 @@ k delete pod <name>  # k3s auto-recreates
 
 Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.).
 
+**k3s server config:** `/etc/rancher/k3s/config.yaml` (tracked copy: `~/k3s/config.yaml`). **Critical:** `flannel-iface` must match the active network interface. WiFi (`wlp6s0`) is disabled — flannel must use `enp3s0f0`. If k3s crashloops with `"flannel exited: failed to find the interface wlp6s0: No IPv4 address found"`, this config regressed. The node IP is `192.168.4.92` (static secondary on the wired interface).
+
 ## App Details
 
 ### Blog (Rails 8 + SQLite)
