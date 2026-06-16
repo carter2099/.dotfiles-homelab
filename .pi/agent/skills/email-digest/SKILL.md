@@ -1,6 +1,6 @@
 ---
 name: email-digest
-description: Create a new scheduled email digest that runs daily via a systemd timer, spawning a headless opencode agent (MiniMax M3) to research the web for news on specified topics and email an HTML summary.
+description: Create a new scheduled email digest that runs daily via a systemd timer, spawning a headless Pi agent (deepseek-v4-flash) to research the web for news on specified topics and email an HTML summary.
 ---
 
 # email-digest
@@ -13,7 +13,7 @@ Gather these from the user before creating the digest. Ask for anything missing:
 
 - **name** (string): short kebab-case identifier (e.g. `ai-tech-digest`, `crypto-weekly`)
 - **topics** (string): what the digest should cover
-- **sources** (list of URLs): reputable homepages to fetch for this topic (opencode has **no web-search tool** — research is done by fetching news homepages and following article links, so good starting sources matter). If the user doesn't specify, suggest a few reputable outlets for the topic.
+- **sources** (list of URLs): reputable homepages to start research from. Pi has `web_search` for discovery and `web_fetch` for reading pages — good starting sources still help focus coverage. If the user doesn't specify, suggest a few reputable outlets for the topic.
 - **recipients** (list of emails): one or more addresses to send to
 - **time** (string): time of day in the user's local time. Convert to UTC for the systemd timer `OnCalendar` (server is UTC). Currently EDT = UTC-4. Confirm the conversion with the user.
 - **frequency** (string, default: daily): daily, weekdays, weekly, etc.
@@ -37,7 +37,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
 ## Steps
 
-1. **Verify infrastructure.** Confirm `~/scripts/send_digest.py`, `~/scripts/.smtp_config`, and `~/.opencode/bin/opencode` exist.
+1. **Verify infrastructure.** Confirm `~/scripts/send_digest.py`, `~/scripts/.smtp_config`, and `pi` on PATH exist.
 
 2. **Create the history directory.** `mkdir -p ~/digests/<name>/`
 
@@ -151,7 +151,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
    ```ini
    [Unit]
-   Description=Daily [TOPIC] email digest via opencode (MiniMax M3)
+   Description=Daily [TOPIC] email digest via Pi (deepseek-v4-flash)
 
    [Service]
    Type=oneshot
@@ -193,7 +193,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
    - Timer status: `systemctl --user status [NAME].timer`
    - Next fire time from `systemctl --user list-timers [NAME].timer`
    - Recipient list
-   - Offer to do a test run: `bash ~/scripts/run_[NAME].sh` — then **verify it actually sent**: check the journal for a `Sent to` line and that `~/digests/[NAME]/[DATE].md` was written. `opencode run` exits 0 even if the model skipped a step, so the exit code alone is not proof of success.
+   - Offer to do a test run: `bash ~/scripts/run_[NAME].sh` — then **verify it actually sent**: check that `~/digests/[NAME]/[DATE].md` was written with URLs, the `.html` was archived, and `.runs.log` has an entry. Pi exits non-zero on failure, but verify artifacts anyway.
 
 ## Modifying an existing digest
 
