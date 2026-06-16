@@ -40,7 +40,7 @@
 		"toolErrorBg": "#2e2528",
 		"toolTitle": "",
 		"toolOutput": "gray",
-		"mdHeading": "orange",
+		"mdHeading": "blue",
 		"mdLink": "blue",
 		"mdLinkUrl": "dimGray",
 		"mdCode": "cyan",
