@@ -49,3 +49,18 @@ targets:
     excludes:
       - cache
       - "*.log"
+
+  - name: delta_neutral-db
+    type: sqlite-docker
+    container: delta_neutral-web-1
+    db_path: /rails/storage/production.sqlite3
+
+  - name: homelab-backup-config
+    type: directory
+    source: /home/carter/homelab-backup
+    excludes:
+      - homelab-backup
+
+  - name: k3s-manifests
+    type: directory
+    source: /home/carter/k3s
