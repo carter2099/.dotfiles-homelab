@@ -191,4 +191,32 @@ Agent completed the full hyperliquid-run skill cycle:
 - [x] Email sent to carter2099@pm.me (temp file cleaned up)
 - [x] Timer active and enabled — next fire: Mon/Thu at 08:00 UTC
 
-**Result: PASS** — Qwen 3.7 Max performed identically on Pi vs opencode.
+**Result: PASS** — deployed, sandbox tested, e2e pending (next dependabot batch).
+
+---
+
+## 2026-06-16 00:20 UTC — Phase 4: pi-web (opencode-web replacement)
+
+### Install
+
+```bash
+npm install -g @jmfederico/pi-web
+pi-web install  # creates pi-web-sessiond + pi-web systemd services
+```
+
+- Fixed fnm PATH: added `.zprofile` for non-interactive login shells (systemd)
+- Services bind `127.0.0.1:8504` (loopback-only, same security model as opencode-web)
+
+### Tunnel configuration
+
+- Added `pi.carter2099.com → localhost:8504` to homelab tunnel
+- Created DNS CNAME: `pi → tunnel-id.cfargotunnel.com`
+- Carter configured CF Access for the new hostname manually (API token lacks Access scope)
+
+### Cutover
+
+- Updated tunnel: `opencode.carter2099.com → localhost:8504` (was `:48099`)
+- Stopped and disabled `opencode-homelab.service`
+- Verified: pi-web responds at both hostnames, CF Access gate intact
+
+**Result: PASS** — pi-web live, opencode-web retired.
