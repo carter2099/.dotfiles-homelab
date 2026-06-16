@@ -32,15 +32,10 @@ Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PR
 | Component | Details |
 |---|---|
 | **Model** | ThinkPad L14 Gen 3 (AMD) |
-| **Machine Type** | 21C6 |
-| **Serial** | PW099A70 |
 | **CPU** | AMD Ryzen 5 PRO 5675U (6C/12T, 2.3–4.3GHz) |
 | **RAM** | 16GB DDR4-3200 (2x SO-DIMM slots, dual-channel) |
 | **Storage** | 500GB NVMe M.2 2242 SSD (PCIe 3.0 x4) |
-| **Display** | 14" FHD (1920×1080) IPS |
 | **Network** | Gigabit Ethernet (Realtek RTL8111HN/EPV), Wi-Fi 6E, Bluetooth 5.1 |
-| **Ports** | 2× USB-C (Gen 1 + Gen 2, both PD + DP), 2× USB-A 3.2 Gen 1, HDMI 2.0, RJ-45, microSD, 3.5mm combo |
-| **BIOS** | R1YET47W (1.24), 08/04/2023 |
 
 **Notes:**
 - The wired NIC `enp3s0f0` (Realtek) is the **primary uplink**.
@@ -50,7 +45,6 @@ Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PR
   - `wlp6s0`: Removed from netplan — disabled
 - **Default route:** Via `enp3s0f0` (metric 100)
 - **k3s ingress IPs:** `192.168.4.92` (blog, delta_neutral) and `192.168.4.102` (tbitt, stickies — both not live) are secondary IPs on the wired interface.
-- **Rollback:** To re-enable WiFi, restore `/etc/netplan/50-cloud-init.yaml.bak` and run `sudo netplan apply`.
 
 ## Repository Structure
 
@@ -151,16 +145,7 @@ bash up.sh                            # start fresh
 
 ### "Missing feature" symptom = almost always a cache hit, not a code regression
 
-When a user reports "my blog redeployed and lost feature X" (or "shows old UI"), **do not assume a deploy regression** and do not start rolling back. The near-universal cause is **Cloudflare or browser cache serving a stale page while origin is down**. CF keeps serving its last cached HTML when the origin 5xx's — which happens whenever `docker-proxy` is orphaned (previous section) or the container is Exited.
-
-Diagnose in this order before touching code:
-1. `docker ps --filter name=<app>` — is the container actually running? If not, the user is seeing a cache.
-2. `grep -r <feature> <app-dir>/app/views <app-dir>/app/controllers` — does the code on disk have the feature? (Usually yes.)
-3. `docker run --rm --entrypoint ls <image> /rails/app/views/<feature>` — does the **image** have the feature? (Usually yes.)
-4. `curl -s http://localhost:<port>/` — does the origin serve the feature now? If yes, it's 100% a cache issue.
-5. Only after 1–4 clear: investigate whether rebuild skipped or an old commit got deployed.
-
-If origin is healthy and the user still sees stale content, the fix is **not a redeploy** — it's either a hard-refresh on their end (`Cmd+Shift+R`) or a Cloudflare cache purge. Redeploying a healthy app wastes a build cycle and risks another exit-255 crash during the restart window, which *extends* the cache-hit problem.
+If someone sees stale content or a missing feature after deploy, **do not assume a code regression**. The likely cause is Cloudflare serving cached HTML while the origin is down (orphaned docker-proxy or Exited container). Before touching code: confirm the container is running, verify the feature exists on disk and in the image, and curl the origin. If origin is healthy, fix with a hard-refresh or CF cache purge — not a redeploy, which risks another exit-255 during restart.
 
 ### Exit 255 is a known intermittent on this host
 
@@ -237,13 +222,18 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Logs: `journalctl --user -u dependabot-webhook -f`
 - Release: `cd ~/dev/dependabot-webhook && bash release.sh`
 
+### Hyperliquid SDK Maintenance (systemd timer)
+- Runs Mon/Thu at 04:00 ET via systemd user timer (`hyperliquid-sdk.service`/`.timer`)
+- Spawns `pi -p --model opencode-go/qwen3.7-max` executing the `hyperliquid-run` skill
+- Script: `~/scripts/run_hyperliquid_sdk.sh`; timeout: 30 min
+
 ### Open WebUI (Homelab Chat)
 - ChatGPT/Claude-style self-hosted chat UI at `https://chat.carter2099.com`. Not an agent — a general chat front-end.
 - Docker Compose in `~/open-webui/` (`ghcr.io/open-webui/open-webui:main`), bound **`127.0.0.1:48100`** (loopback-only).
 - **Backend = the OpenCode Go endpoint** (`OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1`) so chat usage rides the **flat-sub session-cap billing**, NOT `zen/v1` pay-as-you-go. The 18 Go models populate automatically; a few (e.g. `qwen3.7-max`) 401 as "not supported for format oa-compat" and are opencode-native-only — just pick another. (See the Zen-vs-Go endpoint note: same account key, the base URL picks product/billing.)
 - Secrets (`OPENAI_API_KEY` = the Go key, `WEBUI_SECRET_KEY`) in gitignored `~/open-webui/.env` (600). Compose + `up.sh` are tracked; `.env` is not.
 - **Routing: direct-tunnel pattern** (like pi-web/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
-- **Auth: two layers.** CF Access (edge SSO, manually configured in Zero Trust) + Open WebUI's own login (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`). Admin `carter2099@pm.me`, created over loopback so there was never an open-signup window.
+- **Auth: two layers.** CF Access (edge SSO, manually configured in Zero Trust) + Open WebUI's own login (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`).
 - Manage: `cd ~/open-webui && bash up.sh` (pull + restart); `docker compose -f ~/open-webui/docker-compose.yml logs -f`.
 
 ### Cloudflare API Access
@@ -251,7 +241,6 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone). **No Zero Trust / Access scope** — so Access apps/policies (the SSO gate in front of tunneled hostnames) must be configured **manually in the Zero Trust dashboard**; the API token returns 403 on `/access/apps`. To automate Access too, add "Access: Apps and Policies: Edit" (Account) to the token.
 - Supporting IDs in `~/.config/cloudflare/`: `account-id`, `zone-id`, `homelab-tunnel-id`
 - Env vars (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_HOMELAB_TUNNEL_ID`) exported from `.zshrc`
-- To add a new public hostname to the homelab tunnel: PUT `/accounts/{id}/cfd_tunnel/{tunnel_id}/configurations` with updated ingress array, then POST DNS CNAME to `/zones/{zone_id}/dns_records`
 
 ## Email Digests
 
@@ -270,15 +259,7 @@ Each script runs `pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"`. Pi's `
 
 ### Quality infrastructure
 
-Each digest produces three artifacts per run for retroactive quality analysis:
-
-| Artifact | Path | Purpose |
-|---|---|---|
-| **Summary** | `~/digests/<topic>/YYYY-MM-DD.md` | Stories with `[title](URL)` markdown links, model, and recipients — machine-readable for LLM quality review |
-| **HTML archive** | `~/digests/<topic>/YYYY-MM-DD.html` | Full email body as sent (no longer deleted after sending) |
-| **Run log** | `~/digests/<topic>/.runs.log` | Timestamps, wall-clock duration, and model per run — `grep`-able for performance analysis |
-
-To audit a digest retroactively, another Pi/LLM session can read the `.md` (story URLs), fetch the cited articles, and compare against the `.html` (what was actually sent). The `.runs.log` tracks performance trends.
+Each run writes a summary (`~/digests/<topic>/YYYY-MM-DD.md`), an HTML archive (`.html`), and a run log (`.runs.log`). Summaries are machine-readable for retrospective quality audits.
 
 Carter often references these by topic when chatting ("I saw something in the agentic digest about X"). When he does, note-taking into `~/notes/` is the likely follow-up.
 
@@ -293,8 +274,6 @@ This homelab runs an **always-on pi-web agent** accessible from any browser at `
 - **Config:** `~/.config/pi-web/config.json` (host, port, allowedHosts).
 - **Logs:** `journalctl --user -u pi-web -f` or `pi-web logs`
 - **Restart:** `systemctl --user restart pi-web pi-web-sessiond` or `pi-web restart`
-- **Shell dependency:** pi-web requires `node` on PATH in non-interactive login shells. The `~/.zprofile` file initializes fnm for this purpose.
-
 ### Debugging from an interactive SSH session
 
 If pi-web is misbehaving or unreachable, an interactive agent SSH'd into the box diagnoses it. **First thing every SSH session should do** before `systemctl --user ...` commands:
