@@ -1,0 +1,7 @@
+node-ip: "192.168.4.92"
+advertise-address: "192.168.4.92"
+node-external-ip: "192.168.4.92"
+flannel-iface: "enp3s0f0"
+kubelet-arg:
+  - "node-ip=192.168.4.92"
+disable-network-policy: true
