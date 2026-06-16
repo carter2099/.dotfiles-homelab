@@ -25,7 +25,7 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static secondary IPs `192.168.4.92` (blog, delta_neutral, hub) and `192.168.4.102` (tbitt, stickies — both not live) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
+Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static secondary IPs `192.168.4.92` (blog, delta_neutral) and `192.168.4.102` (tbitt, stickies — both not live) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
 
 ## Hardware
 
@@ -49,7 +49,7 @@ Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PR
   - `enp3s0f0`: DHCP primary (`192.168.4.100`), static secondary (`192.168.4.92/22`, `192.168.4.102/22`)
   - `wlp6s0`: Removed from netplan — disabled
 - **Default route:** Via `enp3s0f0` (metric 100)
-- **k3s ingress IPs:** `192.168.4.92` (blog, delta_neutral, hub) and `192.168.4.102` (tbitt, stickies — both not live) are secondary IPs on the wired interface.
+- **k3s ingress IPs:** `192.168.4.92` (blog, delta_neutral) and `192.168.4.102` (tbitt, stickies — both not live) are secondary IPs on the wired interface.
 - **Rollback:** To re-enable WiFi, restore `/etc/netplan/50-cloud-init.yaml.bak` and run `sudo netplan apply`.
 
 ## Repository Structure
@@ -180,7 +180,7 @@ k delete pod <name>  # k3s auto-recreates
 ```
 
 **Architecture pattern:** Two deployment models coexist:
-- **Self-developed webapps** (blog, hub, tbitt, stickies, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92, hub/tbitt/stickies at 192.168.4.102). Note: stickies is not currently live; tbitt is deprecated.
+- **Self-developed webapps** (blog, hub, tbitt, stickies, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92, tbitt/stickies at 192.168.4.102). Note: hub and stickies are not currently live; tbitt is deprecated.
 - **Third-party services** (grafana, prometheus, node-exporter, freshrss, uptime-kuma, traefik) run natively as k3s Deployments/DaemonSets.
 
 Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.).
@@ -196,9 +196,10 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Has its own `AGENTS.md` with detailed architecture docs
 - Ruby 3.4.3, Propshaft, Importmap, Turbo/Stimulus
 
-### Hub (React + Rails API)
-- Client: React 19 + TypeScript + Vite (port 3000/13000)
-- Server: Rails 8 API-only (port 3001/13001)
+### Hub (React + Rails API) - Not live
+- Code remains on disk but the service is not running. Previously planned for carter2099.com.
+- Client (if deployed): React 19 + TypeScript + Vite (port 3000/13000)
+- Server (if deployed): Rails 8 API-only (port 3001/13001)
 - Hyperliquid SDK for crypto price data
 
 ### Tbitt (React + Express) - Deprecated
