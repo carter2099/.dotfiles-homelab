@@ -166,14 +166,32 @@ python3 ~/scripts/send_digest.py \
 rm /home/carter/agent-state/.hyperliquid_email.html
 ```
 
-Email body should include:
-- **What was implemented** this run (or "nothing new to implement" if scope was empty)
-- **New gaps discovered** (if any), with a note if any need approval
-- **Test results** (unit + integration pass/fail summary)
-- **Anything needing manual action** (needs_approval items, test failures requiring investigation)
-- **Next run preview** — what's queued for next time
+Email body must be valid HTML (the script sends `subtype="html"` — markdown-style text will render as one collapsed blob with no line breaks). Use this structure:
 
-Keep it concise. Carter reads these on mobile.
+```html
+<h2>Run #N — YYYY-MM-DD</h2>
+
+<h3>Implemented</h3>
+<ul>
+  <li>Short description of each change</li>
+</ul>
+
+<h3>Test results</h3>
+<p>N/N unit tests passing. N/N integration tests passing. RuboCop clean.</p>
+
+<h3>New gaps</h3>
+<ul>
+  <li>Gap description (status)</li>
+</ul>
+
+<h3>Needs attention</h3>
+<p>Any manual action items or notes.</p>
+
+<h3>Next run preview</h3>
+<p>What's queued.</p>
+```
+
+Keep it concise. Carter reads these on mobile. Do NOT use markdown formatting — the file must be HTML with real `<h2>`, `<p>`, `<ul>`, `<li>` tags.
 
 ## Step 12: Backup state file reminder
 
