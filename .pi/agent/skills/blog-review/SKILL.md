@@ -125,3 +125,12 @@ Always use `ReviewType.find_by!(name: '<type>')` — never hardcode IDs.
 - `main_image` stores just the filename (e.g. `cover.jpg`), not a full path.
 - If `rails runner` fails, clean up any written files and report the error.
 - The `rating` field is a float — `4` and `4.0` both work, as does `3.5`.
+
+## Markdown formatting rules
+
+The blog uses Redcarpet with `hard_wrap: true`, which changes how the parser handles certain constructs. Follow these rules when writing markdown content:
+
+- **Blank line before lists.** A list must have a blank line separating it from the preceding paragraph — otherwise Redcarpet won't parse it as `<ul>`/`<li>` and will instead render it as literal text with `<br>` line breaks.
+- **Blank line before headings** (`##`, `###`, etc.) — same rule as lists.
+- **Spaces, not tabs, for nested list indentation.** Use 4 spaces for each nesting level. Tabs cause Redcarpet to treat the indented content as a code block.
+- **Inline backtick code** (`` `code` ``) renders with a subtle background only (it's now `display: inline` as of 2025-06-19). Fenced code blocks (` ``` `) are for block-level code.

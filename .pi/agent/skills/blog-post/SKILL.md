@@ -97,3 +97,19 @@ Report the post ID, URL (`https://blog.carter2099.com/posts/<id>`), and number o
 - Escape single quotes in title and content when passing to `rails runner` (use heredoc syntax for content if needed).
 - Posts have no frontmatter — just plain markdown content.
 - If `rails runner` fails, the file has already been written but no DB record or emails were sent. Clean up the file and report the error.
+
+## Markdown formatting rules
+
+The blog uses Redcarpet with `hard_wrap: true`, which changes how the parser handles certain constructs. Follow these rules when writing markdown content:
+
+- **Blank line before lists.** A list must have a blank line separating it from the preceding paragraph — otherwise Redcarpet won't parse it as `<ul>`/`<li>` and will instead render it as literal text with `<br>` line breaks.
+  ```markdown
+  ❌ Some intro text:
+  - first item
+  ✅ Some intro text:
+
+  - first item
+  ```
+- **Blank line before headings** (`##`, `###`, etc.) — same rule as lists.
+- **Spaces, not tabs, for nested list indentation.** Use 4 spaces for each nesting level. Tabs cause Redcarpet to treat the indented content as a code block.
+- **Inline backtick code** (`` `code` ``) renders with a subtle background only (it's now `display: inline` as of 2025-06-19). Fenced code blocks (` ``` `) are for block-level code.

@@ -154,3 +154,12 @@ Report success with the URL (`https://blog.carter2099.com/posts/<id>` or `/revie
 - The path in the DB is the **container path** (`/rails/app/posts/...`), but files are read/written on the **host path** (`/home/carter/blog/blog/app/posts/...`) since the directory is bind-mounted.
 - Escape single quotes in all values passed to `rails runner`.
 - If the user wants to change the filename (e.g. because the title changed), update both the file on disk and the `path` in the DB. Delete the old file after confirming the new one exists.
+
+## Markdown formatting rules
+
+The blog uses Redcarpet with `hard_wrap: true`, which changes how the parser handles certain constructs. Follow these rules when editing markdown content:
+
+- **Blank line before lists.** A list must have a blank line separating it from the preceding paragraph — otherwise Redcarpet won't parse it as `<ul>`/`<li>` and will instead render it as literal text with `<br>` line breaks.
+- **Blank line before headings** (`##`, `###`, etc.) — same rule as lists.
+- **Spaces, not tabs, for nested list indentation.** Use 4 spaces for each nesting level. Tabs cause Redcarpet to treat the indented content as a code block.
+- **Inline backtick code** (`` `code` ``) renders with a subtle background only (it's now `display: inline` as of 2025-06-19). Fenced code blocks (` ``` `) are for block-level code.
