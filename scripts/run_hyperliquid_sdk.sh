@@ -10,4 +10,4 @@ export PATH="$HOME/.local/bin:$HOME/.rbenv/bin:$HOME/.rbenv/shims:$HOME/.fnm:$PA
 
 PROMPT='Read /home/carter/.pi/agent/skills/hyperliquid-run/SKILL.md using the read tool and follow its instructions exactly. This is an automated scheduled SDK maintenance run.'
 
-pi -p --model opencode-go/qwen3.7-max "$PROMPT"
+pi -p --model opencode-go/glm-5.2 "$PROMPT"

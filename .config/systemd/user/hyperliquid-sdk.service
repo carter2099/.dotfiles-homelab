@@ -4,4 +4,4 @@ Description=Hyperliquid Ruby SDK autonomous maintenance run via Pi (Qwen 3.7 Max
 [Service]
 Type=oneshot
 ExecStart=/home/carter/scripts/run_hyperliquid_sdk.sh
-TimeoutStartSec=1800
+TimeoutStartSec=3600
