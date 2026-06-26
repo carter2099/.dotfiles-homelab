@@ -1,0 +1,12 @@
+[Unit]
+Description=Inject DOCKER-USER iptables rules to block LAN access to Docker containers
+After=snap.docker.dockerd.service
+Requires=snap.docker.dockerd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/docker-user-rules.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
