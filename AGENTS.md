@@ -310,6 +310,41 @@ At the start of every interactive session, check `~/agent-state/pending.md`. If 
 
 This is the mechanism by which tasks survive reboots. It is the *only* expectation of cross-reboot continuity.
 
+## Persistent Memory (`~/notes/`)
+
+The `~/notes/` vault is the homelab's long-term knowledge base — a standalone git repo of reference notes, session memoirs, and cross-referenced context.
+
+### For agents
+
+**Before starting work on a known topic**, grep the vault for relevant context:
+```bash
+rg -l "search term" ~/notes/
+```
+This is opt-in — only do it when past context would materially help the current task. Don't load entire files into context preemptively.
+
+**After significant sessions**, write a brief session memoir. "Significant" means: architectural decisions, system state changes, or context a future agent would need. Routine checks and quick Q&A don't need one.
+
+Write to `~/notes/sessions/YYYY-MM-DD.md` using this exact format:
+```markdown
+# Session: YYYY-MM-DD
+**Topics:** comma-separated list
+**Decisions:**
+- decision 1
+- decision 2
+**State changes:**
+- what was modified on the system
+**Context for next time:** 1-2 sentences a future agent should know
+```
+
+Session memoirs are NOT formal notes — don't use `/note-save` or full frontmatter for them. They're quick context dumps for cross-session continuity. Formal reference notes use `/note-save` when the user explicitly asks.
+
+### Vault structure
+
+- `~/notes/INDEX.md` — index of all formal reference notes (maintained by `/note-save`)
+- `~/notes/<topic>/` — reference notes organized by topic
+- `~/notes/sessions/` — session memoirs (YYYY-MM-DD.md)
+- The vault is a standalone git repo (not the dotfiles bare repo) — `/note-save` handles commits
+
 ## Gaming Rig (Windows 11)
 
 Carter's gaming PC — a Windows 11 Home machine (`DESKTOP-KQHLUCL`, user `carte`) on the LAN.
