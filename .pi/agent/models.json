@@ -10,42 +10,43 @@
       },
       "models": [
         {
-          "id": "qwen3.6-35b-q5",
-          "name": "Qwen 3.6 35B-A3B Q5 (Local)",
+          "id": "Qwen3.6-35B-A3B-Q5_K_M",
+          "name": "Qwen3.6 35B-A3B Q5_K_M (Local)",
           "reasoning": true,
           "input": ["text"],
           "contextWindow": 262144,
           "maxTokens": 65536,
-          "aliases": ["qwen3.6-35b"],
+          "aliases": ["qwen3.6-35b", "qwen3.6-35b-q5"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
-          "id": "qwen3.6-35b-q4",
-          "name": "Qwen 3.6 35B-A3B Q4 (Local)",
+          "id": "Qwen3.6-35B-A3B-Q4_K_M",
+          "name": "Qwen3.6 35B-A3B Q4_K_M (Local)",
           "reasoning": true,
           "input": ["text"],
           "contextWindow": 262144,
           "maxTokens": 65536,
+          "aliases": ["qwen3.6-35b-q4"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
-          "id": "gemma4-26b-q6",
-          "name": "Gemma 4 26B-A4B Q6 (Local)",
+          "id": "Gemma-4-26B-A4B-Q6_K",
+          "name": "Gemma 4 26B-A4B Q6_K (Local)",
           "reasoning": true,
           "input": ["text", "image"],
           "contextWindow": 262144,
           "maxTokens": 65536,
-          "aliases": ["gemma4-26b"],
+          "aliases": ["gemma4-26b", "gemma4-26b-q6"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
-          "id": "gpt-oss-20b",
-          "name": "GPT-OSS 20B (Local)",
+          "id": "GPT-OSS-20B-mxfp4",
+          "name": "GPT-OSS 20B mxfp4 (Local)",
           "reasoning": false,
           "input": ["text"],
           "contextWindow": 131072,
           "maxTokens": 32768,
-          "aliases": ["gpt-oss"],
+          "aliases": ["gpt-oss", "gpt-oss-20b"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }
       ]
