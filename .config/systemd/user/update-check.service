@@ -1,0 +1,7 @@
+[Unit]
+Description=Nightly homelab update audit via Pi agent (report-only, no changes)
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/run_update_check.sh
+TimeoutStartSec=600

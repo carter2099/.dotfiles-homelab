@@ -1,0 +1,9 @@
+[Unit]
+Description=Fire homelab update audit nightly at 6am ET
+
+[Timer]
+OnCalendar=*-*-* 10:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
