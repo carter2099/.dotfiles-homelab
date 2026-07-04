@@ -310,6 +310,19 @@ At the start of every interactive session, check `~/agent-state/pending.md`. If 
 
 This is the mechanism by which tasks survive reboots. It is the *only* expectation of cross-reboot continuity.
 
+## Gaming Rig (Windows 11)
+
+Carter's gaming PC — a Windows 11 Home machine (`DESKTOP-KQHLUCL`, user `carte`) on the LAN.
+
+- **IP:** `192.168.4.103` (reserved DHCP lease)
+- **Host alias:** `gamingrig` — resolves via `/etc/hosts` and `~/.ssh/config`
+- **SSH access:** `ssh gamingrig` (key-based auth with `~/.ssh/id_ed25519`, user `carte`)
+- **SSH config** (`~/.ssh/config`): hostname, user, and identity file pre-configured
+- **Windows OpenSSH:** Server installed, service set to auto-start. Uses `administrators_authorized_keys` (not the user profile path) because the `carte` account is an Administrator — the standard Windows OpenSSH quirk.
+- **ICMP blocked** by Windows Firewall — ping won't work, but SSH does.
+
+SSH from this homelab can run arbitrary PowerShell commands on the gaming rig. Use it for remote administration, file transfers, or automation tasks.
+
 ## Environment
 
 - **Shell:** zsh with vim keybindings
