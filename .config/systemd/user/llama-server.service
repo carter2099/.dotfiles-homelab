@@ -1,0 +1,20 @@
+[Unit]
+Description=Local LLM Server (llama.cpp on gaming rig)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Kill any stale server before starting (handles restart-after-crash)
+ExecStartPre=-/usr/bin/ssh -o ConnectTimeout=5 gamingrig "taskkill /f /im llama-server.exe"
+ExecStart=/usr/bin/ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 gamingrig "C:\\llm\\llama-server.exe -m C:\\llm\\Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf -ngl 99 --cpu-moe -c 32768 --flash-attn on --no-mmap -t 8 --host 0.0.0.0 --port 8080 --reasoning-format deepseek"
+ExecStop=/usr/bin/ssh -o ConnectTimeout=5 gamingrig "taskkill /f /im llama-server.exe"
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=120
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
