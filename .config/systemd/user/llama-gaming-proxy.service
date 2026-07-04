@@ -1,0 +1,7 @@
+[Unit]
+Description=Gaming Proxy: auto-pause LLM when Apollo is streaming
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/llama-gaming-proxy.sh
