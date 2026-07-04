@@ -358,17 +358,34 @@ Carter's gaming PC — a Windows 11 Home machine (`DESKTOP-KQHLUCL`, user `carte
 
 SSH from this homelab can run arbitrary PowerShell commands on the gaming rig. Use it for remote administration, file transfers, or automation tasks.
 
-### Local LLM Server (llama-swap)
+### Local LLM Server (llama-swap + llm-proxy)
 
-The gaming rig runs **llama-swap** — an OpenAI-compatible model proxy on top of llama.cpp's `llama-server.exe`. It serves multiple GGUF models from `C:\llm\` and exposes them via a single OpenAI-compatible API.
+The gaming rig runs **llama-swap** on top of llama.cpp's `llama-server.exe`, serving GGUF models from `C:\llm\`. The homelab runs **llm-proxy** (`~/dev/llm-proxy/`), a Go reverse proxy that handles WoL wake-on-demand, gaming-aware auto-pause, and SSH lifecycle management.
 
-- **API endpoint:** `http://192.168.4.103:8080/v1` (or `http://gamingrig:8080/v1`)
-- **Health check:** `curl http://gamingrig:8080/health`
-- **Model list:** `curl http://gamingrig:8080/v1/models`
-- **Switching models:** Just send a request with `"model": "<model-id>"` — llama-swap loads it on first use
+- **API endpoint for clients:** `http://localhost:8081/v1` (llm-proxy on the homelab)
+- **Backend (do not hit directly):** `http://192.168.4.103:8080/v1` (llama-swap on gaming rig)
+- **Health check:** `curl http://localhost:8081/health`
+- **Model list:** `curl http://localhost:8081/v1/models`
 - **Model files:** `C:\llm\*.gguf` on the gaming rig
 - **Config:** `C:\llm\config.yaml` on the gaming rig
+- **Proxy config:** `~/.config/llm-proxy/env` on the homelab
 - **llama.cpp build:** b9870
+
+#### How the proxy works
+
+```
+Client → llm-proxy:8081 (homelab) → gamingrig:8080 healthy? → forward
+                │                            ↓ no
+                │                     SSH reachable? → start llama-swap
+                │                            ↓ no
+                │                     send WoL → wait → SSH → start llama-swap
+                │
+                └─ Background: check encoder sessions every 10s
+                   → gaming detected? kill LLM to free VRAM
+                   → gaming ended? restart LLM
+```
+
+The proxy replaces three old components: `llama-server.service`, `llama-gaming-proxy.timer`, and `~/.local/bin/llama-gaming-proxy.sh`.
 
 #### Available models
 
@@ -376,40 +393,28 @@ The gaming rig runs **llama-swap** — an OpenAI-compatible model proxy on top o
 |---|---|---|---|---|
 | `qwen3.6-35b-q5` | `qwen3.6-35b` | Qwen 3.6 35B MoE (Q5) | 25.9 GB | Default. Good for coding. `--cpu-moe` |
 | `qwen3.6-35b-q4` | — | Qwen 3.6 35B MoE (Q4) | 22.3 GB | Lighter Qwen. `--cpu-moe` |
-| `gemma4-26b-q6` | `gemma4-26b` | Gemma 4 26B MoE (Q6) | 23.2 GB | Multimodal (text+image). Fast. `--cpu-moe` + `--mmproj` |
+| `gemma4-26b-q6` | `gemma4-26b` | Gemma 4 26B MoE (Q6) | 23.2 GB | Multimodal (text+image). `--cpu-moe` + `--mmproj` |
 | `gpt-oss-20b` | `gpt-oss` | GPT-OSS-20B dense (MXFP4) | 12.1 GB | Fits entirely in 12GB VRAM. No offloading. |
-
-#### Switching models
-
-```bash
-# From the homelab, just set the model name in your request:
-curl http://gamingrig:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gemma4-26b-q6", "messages": [{"role": "user", "content": "hello"}]}'
-```
-
-llama-swap loads the model on first request (takes a few seconds for KV cache init), then serves subsequent requests instantly.
 
 #### Service management
 
-The connection is managed by a **systemd user service** on the homelab:
-
-- **Service:** `llama-server.service` (`~/.config/systemd/user/llama-server.service`)
-- **Logs:** `journalctl --user -u llama-server -f`
-- **Restart:** `systemctl --user restart llama-server`
-
-The service SSHes into the gaming rig, runs `Unblock-File` on the binary (Windows Zone Identifier workaround), kills stale processes, then starts llama-swap.
+- **Service:** `llm-proxy.service` (`~/.config/systemd/user/llm-proxy.service`)
+- **Binary:** `~/.local/bin/llm-proxy`
+- **Source:** `~/dev/llm-proxy/`
+- **Logs:** `journalctl --user -u llm-proxy -f`
+- **Restart:** `systemctl --user restart llm-proxy`
+- **Deploy:** `cd ~/dev/llm-proxy && bash release.sh`
 
 #### Troubleshooting
 
-**Zone Identifier blocking execution** — If llama-swap fails with "The system cannot execute the specified program", the EXE is marked as downloaded from the internet. Fix:
+**Gaming rig went to sleep** — The proxy sends WoL automatically on next request. No manual intervention needed. Wake + llama-swap startup takes ~30-60s.
+
+**Zone Identifier blocking execution** — If llama-swap fails with "The system cannot execute the specified program", the EXE is marked as downloaded from the internet. The proxy runs `Unblock-File` automatically on startup, but you can also fix manually:
 ```powershell
 powershell -Command Unblock-File C:\llm\llama-swap.exe
 ```
 
-**SSH MaxStartups exhausted** — Windows OpenSSH limits unauthenticated connections (default 10). If you see "Connection reset by peer" during SSH, wait 30s and retry, or stop `llama-server.service` first.
-
-**Port 8080 in use** — An orphaned llama-swap process may hold the port. Kill it with `taskkill /f /im llama-swap.exe` on the gaming rig, then restart the service.
+**Port 8080 in use** — An orphaned llama-swap process may hold the port. The proxy kills stale processes before starting. If stuck: `ssh gamingrig "taskkill /f /im llama-swap.exe"`.
 
 ## Environment
 

@@ -1,7 +1,7 @@
 {
   "providers": {
     "local-llm": {
-      "baseUrl": "http://192.168.4.103:8080/v1",
+      "baseUrl": "http://localhost:8081/v1",
       "api": "openai-completions",
       "apiKey": "none",
       "compat": {
@@ -10,12 +10,42 @@
       },
       "models": [
         {
-          "id": "qwen3.6-35b",
-          "name": "Qwen 3.6 35B-A3B (Local)",
+          "id": "qwen3.6-35b-q5",
+          "name": "Qwen 3.6 35B-A3B Q5 (Local)",
           "reasoning": true,
           "input": ["text"],
-          "contextWindow": 32768,
-          "maxTokens": 16384,
+          "contextWindow": 262144,
+          "maxTokens": 65536,
+          "aliases": ["qwen3.6-35b"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "qwen3.6-35b-q4",
+          "name": "Qwen 3.6 35B-A3B Q4 (Local)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 262144,
+          "maxTokens": 65536,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "gemma4-26b-q6",
+          "name": "Gemma 4 26B-A4B Q6 (Local)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 262144,
+          "maxTokens": 65536,
+          "aliases": ["gemma4-26b"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "gpt-oss-20b",
+          "name": "GPT-OSS 20B (Local)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 131072,
+          "maxTokens": 32768,
+          "aliases": ["gpt-oss"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }
       ]

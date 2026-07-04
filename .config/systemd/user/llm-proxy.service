@@ -1,0 +1,18 @@
+[Unit]
+Description=LLM Proxy (WoL-aware reverse proxy to gaming rig)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/llm-proxy/env
+ExecStart=%h/.local/bin/llm-proxy
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
