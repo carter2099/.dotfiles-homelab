@@ -1,135 +1,112 @@
 ---
 name: update-homelab
-description: Apply safe homelab updates (apt, snap, npm, Docker images) with validation. Use when user says "update the homelab", "run updates", "apply patches", or after receiving an update report email.
+description: Apply homelab updates that the nightly agent holds back (Docker engine, cloudflared, open-webui pin bump, k3s workloads, custom app deploys, runtimes). Use after receiving an update report email or when user says "update the homelab".
 ---
 
 # Update Homelab
 
-Apply pending updates to the homelab, conscious of what needs a restart vs what doesn't, and validate everything after.
+Apply the updates the nightly agent (update-check.timer) won't touch: Docker engine, cloudflared, open-webui version bumps, custom app deploys, and runtime upgrades. Always validate after.
 
-## Step 1: Assess current state
+## Step 1: Assess
 
-Read the most recent summary in ~/digests/updates/ (latest .md file) to see what was flagged in the last nightly audit.
+Read the most recent summary in ~/digests/updates/ (latest .md) to see what the nightly agent flagged.
 
-Also run a fresh quick check:
+Then run a fresh check:
 ```
-apt list --upgradable 2>/dev/null | tail -n +2 | wc -l
-snap refresh --list 2>/dev/null
-npm outdated -g 2>/dev/null
+apt list --upgradable 2>/dev/null | grep -E "docker|cloudflared"
+snap refresh --list 2>/dev/null | grep docker
 docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' | grep -E "blog|delta|webui"
 ```
 
-Present findings to the user. Group by risk level:
-1. Safe (no restart needed): apt routine packages, snap non-docker, npm global
-2. Needs restart (low risk): Docker container image pulls (open-webui, k3s workloads)
-3. Needs restart (higher risk): docker-ce, cloudflared, containerd (infrastructure)
-4. Custom deploys: blog-web, delta_neutral-web (requires release.sh)
-5. Manual only: k3s version, Go runtime, neovim source build
+Present findings organized by risk:
+1. **Low risk** — Docker Compose image bumps (open-webui patch, freshrss restart if nightly failed)
+2. **Medium risk** — Docker engine + plugins (daemon restart, containers auto-recover)
+3. **Higher risk** — cloudflared (tunnel restart), k3s version, Go/Ruby/Node upgrades
+4. **Custom deploys** — blog, delta_neutral (release.sh + full validation)
 
-## Step 2: Apply safe updates (no restart needed)
+## Step 2: Apply updates (ascending risk order)
 
-Ask for confirmation, then run:
+### 2a. open-webui version bump
+If a newer patch/minor tag exists (e.g., v0.10.2 → v0.10.3):
+1. Confirm with user
+2. Edit ~/open-webui/docker-compose.yml: bump the tag
+3. `cd ~/open-webui && docker compose pull && docker compose up -d`
+4. Wait for healthy: `docker ps --filter name=open-webui --format '{{.Status}}'`
+5. Curl: `curl -so /dev/null -w '%{http_code}' http://127.0.0.1:48100`
 
-```bash
-# apt — but hold back docker packages
-sudo apt update
-sudo apt upgrade -y
+### 2b. k3s workload image updates
+If a k3s workload has a specific newer tag (not just :latest restart):
+1. Edit the deployment manifest in ~/k3s/<name>/
+2. Apply: `/usr/local/bin/k3s kubectl apply -f ~/k3s/<name>/<deployment>.yaml`
+3. Wait for rollout: `/usr/local/bin/k3s kubectl rollout status deploy/<name> -n <ns> --timeout=120s`
+4. Verify pod is Running
 
-# snap — skip docker snap
-sudo snap refresh core22 core24 snapd 2>/dev/null || true
+### 2c. Docker engine + plugins (apt)
+⚠️ Restarts Docker daemon. Containers with `restart: unless-stopped` come back automatically.
 
-# npm global
-npm update -g 2>/dev/null || true
+1. Confirm with user
+2. `sudo apt install --only-upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y`
+3. Wait 10 seconds for daemon restart
+4. `docker ps -a` — verify ALL containers are Up
+5. If any container failed to restart, start it manually
+
+### 2d. cloudflared
+⚠️ Restarts the tunnel. Brief interruption to all tunnel-routed services (pi-web, open-webui, blog, delta_neutral, dependabot-webhook).
+
+1. Confirm with user
+2. `sudo apt install --only-upgrade cloudflared -y`
+3. `systemctl status cloudflared` — verify active
+4. Curl test the tunnel endpoints (use the same curl commands as the nightly agent)
+
+### 2e. Custom app deploys (blog, delta_neutral)
+Only if user explicitly requests. Follow the standard deploy flow per AGENTS.md:
+1. Check git status in the app repo — COMMIT BEFORE DEPLOY
+2. `cd ~/<app> && bash release.sh`
+3. Verify container healthy
+4. Curl the endpoint
+
+### 2f. Runtime / infrastructure upgrades
+Only with explicit user request. These are never auto-applied:
+- Go: `sudo snap refresh go` or manual install
+- Ruby: `rbenv install <version>`
+- Node: `fnm install <version>`
+- Neovim: rebuild from source in ~/build/neovim/
+- k3s: follow official upgrade docs
+
+## Step 3: Full validation
+
+After all updates, run the same sweep the nightly agent uses:
+
 ```
-
-Report what was updated and what was held back.
-
-## Step 3: Docker image updates (needs container restart)
-
-For each, confirm with user before proceeding. Process one at a time so failures are isolated.
-
-### open-webui (pinned tag)
-If a newer tag exists (e.g., v0.10.2 → v0.10.3):
-1. Edit ~/open-webui/docker-compose.yml: bump the image tag
-2. Run: cd ~/open-webui && docker compose pull && docker compose up -d
-3. Wait for healthy: docker ps --filter name=open-webui --format '{{.Status}}'
-4. Curl test: curl -so /dev/null -w '%{http_code}' http://127.0.0.1:48100
-
-### k3s workloads (freshrss, uptime-kuma)
-If a newer image tag is available:
-1. Edit the k3s manifest (e.g., ~/k3s/freshrss/deployment.yaml): bump image tag
-2. Apply: /usr/local/bin/k3s kubectl apply -f <manifest>
-3. Wait for rollout: /usr/local/bin/k3s kubectl rollout status deploy/<name> -n <ns>
-4. Verify pod is running
-
-### freshrss (currently :latest)
-This requires pulling the latest image and restarting the pod:
-1. /usr/local/bin/k3s kubectl rollout restart deploy/freshrss -n freshrss
-2. Wait for rollout
-3. Verify
-
-## Step 4: Custom app deploys (blog, delta_neutral)
-
-These require the full deploy flow (release.sh). Only do this if:
-- The user explicitly asks
-- There are uncommitted changes? If yes, surface them. If not, proceed.
-
-For each:
-```bash
-cd ~/<app> && bash release.sh
-```
-Then verify container is healthy and endpoint responds.
-
-## Step 5: Infrastructure updates (Docker engine, cloudflared)
-
-⚠️ These restart critical services. Only proceed with explicit user confirmation.
-
-### Docker engine (apt)
-```bash
-sudo apt install --only-upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
-```
-This restarts the Docker daemon. All containers will go down and come back up (restart: unless-stopped).
-After: verify all containers are running (docker ps -a).
-
-### cloudflared
-```bash
-sudo apt install --only-upgrade cloudflared -y
-```
-This restarts the cloudflared service. Verify tunnels reconnect: systemctl status cloudflared.
-
-## Step 6: Final validation
-
-After all updates, run a full health sweep:
-
-```bash
 # Containers
 docker ps -a --format '{{.Names}} {{.Status}}'
 
-# k3s pods
-/usr/local/bin/k3s kubectl get pods -A | grep -v Completed
+# k3s pods (should show no output — only Running/Completed pods exist)
+/usr/local/bin/k3s kubectl get pods -A --no-headers | grep -v -E "Running|Completed"
 
-# Key endpoints
-curl -so /dev/null -w '%{http_code}' http://127.0.0.1:48100  # open-webui
-curl -so /dev/null -w '%{http_code}' http://127.0.0.1:3099   # blog
-curl -so /dev/null -w '%{http_code}' http://127.0.0.1:43080  # delta_neutral
-curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8504   # pi-web
+# Endpoints
+curl -so /dev/null -w '%{http_code}' http://127.0.0.1:48100 && echo " open-webui"
+curl -so /dev/null -w '%{http_code}' http://127.0.0.1:3099 && echo " blog"
+curl -so /dev/null -w '%{http_code}' http://127.0.0.1:43080 && echo " delta_neutral"
+curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8504 && echo " pi-web"
 
 # Disk
 df -h /
 ```
 
-Report any anomalies.
+Report any failures immediately.
 
-## Step 7: Write session note
+## Step 4: Write session note
 
-Write a brief session summary to ~/notes/sessions/YYYY-MM-DD.md (use current date). Format:
+Write a brief session summary to ~/notes/sessions/YYYY-MM-DD.md:
 
 ```
 # Session: YYYY-MM-DD
 **Topic:** Homelab updates
-**Outcome:** applied X apt updates, Y snap refreshes, updated Z Docker images
-**Notes:**
-- (any notable events, errors, or decisions)
+**Applied:**
+- (list what was updated with versions)
+**Validation:** (passed / issues found)
+**Notes:** (any decisions, errors, reversions)
 ```
 
 ## Safety rules
@@ -137,8 +114,7 @@ Write a brief session summary to ~/notes/sessions/YYYY-MM-DD.md (use current dat
 - Never run `snap refresh docker` — AppArmor profile risk
 - Never run `sudo apt dist-upgrade` — only `upgrade`
 - Never run `sudo aa-remove-unknown` — will break Docker
-- Never update Go, Ruby, Node, or neovim without explicit user request
-- Never update k3s itself without explicit user request
+- For blog/delta_neutral: always check git status, commit before deploy
 - If anything fails, stop and report — don't continue to the next step
-- For blog/delta_neutral deploys: always check git status first, commit before deploy
-- After any Docker daemon restart, verify ALL containers came back up
+- After Docker daemon restart, verify ALL containers came back up before proceeding
+- If a rollout restart fails, investigate before trying other updates

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Audits the homelab for outdated software and emails a categorized report.
-# Scheduled via systemd timer (update-check.timer). Report-only — no changes made.
+# Nightly homelab maintenance: auto-applies safe updates, validates, and emails a report.
+# Scheduled via systemd timer (update-check.timer). 
+# Safe auto-applies: apt (non-Docker), snap (non-Docker), npm global, k3s image pulls.
+# Reports only: Docker engine, cloudflared, open-webui pin, major versions, runtimes.
 # Run manually with: bash ~/scripts/run_update_check.sh
 set -euo pipefail
 export HOME="/home/carter"
@@ -9,106 +11,168 @@ TODAY="$(date +%Y-%m-%d)"
 START_TS="$(date +%s)"
 mkdir -p "$HOME/digests/updates"
 
-PROMPT='You are a homelab maintenance auditor. Your job is to check for outdated software across the homelab and email a report. DO NOT install, upgrade, or modify anything. Report only.
+PROMPT='You are a homelab maintenance agent. Your job is to auto-apply safe updates, validate everything still works, and email a categorized report of what was done and what still needs human attention.
 
-## Step 0: Prepare
+## Safety boundaries
 
-Create /home/carter/digests/updates/ if it does not exist (it should already exist). You will write the HTML email body to /home/carter/digests/updates/.daily_report.html and send it. Then archive and write a summary.
+AUTO-APPLY (do these without asking):
+- apt upgrade for routine packages — BUT hold back: docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin, cloudflared
+- snap refresh for core22, core24, snapd — BUT NEVER refresh the docker snap (AppArmor risk)
+- npm update -g (updates pi-web and other global packages)
+- k3s workload image pulls: freshrss (freshrss/freshrss:latest) and uptime-kuma (louislam/uptime-kuma:1) — do a rollout restart to pull latest within their current tag track
 
-## Step 1: System packages (apt)
+DO NOT TOUCH (report only):
+- Docker engine/plugins (apt) — restarts daemon, manual only
+- cloudflared (apt) — restarts tunnel, manual only
+- open-webui (version-pinned in docker-compose.yml) — needs human to bump the tag
+- blog-web / delta_neutral-web — custom images, need release.sh
+- k3s itself, Go, Ruby, Node, neovim — runtimes and infrastructure
+- Any major version bumps (traefik 3→4, uptime-kuma 1→2, etc.)
 
-Run: apt list --upgradable 2>/dev/null
-Count and categorize:
-- Security-critical / infrastructure: docker-*, cloudflared, openssl, kernel, systemd, containerd
-- Everything else (routine libs, tools)
-Report current → new versions for the infra-critical ones. For routine ones, just note the count.
-
-## Step 2: Snap packages
-
-Run: snap refresh --list 2>/dev/null || sudo snap refresh --list 2>/dev/null
-List any snaps with available updates. Flag the docker snap separately — it must never be refreshed unattended (snap-managed Docker + AppArmor = risk of profile breakage). Other snaps (core22, core24, snapd) are safe to note.
-
-## Step 3: Docker images — k3s workloads
+## Step 1: Hold risky apt packages
 
 Run:
+  sudo apt-mark hold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin cloudflared 2>/dev/null || true
+
+This prevents these from being upgraded in Step 2. We will unhold them after.
+
+## Step 2: Apply safe apt upgrades
+
+Run:
+  sudo apt update
+  sudo apt upgrade -y
+
+Capture the output. Note how many packages were upgraded and which ones.
+
+## Step 3: Unhold the risky packages
+
+Run:
+  sudo apt-mark unhold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin cloudflared 2>/dev/null || true
+
+This restores normal apt behavior for future manual updates.
+
+## Step 4: Apply safe snap refreshes
+
+Run:
+  sudo snap refresh core22 core24 snapd 2>/dev/null || true
+
+Do NOT refresh the docker snap. Note what was refreshed.
+
+## Step 5: Apply npm global updates
+
+Run:
+  npm update -g 2>/dev/null || true
+
+Note what was updated (especially pi-web).
+
+## Step 6: Pull latest k3s workload images
+
+For freshrss (freshrss/freshrss:latest in namespace freshrss):
   export XDG_RUNTIME_DIR=/run/user/$(id -u)
-  /usr/local/bin/k3s kubectl get deploy,ds,sts -A -o wide 2>/dev/null
+  /usr/local/bin/k3s kubectl rollout restart deploy/freshrss -n freshrss
+  /usr/local/bin/k3s kubectl rollout status deploy/freshrss -n freshrss --timeout=120s
 
-For each non-kube-system deployment, note the image and tag:
-- traefik (currently rancher/mirrored-library-traefik:3.3.6) — use web_search to find the latest 3.x patch release
-- freshrss (freshrss/freshrss:latest) — tagged :latest, cannot determine freshness without pulling. Flag as "pull to verify."
-- uptime-kuma (louislam/uptime-kuma:1) — use web_search to find the latest release
-- Any other non-kube-system workloads
+For uptime-kuma (louislam/uptime-kuma:1 in namespace default):
+  /usr/local/bin/k3s kubectl rollout restart deploy/uptime-kuma -n default
+  /usr/local/bin/k3s kubectl rollout status deploy/uptime-kuma -n default --timeout=120s
 
-For kube-system images (coredns, metrics-server, local-path-provisioner), note them but they are tied to the k3s version — flag under the k3s section.
+If either rollout fails or times out, flag it prominently in the report.
 
-## Step 4: Docker images — Compose apps
+## Step 7: Validate — did everything survive?
 
-Run:
-  docker ps --format '"'"'{{.Names}} {{.Image}} {{.Status}}'"'"'
-  docker images --format '"'"'{{.Repository}}:{{.Tag}} {{.CreatedAt}}'"'"' | grep -E "blog|delta|webui"
+Run ALL of these checks:
 
-- open-webui: pinned to v0.10.2. Use web_search ("open-webui releases github") to check for newer tags. Compare semver.
-- blog-web: locally built image. Note the build date. Flag if >2 weeks old (requires deploy via release.sh).
-- delta_neutral-web: locally built image. Note the build date. Flag if >2 weeks old (requires deploy via release.sh).
+```bash
+# Docker containers — all should be Up and healthy
+docker ps -a --format '"'"'{{.Names}} {{.Status}}'"'"'
 
-## Step 5: npm global packages
+# k3s pods — none should be Error, CrashLoopBackOff, or Pending
+/usr/local/bin/k3s kubectl get pods -A --no-headers | grep -v -E "Running|Completed"
 
-Run: npm list -g --depth=0 2>/dev/null
-Then: npm outdated -g 2>/dev/null || echo "(npm outdated not available or all up to date)"
+# Key endpoints — all should return 200 or 3xx
+curl -so /dev/null -w '"'"'%{http_code}'"'"' http://127.0.0.1:48100  # open-webui
+echo ""
+curl -so /dev/null -w '"'"'%{http_code}'"'"' http://127.0.0.1:3099   # blog
+echo ""
+curl -so /dev/null -w '"'"'%{http_code}'"'"' http://127.0.0.1:43080  # delta_neutral
+echo ""
+curl -so /dev/null -w '"'"'%{http_code}'"'"' http://127.0.0.1:8504   # pi-web
+echo ""
+```
 
-Report any outdated global packages. pi-web (@jmfederico/pi-web) is the main one to watch.
+If any endpoint returns 5xx or connection refused, flag it as 🔴 CRITICAL in the report.
 
-## Step 6: Language runtimes
+## Step 8: Full audit — what still needs attention?
 
-- Go: run "go version". Use web_search ("go latest stable version 2026") to find current stable. Flag if more than one minor version behind.
-- Ruby: run "rbenv versions". Note installed versions. No action needed unless user asks.
-- Node: run "fnm list 2>/dev/null || node --version". Note installed/default version.
+Now check everything that was NOT auto-applied:
 
-## Step 7: Infrastructure versions
+```
+# apt packages still upgradable (should be docker + cloudflared)
+apt list --upgradable 2>/dev/null
 
-- k3s: run "/usr/local/bin/k3s --version 2>/dev/null | head -1". Use web_search ("k3s latest release github") to find current stable. Flag if behind.
-- neovim (built from source): run "nvim --version 2>/dev/null | head -1". Use web_search ("neovim latest release") to find current stable. Flag if behind.
-- cloudflared: already covered by apt check above.
-- dependabot-webhook: run "cd ~/dev/dependabot-webhook && git fetch origin 2>/dev/null && git status 2>/dev/null | head -5" to check if the dev clone is behind origin. Also check the binary: "file ~/dev/dependabot-webhook/dependabot-webhook 2>/dev/null" for build date.
+# snap (docker only)
+snap refresh --list 2>/dev/null
 
-## Step 8: System health (bonus — always include)
+# Docker Compose images
+docker images --format '"'"'{{.Repository}}:{{.Tag}} {{.CreatedAt}}'"'"' | grep -E "blog|delta|webui"
 
-Run each of these:
-- df -h / /home
-- free -h
-- uptime
-- test -f /var/run/reboot-required && echo "REBOOT REQUIRED" || echo "No reboot required"
-- docker ps -a --format '"'"'{{.Names}} {{.Status}}'"'"'
-- Check if any docker containers are in "Exited" or "unhealthy" state — flag them
+# open-webui: use web_search to check for newer tags beyond v0.10.2
+# blog-web: note build date
+# delta_neutral-web: note build date (flag if >2 weeks old)
 
-## Step 9: Build the HTML email
+# k3s infrastructure images (traefik, coredns, etc.)
+/usr/local/bin/k3s kubectl get deploy,ds -A -o wide 2>/dev/null | grep -E "traefik|coredns|metrics"
 
-Write a clean, mobile-friendly HTML email to /home/carter/digests/updates/.daily_report.html. Use inline styles (not a stylesheet). Keep it simple — this is read on a phone.
+# Language runtimes
+go version
+rbenv versions 2>/dev/null | tail -1
+node --version
 
-Structure:
+# Infrastructure
+/usr/local/bin/k3s --version 2>/dev/null | head -1
+nvim --version 2>/dev/null | head -1
+cd ~/dev/dependabot-webhook && git fetch origin 2>/dev/null && git status -sb 2>/dev/null | head -3
+```
+
+## Step 9: System health
+
+```
+df -h / /home
+free -h
+uptime
+test -f /var/run/reboot-required && echo "REBOOT REQUIRED" || echo "No reboot required"
+```
+
+## Step 10: Build the HTML email
+
+Write to /home/carter/digests/updates/.daily_report.html. Clean, mobile-friendly HTML with inline styles.
+
+Sections:
 1. Header: "Homelab Update Report — '"$TODAY"'"
-2. 🔴 Needs Attention (breaking changes, major versions, security, exited containers)
-3. 🟡 Behind but Safe (minor/patch updates, no breaking changes expected)
-4. 🟢 Up to Date
-5. ℹ️ System Health (disk, memory, uptime, reboot needed, container status)
+2. ✅ Auto-Applied (what the agent did tonight — apt packages, snaps, npm, k3s restarts)
+3. 🔴 Needs Attention (held-back packages: docker-*, cloudflared; open-webui if newer tag exists; blog/delta if >2 weeks old; any CRITICAL validation failures)
+4. ℹ️ Behind but Safe (traefik patch, uptime-kuma if major bump exists, runtimes, neovim, dependabot-webhook)
+5. 📊 System Health (disk, memory, uptime, reboot needed, container/pod status)
+6. ✅ Validation (endpoint check results — passed or failed)
 
-Each item in sections 2-3 should show: current version → target version, and a one-line note.
+## Step 11: Send and archive
 
-## Step 10: Send the email
-
-Run:
+Send:
   python3 /home/carter/scripts/send_digest.py --subject "Homelab Update Report — '"$TODAY"'" --body-file /home/carter/digests/updates/.daily_report.html --to carter2099@pm.me
 
-Then archive: rename /home/carter/digests/updates/.daily_report.html to /home/carter/digests/updates/'"$TODAY"'.html
+Archive: rename .daily_report.html to '"$TODAY"'.html
 
-## Step 11: Write machine-readable summary
+## Step 12: Write machine-readable summary
 
-Write a summary to /home/carter/digests/updates/'"$TODAY"'.md in this exact format:
+Write to /home/carter/digests/updates/'"$TODAY"'.md:
 
 ```
 # Homelab Update Report — '"$TODAY"'
 **Model:** deepseek-v4-flash | **Sent to:** carter2099@pm.me
+
+## Auto-Applied
+- [item] — updated from X → Y
+- [item] — already current (rollout restart only)
 
 ## Needs Attention
 - [item] — current → target — reason
@@ -118,21 +182,16 @@ Write a summary to /home/carter/digests/updates/'"$TODAY"'.md in this exact form
 - [item] — current → target
 - [item] — current → target
 
-## Up to Date
-- [item]
-- [item]
-
 ## System Health
 - Disk: X% used on /
 - Memory: X available
 - Uptime: X days
 - Reboot needed: yes/no
-- Containers: X running, Y exited/unhealthy
+- Containers: X running, Y issues
+- Endpoints: all passed / [list failures]
 ```
 
-Every item in "Needs Attention" and "Behind but Safe" MUST include the current version and the target version separated by →. This format is machine-readable so the update-homelab skill can parse and act on it.
-
-Then delete any .md files in /home/carter/digests/updates/ older than 30 days.'
+Delete any .md files in /home/carter/digests/updates/ older than 30 days.'
 
 pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"
 END_TS="$(date +%s)"
