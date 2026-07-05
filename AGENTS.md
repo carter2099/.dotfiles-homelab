@@ -244,7 +244,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ## Email Digests
 
-Four daily HTML email digests are scheduled via systemd user timers. Each digest runs a **headless Pi agent** (`pi -p`) on the OpenCode Go subscription, using **deepseek-v4-flash**. The agent researches via `web_search` (for discovering articles) and `web_fetch` (for reading pages), fills the shared `~/digests/template.html`, emails via `send_digest.py`, and writes a URL-enriched dedup/continuity summary to `~/digests/<topic>/YYYY-MM-DD.md`.
+Four daily HTML email digests are scheduled via systemd user timers. Each digest runs a **headless Pi agent** (`pi -p`) using the **local Qwen Q6** model via llm-proxy. If the gaming rig is unavailable (gaming, offline), the proxy transparently falls back to **deepseek-v4-flash** on the OpenCode Go plan. The agent researches via `web_search` (for discovering articles) and `web_fetch` (for reading pages), fills the shared `~/digests/template.html`, emails via `send_digest.py`, and writes a URL-enriched dedup/continuity summary to `~/digests/<topic>/YYYY-MM-DD.md`.
 
 | Timer | Fires (UTC) | Topic |
 |---|---|---|
@@ -255,7 +255,7 @@ Four daily HTML email digests are scheduled via systemd user timers. Each digest
 
 Service + timer units live in `~/.config/systemd/user/<name>.{service,timer}`; the actual run scripts are `~/scripts/run_<name>_digest.sh`. Manage with `systemctl --user list-timers`, `systemctl --user status <name>.timer`, `journalctl --user -u <name>.service`.
 
-Each script runs `pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"`. Pi's `-p` mode is the equivalent of `opencode run` for headless/automated use — no stdin hacks needed, no write-path restrictions. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`.
+Each script runs `pi -p --provider local-llm --model qwen3.6-35b-a3b-q6_k "$PROMPT"`. Pi's `-p` mode is the equivalent of `opencode run` for headless/automated use — no stdin hacks needed, no write-path restrictions. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`.
 
 ### Quality infrastructure
 
@@ -360,7 +360,7 @@ SSH from this homelab can run arbitrary PowerShell commands on the gaming rig. U
 
 ### Local LLM Server (llama-swap + llm-proxy)
 
-The gaming rig runs **llama-swap** on top of llama.cpp's `llama-server.exe`, serving GGUF models from `C:\llm\`. The homelab runs **llm-proxy** (`~/dev/llm-proxy/`), a Go reverse proxy that handles WoL wake-on-demand, gaming-aware auto-pause, and SSH lifecycle management.
+The gaming rig runs **llama-swap** on top of llama.cpp's `llama-server.exe`, serving GGUF models from `C:\llm\`. The homelab runs **llm-proxy** (`~/dev/llm-proxy/`), a Go reverse proxy that handles WoL wake-on-demand, gaming-aware auto-pause, SSH lifecycle management, and transparent cloud fallback when the rig is unavailable.
 
 - **API endpoint for clients:** `http://localhost:8081/v1` (llm-proxy on the homelab)
 - **Backend (do not hit directly):** `http://192.168.4.103:8080/v1` (llama-swap on gaming rig)
@@ -376,9 +376,13 @@ The gaming rig runs **llama-swap** on top of llama.cpp's `llama-server.exe`, ser
 ```
 Client → llm-proxy:8081 (homelab) → gamingrig:8080 healthy? → forward
                 │                            ↓ no
-                │                     SSH reachable? → start llama-swap
+                │                     gaming? → fallback to cloud (deepseek-v4-flash)
                 │                            ↓ no
-                │                     send WoL → wait → SSH → start llama-swap
+                │                     SSH reachable? → start llama-swap, wait 45s
+                │                            ↓ no            ↓ up
+                │                     send WoL → wait → start    → forward
+                │                            ↓ still down
+                │                     fallback to cloud
                 │
                 └─ Background: check encoder sessions every 10s
                    → gaming detected? kill LLM to free VRAM
@@ -391,10 +395,10 @@ The proxy replaces three old components: `llama-server.service`, `llama-gaming-p
 
 | Model ID | Alias | Architecture | File Size | Notes |
 |---|---|---|---|---|
-| `Qwen3.6-35B-A3B-Q6_K` | `qwen3.6-35b`, `qwen3.6-35b-q6` | Qwen 3.6 35B MoE (Q6_K) | 28.8 GB | **Default.** Highest quality Qwen. `--cpu-moe` |
-| `Qwen3.6-35B-A3B-Q5_K_M` | `qwen3.6-35b-q5` | Qwen 3.6 35B MoE (Q5_K_M) | 25.9 GB | Slightly faster, good for coding. `--cpu-moe` |
-| `Qwen3.6-35B-A3B-Q4_K_M` | `qwen3.6-35b-q4` | Qwen 3.6 35B MoE (Q4_K_M) | 22.3 GB | Lighter Qwen. `--cpu-moe` |
-| `Gemma-4-26B-A4B-Q6_K` | `gemma4-26b`, `gemma4-26b-q6` | Gemma 4 26B MoE (Q6_K) | 23.2 GB | Multimodal (text+image). `--cpu-moe` + `--mmproj` |
+| `Qwen3.6-35B-A3B-Q6_K` | `qwen3.6-35b-a3b-q6_k` | Qwen 3.6 35B MoE (Q6_K) | 28.8 GB | **Default.** Best quality. Used for all digests. `--cpu-moe` |
+| `Qwen3.6-35B-A3B-Q5_K_M` | `qwen3.6-35b`, `qwen3.6-35b-a3b-q5_k_m` | Qwen 3.6 35B MoE (Q5_K_M) | 25.9 GB | Good balance. `--cpu-moe` |
+| `Qwen3.6-35B-A3B-Q4_K_M` | `qwen3.6-35b-a3b-q4_k_m` | Qwen 3.6 35B MoE (Q4_K_M) | 22.3 GB | Fastest Qwen. `--cpu-moe` |
+| `Gemma-4-26B-A4B-Q6_K` | `gemma4-26b`, `gemma4-26b-a4b-q6_k` | Gemma 4 26B MoE (Q6_K) | 23.2 GB | Multimodal (text+image). `--cpu-moe` + `--mmproj` |
 
 #### Service management
 
@@ -405,9 +409,19 @@ The proxy replaces three old components: `llama-server.service`, `llama-gaming-p
 - **Restart:** `systemctl --user restart llm-proxy`
 - **Deploy:** `cd ~/dev/llm-proxy && bash release.sh`
 
+#### Cloud fallback
+
+When `FALLBACK_API_KEY` is set in `~/.config/llm-proxy/env`, requests that can't reach the gaming rig are transparently proxied to OpenCode Go (deepseek-v4-flash). The `X-Fallback: true` response header signals when fallback was used. The proxy waits up to `STARTUP_GRACE` (45s) for the rig to wake before falling back.
+
+| Env Var | Default | Description |
+|---|---|---|
+| `FALLBACK_BASE_URL` | `https://opencode.ai/zen/go` | Cloud fallback API base |
+| `FALLBACK_API_KEY` | (required) | API key for fallback provider |
+| `FALLBACK_MODEL` | `deepseek-v4-flash` | Model to use during fallback |
+
 #### Troubleshooting
 
-**Gaming rig went to sleep** — The proxy sends WoL automatically on next request. No manual intervention needed. Wake + llama-swap startup takes ~30-60s.
+**Gaming rig went to sleep** — The proxy sends WoL automatically on next request. Wake + llama-swap startup takes ~30-60s. Requests block until the rig is ready (up to 45s), then serve locally. If the rig doesn't come up in time, the request falls back to cloud.
 
 **Zone Identifier blocking execution** — If llama-swap fails with "The system cannot execute the specified program", the EXE is marked as downloaded from the internet. The proxy runs `Unblock-File` automatically on startup, but you can also fix manually:
 ```powershell
