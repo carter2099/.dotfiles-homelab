@@ -97,6 +97,6 @@ IMPORTANT: every story must include its URL as a markdown link `[title](URL)`. T
 
 Then delete any .md files in /home/carter/digests/world-digest/ older than 7 days.'
 
-pi -p --provider local-llm --model Qwen3.6-35B-A3B-Q6_K "$PROMPT"
+pi -p --provider local-llm --model qwen3.6-35b-q6 "$PROMPT"
 END_TS="$(date +%s)"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) world-digest duration=$((END_TS - START_TS))s model=qwen3.6-35b-q6" >> "$HOME/digests/world-digest/.runs.log"

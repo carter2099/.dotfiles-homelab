@@ -10,6 +10,16 @@
       },
       "models": [
         {
+          "id": "Qwen3.6-35B-A3B-Q6_K",
+          "name": "Qwen3.6 35B-A3B Q6_K (Local)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 262144,
+          "maxTokens": 65536,
+          "aliases": ["qwen3.6-35b-q6"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
           "id": "Qwen3.6-35B-A3B-Q5_K_M",
           "name": "Qwen3.6 35B-A3B Q5_K_M (Local)",
           "reasoning": true,
