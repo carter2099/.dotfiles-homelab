@@ -16,7 +16,7 @@
           "input": ["text"],
           "contextWindow": 262144,
           "maxTokens": 65536,
-          "aliases": ["qwen3.6-35b-q6"],
+          "aliases": ["qwen3.6-35b-a3b-q6_k"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
@@ -26,7 +26,7 @@
           "input": ["text"],
           "contextWindow": 262144,
           "maxTokens": 65536,
-          "aliases": ["qwen3.6-35b", "qwen3.6-35b-q5"],
+          "aliases": ["qwen3.6-35b", "qwen3.6-35b-a3b-q5_k_m"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
@@ -36,7 +36,7 @@
           "input": ["text"],
           "contextWindow": 262144,
           "maxTokens": 65536,
-          "aliases": ["qwen3.6-35b-q4"],
+          "aliases": ["qwen3.6-35b-a3b-q4_k_m"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
@@ -46,7 +46,7 @@
           "input": ["text", "image"],
           "contextWindow": 262144,
           "maxTokens": 65536,
-          "aliases": ["gemma4-26b", "gemma4-26b-q6"],
+          "aliases": ["gemma4-26b", "gemma4-26b-a4b-q6_k"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {

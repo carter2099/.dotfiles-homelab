@@ -94,6 +94,6 @@ IMPORTANT: every story must include its URL as a markdown link `[title](URL)`. T
 
 Then delete any .md files in /home/carter/digests/agentic-platform/ older than 7 days.'
 
-pi -p --provider local-llm --model qwen3.6-35b-q6 "$PROMPT"
+pi -p --provider local-llm --model qwen3.6-35b-a3b-q6_k "$PROMPT"
 END_TS="$(date +%s)"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) agentic-digest duration=$((END_TS - START_TS))s model=qwen3.6-35b-q6" >> "$HOME/digests/agentic-platform/.runs.log"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) agentic-digest duration=$((END_TS - START_TS))s model=qwen3.6-35b-a3b-q6_k" >> "$HOME/digests/agentic-platform/.runs.log"
