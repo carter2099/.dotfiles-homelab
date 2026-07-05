@@ -86,11 +86,15 @@ Context may be lazily allocated — memory grows as context fills.
 
 2. **No-thinking model is 96% more token-efficient** for simple Q&A (8 tokens vs 191). Use for chat, facts, context recall, and tool use.
 
-3. **Qwen is eager enough with tool calls.** Both variants proactively use web_search without explicit prompting. No tuning needed — behavior is comparable to DeepSeek.
+3. **Qwen is eager enough with tool calls.** Both variants proactively use web_search without explicit prompting. No tuning needed — behavior is comparable to DeepSeek. If more aggressiveness is desired, use a system prompt ("Always search before answering factual questions") or the `tool_choice` API parameter (`{"type": "any"}` forces a tool call on every message — overkill for normal chat). llama.cpp supports `tool_choice` but pi doesn't expose it directly in config.
 
 4. **System prompts can't reduce reasoning verbosity.** Tested "be brief" prompts — they made it worse (model reasons about being brief). The only control is binary: thinking on or off.
 
 5. **256K context is stable.** No OOM at idle. Monitor under heavy context fill.
+
+6. **Thinking model is broken for long context.** At 100K tokens, the thinking model burns all 2,048 completion tokens on reasoning (7,646 chars) and produces zero answers — 0/10 recall. The no-thinking model scores 10/10 with 698 tokens (all content). **Always use no-thinking for context recall or long-document tasks.**
+
+7. **100K context benchmark reference:** No-thinking scores 10/10 in ~8.5 minutes. Prompt processing dominates (100K tokens), generation is fast (698 tokens).
 
 ## Restarting llama-swap
 
