@@ -82,7 +82,15 @@ Context may be lazily allocated — memory grows as context fills.
 
 ## Key Findings (as of 2026-07-05)
 
-1. **Thinking model needs sufficient max_tokens.** With max_tokens < ~500, the model spends all tokens on reasoning and produces empty content. Minimum ~1024, recommended 4096+ for complex tasks. The `--reasoning-budget 4096` server flag caps thinking but client max_tokens must be higher than typical reasoning verbosity (~200-700 chars for simple Qs).
+1. **`--reasoning-budget` is the critical tuning knob.** The thinking model is not broken — the budget was just too loose. At 4096, the model finishes reasoning naturally before the budget triggers, so it's effectively unlimited. At 1024, the budget triggers early, cuts reasoning cleanly, and the model transitions to content. **Optimal budget: 1024 tokens.** This allows enough thinking for complex tasks (bat+ball puzzle solved correctly) while forcing transition on simple Qs and long-context tasks.
+
+    Budget reference:
+    - 100: tight — good for simple Q&A, may cut off complex reasoning
+    - 512: balanced — works for bat+ball level puzzles, slight cutoff
+    - **1024: recommended** — room for multi-step reasoning, triggers before max_tokens runs out
+    - 4096: too loose — effectively unlimited, model burns all tokens on reasoning
+
+    Client max_tokens must still be ≥ budget + answer space. Recommended: max_tokens ≥ 2048 for thinking model.
 
 2. **No-thinking model is 96% more token-efficient** for simple Q&A (8 tokens vs 191). Use for chat, facts, context recall, and tool use.
 
@@ -92,7 +100,7 @@ Context may be lazily allocated — memory grows as context fills.
 
 5. **256K context is stable.** No OOM at idle. Monitor under heavy context fill.
 
-6. **Thinking model is broken for long context.** At 100K tokens, the thinking model burns all 2,048 completion tokens on reasoning (7,646 chars) and produces zero answers — 0/10 recall. The no-thinking model scores 10/10 with 698 tokens (all content). **Always use no-thinking for context recall or long-document tasks.**
+6. **Thinking model works at 100K with correct budget.** At budget=1024, the thinking model scores 10/10 on 100K context recall (818 tokens, 394 reasoning + 2,732 content, ~8 min). At budget=4096, it fails 0/10 (burns all tokens on reasoning). The budget knob is make-or-break for long context.
 
 7. **100K context benchmark reference:** No-thinking scores 10/10 in ~8.5 minutes. Prompt processing dominates (100K tokens), generation is fast (698 tokens).
 
