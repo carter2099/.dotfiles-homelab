@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Researches and emails the daily world events digest via Pi + DeepSeek V4 Flash.
+# Researches and emails the daily world events digest via Pi + local Qwen Q6.
 # Scheduled via systemd timer (world-digest.timer). Provider-agnostic: change
-# the --model id to switch providers/models without touching anything else.
+# the pi invocation line to switch providers/models without touching anything else.
 
 set -euo pipefail
 
@@ -83,7 +83,7 @@ Write a concise summary of what you sent to /home/carter/digests/world-digest/'"
 
 ```
 # World Briefing — '"$TODAY"'
-**Model:** deepseek-v4-flash | **Sent to:** carter2099@pm.me
+**Sent to:** carter2099@pm.me
 
 ## Fresh
 - [Story title](URL) — one-line summary
@@ -97,6 +97,6 @@ IMPORTANT: every story must include its URL as a markdown link `[title](URL)`. T
 
 Then delete any .md files in /home/carter/digests/world-digest/ older than 7 days.'
 
-pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"
+pi -p --provider local-llm --model Qwen3.6-35B-A3B-Q6_K "$PROMPT"
 END_TS="$(date +%s)"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) world-digest duration=$((END_TS - START_TS))s model=deepseek-v4-flash" >> "$HOME/digests/world-digest/.runs.log"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) world-digest duration=$((END_TS - START_TS))s model=qwen3.6-35b-q6" >> "$HOME/digests/world-digest/.runs.log"
