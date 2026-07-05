@@ -395,7 +395,6 @@ The proxy replaces three old components: `llama-server.service`, `llama-gaming-p
 | `Qwen3.6-35B-A3B-Q5_K_M` | `qwen3.6-35b-q5` | Qwen 3.6 35B MoE (Q5_K_M) | 25.9 GB | Slightly faster, good for coding. `--cpu-moe` |
 | `Qwen3.6-35B-A3B-Q4_K_M` | `qwen3.6-35b-q4` | Qwen 3.6 35B MoE (Q4_K_M) | 22.3 GB | Lighter Qwen. `--cpu-moe` |
 | `Gemma-4-26B-A4B-Q6_K` | `gemma4-26b`, `gemma4-26b-q6` | Gemma 4 26B MoE (Q6_K) | 23.2 GB | Multimodal (text+image). `--cpu-moe` + `--mmproj` |
-| `GPT-OSS-20B-mxfp4` | `gpt-oss`, `gpt-oss-20b` | GPT-OSS 20B dense (mxfp4) | 12.1 GB | Fits entirely in 12GB VRAM. No offloading. |
 
 #### Service management
 
