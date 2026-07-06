@@ -255,7 +255,7 @@ Four daily HTML email digests are scheduled via systemd user timers. Each digest
 
 Service + timer units live in `~/.config/systemd/user/<name>.{service,timer}`; the actual run scripts are `~/scripts/run_<name>_digest.sh`. Manage with `systemctl --user list-timers`, `systemctl --user status <name>.timer`, `journalctl --user -u <name>.service`.
 
-Each script runs `pi -p --provider local-llm --model qwen3.6-35b-a3b-q6_k "$PROMPT"`. Pi's `-p` mode is the equivalent of `opencode run` for headless/automated use — no stdin hacks needed, no write-path restrictions. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`.
+Each script runs `pi -p --provider local-llm --model qwen-3.6-35b-q6 "$PROMPT"`. Pi's `-p` mode is the equivalent of `opencode run` for headless/automated use — no stdin hacks needed, no write-path restrictions. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`.
 
 ### Quality infrastructure
 
@@ -393,12 +393,14 @@ The proxy replaces three old components: `llama-server.service`, `llama-gaming-p
 
 #### Available models
 
-| Model ID | Alias | Architecture | File Size | Notes |
+Only one model file on disk. Two server variants via `--reasoning` flag:
+
+| Model ID | Alias | Context | Thinking | Notes |
 |---|---|---|---|---|
-| `Qwen3.6-35B-A3B-Q6_K` | `qwen3.6-35b-a3b-q6_k` | Qwen 3.6 35B MoE (Q6_K) | 28.8 GB | **Default.** Best quality. Used for all digests. `--cpu-moe` |
-| `Qwen3.6-35B-A3B-Q5_K_M` | `qwen3.6-35b`, `qwen3.6-35b-a3b-q5_k_m` | Qwen 3.6 35B MoE (Q5_K_M) | 25.9 GB | Good balance. `--cpu-moe` |
-| `Qwen3.6-35B-A3B-Q4_K_M` | `qwen3.6-35b-a3b-q4_k_m` | Qwen 3.6 35B MoE (Q4_K_M) | 22.3 GB | Fastest Qwen. `--cpu-moe` |
-| `Gemma-4-26B-A4B-Q6_K` | `gemma4-26b`, `gemma4-26b-a4b-q6_k` | Gemma 4 26B MoE (Q6_K) | 23.2 GB | Multimodal (text+image). `--cpu-moe` + `--mmproj` |
+| `qwen-3.6-35b-q6` | `qwen-3.6-35b-q6` | 128K | ON (budget 1024) | Complex reasoning, math, code. `--cpu-moe` |
+| `qwen-3.6-35b-q6-fast` | `qwen-3.6-35b-q6-fast` | 128K | OFF | Chat, facts, context recall, tool use. `--cpu-moe` |
+
+Key flags: `-c 131072`, `-ctk q8_0 -ctv q8_0`, `--cache-ram 2048`, `--prio 2`, `--temp 0.5 --top-k 20 --min-p 0.1`.
 
 #### Service management
 
