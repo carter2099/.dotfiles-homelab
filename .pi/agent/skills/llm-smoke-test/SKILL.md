@@ -17,10 +17,10 @@ Two model variants are registered in llama-swap config (`C:\llm\config.yaml` on 
 
 | Model ID | Alias | Thinking | Use case |
 |---|---|---|---|
-| `Qwen3.6-35B-A3B-Q6_K` | `qwen3.6-35b-q6` | ON (budget 4096) | Complex reasoning, math, code |
-| `Qwen3.6-35B-A3B-Q6_K (no-thinking)` | `qwen3.6-35b-q6-fast` | OFF | Chat, facts, context recall, tool use |
+| `qwen-3.6-35b-q6` | `qwen-3.6-35b-q6` | ON (budget 1024) | Complex reasoning, math, code |
+| `qwen-3.6-35b-q6-fast` | `qwen-3.6-35b-q6-fast` | OFF | Chat, facts, context recall, tool use |
 
-Key config flags: `-c 262144` (256K ctx), `-t 8` (all 8 cores on i7-9700K), `--reasoning-format auto`, `--flash-attn on`, `--no-mmap`.
+Key config flags: `-c 131072` (128K ctx), `-t 8`, `--flash-attn on`, `--no-mmap`, `-ctk q8_0 -ctv q8_0`, `--cache-ram 2048`, `--prio 2`, `--temp 0.5 --top-k 20 --min-p 0.1`.
 
 Switching models triggers a ~60s reload (unload one, load the other).
 
@@ -31,7 +31,7 @@ Switching models triggers a ~60s reload (unload one, load the other).
 bash ~/scripts/smoke-test-llm.sh
 
 # Custom models or benchmark file
-bash ~/scripts/smoke-test-llm.sh qwen3.6-35b-q6 qwen3.6-35b-q6-fast ~/benchmarks/context-window/context_50_000.md
+bash ~/scripts/smoke-test-llm.sh qwen-3.6-35b-q6 qwen-3.6-35b-q6-fast ~/benchmarks/context-window/context_50_000.md
 ```
 
 ## What the Smoke Test Measures
@@ -59,24 +59,24 @@ Run through pi to test if the model proactively uses web_search:
 ```bash
 # No-thinking (recommended — more accurate with search results)
 echo "What's the latest on the US team in the world cup?" | \
-  pi -p --provider local-llm --model "Qwen3.6-35B-A3B-Q6_K (no-thinking)"
+  pi -p --provider local-llm --model qwen-3.6-35b-q6-fast
 
 # Thinking (more verbose, may hallucinate details)
 echo "What's the latest on the US team in the world cup?" | \
-  pi -p --provider local-llm --model "Qwen3.6-35B-A3B-Q6_K"
+  pi -p --provider local-llm --model qwen-3.6-35b-q6
 ```
 
 The test prompt should be a **current events question with no explicit search instruction** — the model must decide to search on its own. The user supplies the test case and correctness criteria interactively.
 
 **Known behavior:** Both models proactively use web_search for current events. The no-thinking model produces cleaner, more accurate results. The thinking model sometimes overcomplicates and hallucinates details.
 
-## Memory Baseline (256K context, idle)
+## Memory Baseline (128K context, idle)
 
 | Metric | Value |
 |---|---|
-| Free RAM | ~2.1 GB (of 32 GB) |
-| VRAM used | ~8.3 GB (of 12.2 GB) |
-| Context | 262144 (256K) |
+| Free RAM | ~2.2 GB (of 32 GB) |
+| VRAM used | ~6.1 GB (of 12.2 GB) |
+| Context | 131072 (128K) |
 
 Context may be lazily allocated — memory grows as context fills.
 
@@ -98,11 +98,11 @@ Context may be lazily allocated — memory grows as context fills.
 
 4. **System prompts can't reduce reasoning verbosity.** Tested "be brief" prompts — they made it worse (model reasons about being brief). The only control is binary: thinking on or off.
 
-5. **256K context is stable.** No OOM at idle. Monitor under heavy context fill.
+5. **128K context is the safe ceiling.** 256K was borderline — prompt processing at 200K+ caused OOM on 32 GB RAM. 128K leaves comfortable headroom for both variants.
 
-6. **Thinking model works at 100K with correct budget.** At budget=1024, the thinking model scores 10/10 on 100K context recall (818 tokens, 394 reasoning + 2,732 content, ~8 min). At budget=4096, it fails 0/10 (burns all tokens on reasoning). The budget knob is make-or-break for long context.
+6. **Thinking model works at 100K with budget=1024.** At budget=1024, the thinking model scores 10/10 on 100K context recall (~9 min). At budget=4096, it fails 0/10 (burns all tokens on reasoning). The budget knob is make-or-break.
 
-7. **100K context benchmark reference:** No-thinking scores 10/10 in ~8.5 minutes. Prompt processing dominates (100K tokens), generation is fast (698 tokens).
+7. **100K context benchmark reference:** No-thinking scores 10/10 in ~8 min. Thinking scores 10/10 in ~9 min. Prompt processing dominates, generation is fast.
 
 ## Restarting llama-swap
 

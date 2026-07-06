@@ -79,6 +79,6 @@ IMPORTANT: every story must include its URL as a markdown link `[title](URL)`. T
 
 Then delete any .md files in /home/carter/digests/ai-tech/ older than 7 days.'
 
-pi -p --provider local-llm --model qwen3.6-35b-a3b-q6_k "$PROMPT"
+pi -p --provider local-llm --model qwen-3.6-35b-q6 "$PROMPT"
 END_TS="$(date +%s)"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ai-tech-digest duration=$((END_TS - START_TS))s model=qwen3.6-35b-a3b-q6_k" >> "$HOME/digests/ai-tech/.runs.log"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ai-tech-digest duration=$((END_TS - START_TS))s model=qwen-3.6-35b-q6" >> "$HOME/digests/ai-tech/.runs.log"
