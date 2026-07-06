@@ -18,8 +18,10 @@ PROMPT='You are a homelab maintenance agent. Your job is to auto-apply safe upda
 AUTO-APPLY (do these without asking):
 - apt upgrade for routine packages — BUT hold back: docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin, cloudflared
 - snap refresh for core22, core24, snapd — BUT NEVER refresh the docker snap (AppArmor risk)
-- npm update -g (updates pi-web and other global packages)
 - k3s workload image pulls: freshrss (freshrss/freshrss:latest) and uptime-kuma (louislam/uptime-kuma:1) — do a rollout restart to pull latest within their current tag track
+
+NEVER AUTO-APPLY (report only):
+- npm global packages — npm update -g mutates peer-dependency trees and has broken pi-web module resolution in the past. Report outdated globals for manual intervention.
 
 DO NOT TOUCH (report only):
 - Docker engine/plugins (apt) — restarts daemon, manual only
@@ -58,12 +60,16 @@ Run:
 
 Do NOT refresh the docker snap. Note what was refreshed.
 
-## Step 5: Apply npm global updates
+## Step 5: Check npm global packages (report only)
 
 Run:
-  npm update -g 2>/dev/null || true
+  npm outdated -g 2>/dev/null || true
 
-Note what was updated (especially pi-web).
+DO NOT run npm update -g. Global packages with peer dependencies (pi-web,
+pi-coding-agent) are fragile to automatic updates and can break module
+resolution. Report what is outdated and flag for manual intervention.
+
+Note what is outdated (especially pi-web).
 
 ## Step 6: Pull latest k3s workload images
 
@@ -149,8 +155,8 @@ Write to /home/carter/digests/updates/.daily_report.html. Clean, mobile-friendly
 
 Sections:
 1. Header: "Homelab Update Report — '"$TODAY"'"
-2. ✅ Auto-Applied (what the agent did tonight — apt packages, snaps, npm, k3s restarts)
-3. 🔴 Needs Attention (held-back packages: docker-*, cloudflared; open-webui if newer tag exists; blog/delta if >2 weeks old; any CRITICAL validation failures)
+2. ✅ Auto-Applied (what the agent did tonight — apt packages, snaps, k3s restarts)
+3. 🔴 Needs Attention (held-back packages: docker-*, cloudflared; npm globals if outdated; open-webui if newer tag exists; blog/delta if >2 weeks old; any CRITICAL validation failures)
 4. ℹ️ Behind but Safe (traefik patch, uptime-kuma if major bump exists, runtimes, neovim, dependabot-webhook)
 5. 📊 System Health (disk, memory, uptime, reboot needed, container/pod status)
 6. ✅ Validation (endpoint check results — passed or failed)
