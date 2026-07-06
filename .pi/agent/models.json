@@ -10,53 +10,23 @@
       },
       "models": [
         {
-          "id": "Qwen3.6-35B-A3B-Q6_K",
-          "name": "Qwen3.6 35B-A3B Q6_K (Local)",
+          "id": "qwen-3.6-35b-q6",
+          "name": "Qwen 3.6 35B Q6 (Local, Thinking)",
           "reasoning": true,
           "input": ["text"],
-          "contextWindow": 262144,
+          "contextWindow": 131072,
           "maxTokens": 65536,
-          "aliases": ["qwen3.6-35b-a3b-q6_k"],
+          "aliases": ["qwen3.6-35b-q6"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
-          "id": "Qwen3.6-35B-A3B-Q5_K_M",
-          "name": "Qwen3.6 35B-A3B Q5_K_M (Local)",
-          "reasoning": true,
-          "input": ["text"],
-          "contextWindow": 262144,
-          "maxTokens": 65536,
-          "aliases": ["qwen3.6-35b", "qwen3.6-35b-a3b-q5_k_m"],
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "Qwen3.6-35B-A3B-Q4_K_M",
-          "name": "Qwen3.6 35B-A3B Q4_K_M (Local)",
-          "reasoning": true,
-          "input": ["text"],
-          "contextWindow": 262144,
-          "maxTokens": 65536,
-          "aliases": ["qwen3.6-35b-a3b-q4_k_m"],
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "Gemma-4-26B-A4B-Q6_K",
-          "name": "Gemma 4 26B-A4B Q6_K (Local)",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "contextWindow": 262144,
-          "maxTokens": 65536,
-          "aliases": ["gemma4-26b", "gemma4-26b-a4b-q6_k"],
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "GPT-OSS-20B-mxfp4",
-          "name": "GPT-OSS 20B mxfp4 (Local)",
+          "id": "qwen-3.6-35b-q6-fast",
+          "name": "Qwen 3.6 35B Q6 Fast (Local, No-Thinking)",
           "reasoning": false,
           "input": ["text"],
           "contextWindow": 131072,
-          "maxTokens": 32768,
-          "aliases": ["gpt-oss", "gpt-oss-20b"],
+          "maxTokens": 65536,
+          "aliases": ["qwen3.6-35b-q6-fast"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }
       ]
