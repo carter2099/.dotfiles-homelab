@@ -155,7 +155,7 @@ Write to /home/carter/digests/updates/.daily_report.html. Clean, mobile-friendly
 
 Sections:
 1. Header: "Homelab Update Report — '"$TODAY"'"
-2. ✅ Auto-Applied (what the agent did tonight — apt packages, snaps, k3s restarts)
+2. ✅ Auto-Applied (what was applied this run — apt packages, snaps, k3s restarts)
 3. 🔴 Needs Attention (held-back packages: docker-*, cloudflared; npm globals if outdated; open-webui if newer tag exists; blog/delta if >2 weeks old; any CRITICAL validation failures)
 4. ℹ️ Behind but Safe (traefik patch, uptime-kuma if major bump exists, runtimes, neovim, dependabot-webhook)
 5. 📊 System Health (disk, memory, uptime, reboot needed, container/pod status)
