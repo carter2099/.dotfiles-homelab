@@ -15,10 +15,10 @@ Open WebUI / pi → llm-proxy:8081 (homelab) → llama-swap:8080 (gaming rig) �
 
 Two model variants are registered in llama-swap config (`C:\llm\config.yaml` on gaming rig):
 
-| Model ID | Alias | Thinking | Use case |
+| Model ID | Alias | Thinking | Use |
 |---|---|---|---|
-| `qwen-3.6-35b-q6` | `qwen-3.6-35b-q6` | ON (budget 1024) | Complex reasoning, math, code |
-| `qwen-3.6-35b-q6-fast` | `qwen-3.6-35b-q6-fast` | OFF | Chat, facts, context recall, tool use |
+| `qwen-3.6-35b-q6` | `qwen-3.6-35b-q6` | ON (budget 1024) | **General use** — default for most tasks |
+| `qwen-3.6-35b-q6-fast` | `qwen-3.6-35b-q6-fast` | OFF | **Fallback** — when reasoning eats token budget or breaks tool calling |
 
 Key config flags: `-c 131072` (128K ctx), `-t 8`, `--flash-attn on`, `--no-mmap`, `-ctk q8_0 -ctv q8_0`, `--cache-ram 2048`, `--prio 2`, `--temp 0.5 --top-k 20 --min-p 0.1`.
 

@@ -395,10 +395,10 @@ The proxy replaces three old components: `llama-server.service`, `llama-gaming-p
 
 Only one model file on disk. Two server variants via `--reasoning` flag:
 
-| Model ID | Alias | Context | Thinking | Notes |
+| Model ID | Alias | Context | Thinking | Use |
 |---|---|---|---|---|
-| `qwen-3.6-35b-q6` | `qwen-3.6-35b-q6` | 128K | ON (budget 1024) | Complex reasoning, math, code. `--cpu-moe` |
-| `qwen-3.6-35b-q6-fast` | `qwen-3.6-35b-q6-fast` | 128K | OFF | Chat, facts, context recall, tool use. `--cpu-moe` |
+| `qwen-3.6-35b-q6` | `qwen-3.6-35b-q6` | 128K | ON (budget 1024) | **General use** — default for most tasks. Reasoning budget caps at 1024 tokens. |
+| `qwen-3.6-35b-q6-fast` | `qwen-3.6-35b-q6-fast` | 128K | OFF | **Fallback** — use when reasoning eats the token budget, breaks tool calling, or causes other issues. |
 
 Key flags: `-c 131072`, `-ctk q8_0 -ctv q8_0`, `--cache-ram 2048`, `--prio 2`, `--temp 0.5 --top-k 20 --min-p 0.1`.
 
