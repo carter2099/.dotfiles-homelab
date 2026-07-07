@@ -1,0 +1,9 @@
+[Unit]
+Description=Fire all daily digests at 4am ET (8am UTC)
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
