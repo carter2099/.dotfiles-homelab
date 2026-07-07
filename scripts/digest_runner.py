@@ -364,6 +364,19 @@ TOPICS: dict[str, dict[str, Any]] = {
 # Utility: LLM calls
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _date_context() -> str:
+    """Return a date context string injected into every LLM call."""
+    now = datetime.now()
+    return (
+        f"Today's date is {now.strftime('%Y-%m-%d')} "
+        f"({now.strftime('%A')}). "
+        f"The current time is {now.strftime('%H:%M')} UTC. "
+        f"All date checks should use this as the reference point. "
+        f"'Last 24 hours' means stories published on or after "
+        f"{(now - timedelta(days=1)).strftime('%Y-%m-%d')}."
+    )
+
+
 def _call_llm_proxy(
     system: str,
     user: str,
@@ -372,10 +385,12 @@ def _call_llm_proxy(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
     """Call the local Qwen model via llm-proxy. Returns response text."""
+    # Always inject the current date so agents know what "today" means
+    date_prefix = _date_context()
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
-            {"role": "system", "content": system},
+            {"role": "system", "content": f"{date_prefix}\n\n{system}"},
             {"role": "user", "content": user},
         ],
         "temperature": temperature,
@@ -398,8 +413,10 @@ def _call_pi_p(
     local model is slow (sometimes <30 tok/s) and web fetches add latency.
     """
     cmd = ["pi", "-p", "--provider", "local-llm", "--model", model]
-    if append_system:
-        cmd.extend(["--append-system-prompt", append_system])
+    # Always inject the current date so agents know what "today" means
+    date_prefix = _date_context()
+    full_system = f"{date_prefix}\n\n{append_system}" if append_system else date_prefix
+    cmd.extend(["--append-system-prompt", full_system])
 
     result = subprocess.run(
         cmd,
