@@ -129,26 +129,24 @@ TOPICS: dict[str, dict[str, Any]] = {
             },
         ],
         "judgment_rules": (
-            "For each finding, evaluate against these rules. Be strict — it's better to drop "
-            "a marginal story than to include a bad one.\n\n"
-            "1. DATE CHECK: Was this published or substantially updated in the last 24 hours? "
-            "If the article has no clear date or the date is older than 24 hours, mark 'drop' "
-            "with reason 'date_unclear' or 'too_old'.\n"
+            "For each finding, evaluate against these rules and assign a verdict.\n\n"
+            "1. DATE CHECK (three-tier):\n"
+            "   - Published/updated in the last 24 hours → verdict 'fresh'\n"
+            "   - Published/updated in the last 2-7 days → verdict 'recent'\n"
+            "   - Older than 7 days OR no clear date → drop with reason 'too_old' or 'date_unclear'\n"
             "2. SOURCE CHECK: Is this from a known reputable outlet? TechCrunch, The Verge, "
-            "Ars Technica, Wired, ZDNet, VentureBeat, Hacker News (as a discussion link, "
-            "not the original source), official company blogs, GitHub repos with significant "
-            "activity, academic papers on arxiv. Personal blogs are OK if they have substance. "
-            "Content farms, SEO spam, and low-quality aggregators should be dropped with "
-            "reason 'unreliable_source'.\n"
+            "Ars Technica, Wired, ZDNet, VentureBeat, Hacker News, official company blogs, "
+            "GitHub repos with significant activity, academic papers on arxiv. Personal blogs "
+            "are OK if they have substance. Content farms, SEO spam, and low-quality "
+            "aggregators should be dropped with reason 'unreliable_source'.\n"
             "3. RELEVANCE CHECK: Is this about AI, tech, developer tools, or the tech industry? "
-            "If it's general business news, politics, or non-tech topics, drop with reason "
-            "'not_relevant'.\n"
+            "If it's general business news, politics, or non-tech topics, drop with reason 'not_relevant'.\n"
             "4. DUPLICATE CHECK: Is this the same underlying story as another finding? "
-            "If yes, mark the lower-quality one as 'drop' with reason 'duplicate_of:<other_finding_index>'.\n"
+            "If yes, mark the lower-quality one as drop with reason 'duplicate_of:<other_finding_index>'.\n"
             "5. SUBSTANCE CHECK: Does this story have actual news value? Press releases with "
             "no new information, minor version bumps, and 'X company announced they will announce "
             "something' should be dropped with reason 'no_substance'.\n\n"
-            "Return ONLY the findings that pass ALL checks with a 'keep' verdict."
+            "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
         ),
         "categories": [
             "Model Releases", "Agentic/Agent Platforms", "Open Source",
@@ -210,15 +208,23 @@ TOPICS: dict[str, dict[str, Any]] = {
             },
         ],
         "judgment_rules": (
-            "For each finding, evaluate against these rules:\n\n"
-            "1. DATE CHECK: Published/updated in the last 24 hours? Drop if unclear or too old.\n"
-            "2. SOURCE CHECK: Reputable? Drop content farms and low-quality aggregators.\n"
+            "For each finding, evaluate against these rules and assign a verdict.\n\n"
+            "1. DATE CHECK (three-tier):\n"
+            "   - Published/updated in the last 24 hours → verdict 'fresh'\n"
+            "   - Published/updated in the last 2-7 days → verdict 'recent'\n"
+            "   - Older than 7 days OR no clear date → drop with reason 'too_old' or 'date_unclear'\n"
+            "2. SOURCE CHECK: Reputable? Tech blogs, official docs, GitHub repos, company blogs "
+            "are good. Drop content farms and low-quality aggregators.\n"
             "3. RELEVANCE CHECK: About agentic platforms, coding agents, multi-agent systems, "
-            "MCP ecosystem, or agent development tooling? Drop if tangentially about AI in general.\n"
-            "4. DUPLICATE CHECK: Same story as another? Keep the best version.\n"
-            "5. SUBSTANCE CHECK: Actual news? Drop 'we're excited to announce we raised a seed round' "
-            "and other empty announcements.\n\n"
-            "Return ONLY findings that pass with 'keep' verdict."
+            "MCP ecosystem, agent dev tooling, or AI agent research? Drop general AI news "
+            "without an agent angle.\n"
+            "4. DUPLICATE CHECK: Same story? Keep the best version, drop duplicates.\n"
+            "5. SUBSTANCE CHECK: Actual news or meaningful analysis? Drop empty announcements.\n\n"
+            "Note: Agentic platforms have a slower news cycle than general AI. A Claude Code "
+            "changelog from 3 days ago or a Cursor feature launch from earlier this week IS "
+            "legitimately 'recent' — don't drop it. Save older but still-valuable findings "
+            "in the 'recent' array for the Recent & Relevant section.\n\n"
+            "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
         ),
         "categories": [
             "Platform Updates", "New Features", "Launches", "MCP/Ecosystem",
@@ -275,14 +281,17 @@ TOPICS: dict[str, dict[str, Any]] = {
             },
         ],
         "judgment_rules": (
-            "For each finding, evaluate:\n\n"
-            "1. DATE CHECK: Last 24 hours? Drop if unclear or old.\n"
+            "For each finding, evaluate and assign a verdict.\n\n"
+            "1. DATE CHECK (three-tier):\n"
+            "   - Published/updated in the last 24 hours → verdict 'fresh'\n"
+            "   - Published/updated in the last 2-7 days → verdict 'recent'\n"
+            "   - Older than 7 days OR no clear date → drop with reason 'too_old' or 'date_unclear'\n"
             "2. SOURCE CHECK: Reputable gaming press or official sources? Drop spam/content farms.\n"
             "3. RELEVANCE CHECK: About video games, gaming industry, or gaming hardware? "
             "Not general entertainment.\n"
-            "4. DUPLICATE CHECK: Same story? Keep best version.\n"
+            "4. DUPLICATE CHECK: Same story? Keep best version, drop duplicates.\n"
             "5. SUBSTANCE CHECK: 'Game X tweeted an emoji' is not news. Drop empty stories.\n\n"
-            "Return only findings that pass with 'keep'."
+            "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
         ),
         "categories": [
             "Releases", "Updates & Patches", "DLC/Expansions", "Platform News",
@@ -339,16 +348,19 @@ TOPICS: dict[str, dict[str, Any]] = {
             },
         ],
         "judgment_rules": (
-            "For each finding, evaluate:\n\n"
-            "1. DATE CHECK: Last 24 hours? Drop if unclear or old.\n"
+            "For each finding, evaluate and assign a verdict.\n\n"
+            "1. DATE CHECK (three-tier):\n"
+            "   - Published/updated in the last 24 hours → verdict 'fresh'\n"
+            "   - Published/updated in the last 2-7 days → verdict 'recent'\n"
+            "   - Older than 7 days OR no clear date → drop with reason 'too_old' or 'date_unclear'\n"
             "2. SOURCE CHECK: Reputable news organization? Drop blogs posing as news, "
             "content farms, and known misinformation sources.\n"
             "3. RELEVANCE CHECK: Significant U.S. or world event? Not local crime, "
             "celebrity gossip, or sports (unless major international significance).\n"
-            "4. DUPLICATE CHECK: Same story? Keep best version.\n"
+            "4. DUPLICATE CHECK: Same story? Keep best version, drop duplicates.\n"
             "5. SUBSTANCE CHECK: Is this actually news? 'Politician says something' "
             "without significant context or consequence is not news.\n\n"
-            "Return only findings that pass with 'keep'."
+            "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
         ),
         "categories": [
             "Politics", "Policy", "Economy", "Judiciary", "Executive",
@@ -526,15 +538,19 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
     return findings
 
 
-def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
+def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> tuple[list[dict], list[dict]]:
     """Phase 2: One LLM call judges all research findings against rules.
 
-    Returns list of kept findings (those passing all checks).
+    Returns (fresh_findings, recent_findings):
+    - fresh: published in the last 24 hours — goes in the Fresh section
+    - recent: published in the last 2-7 days — candidate for Recent & Relevant
+    - dropped: older than 7 days, bad source, or no substance — rejected
     """
     output_path = run_dir / "02-research-judged.json"
     if output_path.exists():
         print(f"  [skip] Phase 2 output exists: {output_path}")
-        return json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text())
+        return data.get("fresh", []), data.get("recent", [])
 
     print(f"  [run ] judge_research — {len(findings)} findings to evaluate")
     t0 = time.time()
@@ -547,59 +563,73 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         "story included) is worse than a false negative (good story missed).\n\n"
         "You will receive a JSON array of research findings and a set of rules. "
         "For each finding, evaluate it against every rule and output a verdict.\n\n"
-        "Output a JSON object with two arrays:\n"
-        '  {"kept": [...], "rejected": [{"finding": ..., "reason": "..."}, ...]}\n'
-        "Wrap your output in ```json fences."
+        "Output a JSON object with three arrays wrapped in ```json fences:\n"
+        '  {\n'
+        '    "fresh": [<findings for the Fresh section — last 24 hours>],\n'
+        '    "recent": [<findings for Recent & Relevant — last 2-7 days>],\n'
+        '    "rejected": [{"finding": ..., "reason": "..."}, ...]\n'
+        '  }\n'
     )
 
     user = (
         f"## Rules\n\n{topic['judgment_rules']}\n\n"
         f"## Findings to evaluate\n\n{findings_json}\n\n"
-        "Evaluate each finding against every rule. Output the kept and rejected arrays "
-        "in ```json fences. Include a clear reason for each rejection."
+        "Evaluate each finding against every rule. Output the fresh, recent, and "
+        "rejected arrays in ```json fences. Include a clear reason for each rejection."
     )
 
     try:
         raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
         result = _extract_json(raw, "judge_research output")
-        kept = result.get("kept", [])
+        fresh = result.get("fresh", [])
+        recent = result.get("recent", [])
         rejected = result.get("rejected", [])
         elapsed = time.time() - t0
-        print(f"  [done] judge_research — {len(kept)} kept, {len(rejected)} rejected ({elapsed:.0f}s)")
+        print(f"  [done] judge_research — {len(fresh)} fresh, {len(recent)} recent, {len(rejected)} rejected ({elapsed:.0f}s)")
         for r in rejected:
             finding = r.get("finding", {})
             reason = r.get("reason", "unspecified")
             print(f"    ✗ {finding.get('title', '?')[:60]}: {reason}")
     except Exception as e:
         elapsed = time.time() - t0
-        print(f"  [FAIL] judge_research — {e} ({elapsed:.0f}s), keeping all findings")
-        kept = findings
+        print(f"  [FAIL] judge_research — {e} ({elapsed:.0f}s), treating all as recent")
+        fresh = []
+        recent = findings
         rejected = []
 
-    output = {"kept": kept, "rejected": rejected}
+    output = {"fresh": fresh, "recent": recent, "rejected": rejected}
     output_path.write_text(json.dumps(output, indent=2))
-    return kept
+    return fresh, recent
 
 
-def phase_3_rank(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
-    """Phase 3: Python-side ranking. Sort by importance, cap at top N.
+def phase_3_rank(topic: dict, fresh: list[dict], recent: list[dict], run_dir: Path) -> list[dict]:
+    """Phase 3: Python-side ranking. Tag each finding with its source_verdict,
+    sort fresh by importance (cap at top N), pass recent through.
 
-    No LLM call — deterministic.
+    No LLM call — deterministic. Returns combined list.
     """
     output_path = run_dir / "03-urls-ranked.json"
     if output_path.exists():
         print(f"  [skip] Phase 3 output exists: {output_path}")
         return json.loads(output_path.read_text())
 
+    # Tag each finding with its source verdict
+    for f in fresh:
+        f["source_verdict"] = "fresh"
+    for r in recent:
+        r["source_verdict"] = "recent"
+
+    # Rank fresh by importance, cap at 12
     importance_order = {"high": 0, "medium": 1, "low": 2}
-    ranked = sorted(findings, key=lambda f: importance_order.get(f.get("importance", "low"), 2))
+    ranked_fresh = sorted(fresh, key=lambda f: importance_order.get(f.get("importance", "low"), 2))
+    ranked_fresh = ranked_fresh[:12]
 
-    # Cap at 15 — enough for a daily digest
-    ranked = ranked[:15]
+    # Combine: fresh first (ranked), then recent (original order)
+    combined = ranked_fresh + recent
 
-    output_path.write_text(json.dumps(ranked, indent=2))
-    print(f"  Phase 3 done: {len(ranked)} URLs ranked (capped from {len(findings)})")
-    return ranked
+    output_path.write_text(json.dumps(combined, indent=2))
+    print(f"  Phase 3 done: {len(ranked_fresh)} fresh (capped at 12) + {len(recent)} recent = {len(combined)} total")
+    return combined
 
 
 def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
@@ -779,17 +809,27 @@ def phase_6_curate(topic: dict, summaries: list[dict], run_dir: Path,
     kept = [s for s in summaries if s.get("judge_verdict") in ("keep", "fix")]
     dropped = [s for s in summaries if s.get("judge_verdict") == "drop"]
 
-    print(f"  [run ] curate — {len(kept)} stories to curate, {len(dropped)} dropped")
+    # Separate by source_verdict from Phase 2
+    fresh_candidates = [s for s in kept if s.get("source_verdict") == "fresh"]
+    recent_candidates = [s for s in kept if s.get("source_verdict") == "recent"]
+
+    print(f"  [run ] curate — {len(fresh_candidates)} fresh candidates, "
+          f"{len(recent_candidates)} recent candidates, {len(dropped)} dropped")
     t0 = time.time()
 
     kept_json = json.dumps(kept, indent=2)
+    fresh_json = json.dumps(fresh_candidates, indent=2)
+    recent_json = json.dumps(recent_candidates, indent=2)
     sif_json = json.dumps(stories_in_flight, indent=2)
 
     system = (
-        "You are the lead editor of a daily news digest. You receive a set of "
-        "vetted, detailed article summaries and a 'stories-in-flight' tracker of "
-        "evolving stories from previous days. Your job is to curate the final "
-        "story selection.\n\n"
+        "You are the lead editor of a daily news digest. You receive two pools of "
+        "vetted article summaries and a 'stories-in-flight' tracker of evolving "
+        "stories from previous days. Your job is to curate the final story selection.\n\n"
+        "The summaries are tagged with 'source_verdict': 'fresh' (last 24 hours) or "
+        "'recent' (last 2-7 days). Fresh candidates go primarily in the Fresh section. "
+        "Recent candidates join stories-in-flight as candidates for the Recent & "
+        "Relevant section.\n\n"
         "Tasks:\n"
         "1. DEDUPLICATE: If two summaries cover the same underlying story, merge them "
         "(keep the best summary, note the other URL as related).\n"
@@ -845,11 +885,14 @@ def phase_6_curate(topic: dict, summaries: list[dict], run_dir: Path,
         indent=2)
 
     user = (
-        f"## Vetted Summaries (kept after judgment)\n\n{kept_json}\n\n"
+        f"## Fresh Candidates (last 24 hours — for the Fresh section)\n\n{fresh_json}\n\n"
+        f"## Recent Candidates (last 2-7 days — use alongside stories-in-flight for Recent & Relevant)\n\n{recent_json}\n\n"
         f"## Dropped Summaries (for reference, do not include)\n\n"
         f"{dropped_json}\n\n"
         f"## Stories In Flight (from previous days)\n\n{sif_json}\n\n"
-        "Curate the final selection. Output the JSON object in ```json fences."
+        "Curate the final selection. Fresh candidates go in the Fresh section. "
+        "Recent candidates and stories-in-flight go in the Recent & Relevant section. "
+        "Output the JSON object in ```json fences."
     )
 
     try:
@@ -1211,14 +1254,14 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         # Phase 2: Judge Research
         print("\n── Phase 2: Judge Research ──")
         if findings:
-            kept_findings = phase_2_judge_research(topic, findings, run_dir)
+            fresh_findings, recent_findings = phase_2_judge_research(topic, findings, run_dir)
         else:
-            kept_findings = []
+            fresh_findings, recent_findings = [], []
 
-        # Phase 3: Rank URLs
+        # Phase 3: Rank URLs (combines fresh + recent, tags each with source_verdict)
         print("\n── Phase 3: Rank URLs ──")
-        if kept_findings:
-            ranked = phase_3_rank(topic, kept_findings, run_dir)
+        if fresh_findings or recent_findings:
+            ranked = phase_3_rank(topic, fresh_findings, recent_findings, run_dir)
         else:
             ranked = []
 
