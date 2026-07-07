@@ -220,10 +220,6 @@ TOPICS: dict[str, dict[str, Any]] = {
             "without an agent angle.\n"
             "4. DUPLICATE CHECK: Same story? Keep the best version, drop duplicates.\n"
             "5. SUBSTANCE CHECK: Actual news or meaningful analysis? Drop empty announcements.\n\n"
-            "Note: Agentic platforms have a slower news cycle than general AI. A Claude Code "
-            "changelog from 3 days ago or a Cursor feature launch from earlier this week IS "
-            "legitimately 'recent' — don't drop it. Save older but still-valuable findings "
-            "in the 'recent' array for the Recent & Relevant section.\n\n"
             "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
         ),
         "categories": [
