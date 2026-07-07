@@ -244,24 +244,88 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ## Email Digests
 
-Four daily HTML email digests are scheduled via systemd user timers. Each digest runs a **headless Pi agent** (`pi -p`) using the **local Qwen Q6** model via llm-proxy. If the gaming rig is unavailable (gaming, offline), the proxy transparently falls back to **deepseek-v4-flash** on the OpenCode Go plan. The agent researches via `web_search` (for discovering articles) and `web_fetch` (for reading pages), fills the shared `~/digests/template.html`, emails via `send_digest.py`, and writes a URL-enriched dedup/continuity summary to `~/digests/<topic>/YYYY-MM-DD.md`.
+Four daily HTML email digests are produced by a **deterministic 9-phase Python workflow** (`~/scripts/digest_runner.py`) that breaks the task into focused sub-prompts the local Qwen Q6 can handle reliably. The old single-prompt `pi -p` approach (one monster prompt doing research → curate → write → send in one context window) was replaced July 2026 because the local model struggled with the context load.
 
-| Timer | Fires (UTC) | Topic |
+### Architecture
+
+```
+Phase 1: Research (3 sequential pi -p calls)  →  web_search for stories
+Phase 2: Judge research (direct API)           →  filter by date/relevance/source
+Phase 3: Rank URLs (Python, no LLM)            →  sort by importance, cap at top N
+Phase 4: Fetch & Summarize (sequential pi -p)  →  web_fetch each article
+Phase 5: Judge summaries (direct API)          →  verify accuracy/faithfulness
+Phase 6: Curate (direct API)                   →  dedupe, cross-ref, rank, gaps,
+                                                   update stories-in-flight
+Phase 7: Write HTML (direct API)               →  fill the shared template
+Phase 8: Send & Archive (Python, no LLM)       →  email via send_digest.py,
+                                                   archive, write stories-in-flight
+Phase 9: Summary (direct API)                  →  write .md for future dedup
+```
+
+Each phase output is saved to `~/digests/<topic>/YYYY-MM-DD/` for auditability and idempotent resume (if a phase output exists, it's skipped on re-run). Phases that need tools (web_search, web_fetch) use `pi -p`; phases that only transform structured data use direct llm-proxy API calls. All phases use the reasoning model (`qwen-3.6-35b-q6`). Calls are sequential because llama.cpp is single-request.
+
+### Stories-in-flight (cross-day story tracking)
+
+A `stories-in-flight.json` file in each digest directory tracks evolving stories across days. The Phase 6 curation agent reads it, updates stories with new developments (resetting the `last_updated` clock), and adds new evolving stories. Two Python-side rules handle pruning deterministically:
+- **Auto-cool (7 days):** Stories with no updates in 7+ days → status set to "cooled" (excluded from Recent & Relevant)
+- **Auto-prune (14 days):** Cooled stories with no updates in 14+ days → removed from tracker entirely
+
+The LLM can revive cooled stories by updating `last_updated` when new developments appear.
+
+### Schedule
+
+All four digests run sequentially via a single systemd timer to avoid conflicts with gaming (the llm-proxy kills the LLM when gaming is detected).
+
+| Timer | Fires (UTC) | Fires (ET) |
 |---|---|---|
-| `ai-tech-digest` | 15:00 | AI & tech |
-| `agentic-digest` | 16:00 | Agentic platforms / agent tooling |
-| `gaming-digest` | 19:00 | Gaming news |
-| `world-digest` | 21:00 | U.S. / world events |
+| `digests-daily` | 08:00 | 4:00 AM |
 
-Service + timer units live in `~/.config/systemd/user/<name>.{service,timer}`; the actual run scripts are `~/scripts/run_<name>_digest.sh`. Manage with `systemctl --user list-timers`, `systemctl --user status <name>.timer`, `journalctl --user -u <name>.service`.
+Service unit: `digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` for each topic in order: ai-tech → agentic-platform → gaming → world. Total runtime: ~2.5-3 hours, done by ~7 AM ET.
 
-Each script runs `pi -p --provider local-llm --model qwen-3.6-35b-q6 "$PROMPT"`. Pi's `-p` mode is the equivalent of `opencode run` for headless/automated use — no stdin hacks needed, no write-path restrictions. The agentic digest's second recipient is kept out of the public dotfiles repo — it's read from `AGENTIC_CC=` in the un-tracked `~/scripts/.smtp_config`.
+The old individual timers (`ai-tech-digest`, `agentic-digest`, `gaming-digest`, `world-digest`) are **disabled**. The old per-topic bash scripts (`~/scripts/run_<topic>_digest.sh`) still exist but are not used by the new system.
+
+### Digest topics
+
+| Topic | Category dir | Recipients |
+|---|---|---|
+| AI & tech | `ai-tech/` | carter2099@pm.me |
+| Agentic platforms | `agentic-platform/` | carter2099@pm.me + CC from `~/.scripts/.smtp_config` |
+| Gaming | `gaming-digest/` | carter2099@pm.me |
+| World / U.S. events | `world-digest/` | carter2099@pm.me |
+
+### Key files
+
+- `~/scripts/digest_runner.py` — the 9-phase workflow orchestrator (topic-agnostic; topic configs are defined in the `TOPICS` dict at the top)
+- `~/scripts/run_all_digests.sh` — sequential wrapper that calls `digest_runner.py` for all 4 topics
+- `~/scripts/send_digest.py` — SMTP sender (reads `~/.scripts/.smtp_config` for credentials)
+- `~/digests/template.html` — shared HTML template with `{{DIGEST_TITLE}}`, `{{DATE}}`, `{{INTRO}}`, `{{FRESH_STORIES}}`, `{{RECENT_STORIES}}` placeholders
+- `~/.config/systemd/user/digests-daily.{service,timer}` — systemd units
 
 ### Quality infrastructure
 
-Each run writes a summary (`~/digests/<topic>/YYYY-MM-DD.md`), an HTML archive (`.html`), and a run log (`.runs.log`). Summaries are machine-readable for retrospective quality audits.
+Each run writes a full phase trail (`01-research-raw.json` through `summary.md`) in the dated run directory. This enables retrospective audits — if a story was missed, trace it from research through each judgment gate to understand why.
 
-Carter often references these by topic when chatting ("I saw something in the agentic digest about X"). When he does, note-taking into `~/notes/` is the likely follow-up.
+### Debugging
+
+```bash
+# Check timer status
+systemctl --user status digests-daily.timer
+
+# Run a single topic manually (dry-run to skip email)
+python3 ~/scripts/digest_runner.py ai-tech --dry-run
+
+# Run all topics
+bash ~/scripts/run_all_digests.sh
+
+# Check the latest run's artifacts
+ls ~/digests/ai-tech/$(date +%Y-%m-%d)/
+
+# View the log
+cat ~/digests/.digests.log
+
+# Check stories-in-flight
+cat ~/digests/ai-tech/stories-in-flight.json | python3 -m json.tool
+```
 
 ## Remote Agent Operations
 
