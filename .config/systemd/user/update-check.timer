@@ -1,8 +1,8 @@
 [Unit]
-Description=Fire homelab update audit nightly at 6am ET
+Description=Fire homelab update agent nightly at 1am ET
 
 [Timer]
-OnCalendar=*-*-* 10:00:00
+OnCalendar=*-*-* 05:00:00
 Persistent=true
 
 [Install]

@@ -14,7 +14,7 @@ apt list --upgradable 2>/dev/null
 ```
 
 Categorize:
-- **Held back by nightly agent:** docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin, cloudflared (these are held via apt-mark, need `/update-homelab`)
+- **Auto-applied nightly:** docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin, cloudflared (these are auto-applied by the nightly update agent at 1am ET with rollback on failure)
 - **Routine:** everything else (libs, tools)
 
 Note the count and highlight any security-related or kernel packages.
@@ -120,5 +120,5 @@ Write a brief session memoir to `~/notes/sessions/YYYY-MM-DD.md` per the Persist
 ## Notes
 
 - This skill is report-only. It never installs, upgrades, or restarts anything.
-- The nightly agent (update-check.timer) auto-applies safe updates and emails a report. This skill is for interactive, on-demand use.
+- The nightly agent (update-check.timer, 1am ET) is a deterministic Python orchestrator (`update_runner.py`). It auto-applies apt upgrades, Docker engine/plugins, cloudflared, open-webui stable tags, and k3s workload restarts — each with pre-version capture and automatic rollback on pi-web or tunnel failure. It emails a full HTML report daily.
 - Use web_search sparingly — only for items where the user would reasonably care about being behind (open-webui, traefik, Go, neovim, k3s). Skip web_search for routine apt packages.

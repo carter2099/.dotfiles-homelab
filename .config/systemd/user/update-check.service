@@ -1,7 +1,7 @@
 [Unit]
-Description=Nightly homelab maintenance: auto-apply safe updates + validate + report
+Description=Nightly homelab maintenance: deterministic auto-apply + validate + report (1am ET)
 
 [Service]
 Type=oneshot
-ExecStart=/home/carter/scripts/run_update_check.sh
+ExecStart=/usr/bin/python3 /home/carter/scripts/update_runner.py
 TimeoutStartSec=900

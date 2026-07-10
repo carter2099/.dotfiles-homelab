@@ -300,7 +300,10 @@ All four digests run sequentially via a single systemd timer to avoid conflicts 
 
 | Timer | Fires (UTC) | Fires (ET) |
 |---|---|---|
+| `homelab-backup` | 03:00 | 11:00 PM (prev. day) |
+| `update-check` | 05:00 | 1:00 AM |
 | `digests-daily` | 08:00 | 4:00 AM |
+| `hyperliquid-sdk` | 08:00 Mon/Thu | 4:00 AM Mon/Thu |
 
 Service unit: `digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` for each topic in order: ai-tech → agentic-platform → gaming → world. Total runtime: ~2.5-3 hours, done by ~7 AM ET.
 
@@ -348,6 +351,76 @@ cat ~/digests/.digests.log
 # Check stories-in-flight
 cat ~/digests/ai-tech/stories-in-flight.json | python3 -m json.tool
 ```
+
+## Homelab Update Agent
+
+Nightly maintenance runs at **1:00 AM ET** (05:00 UTC) via `update-check.timer`. The agent is a **deterministic Python orchestrator** (`~/scripts/update_runner.py`) — zero LLM in the loop.
+
+### Architecture
+
+```
+Phase 0: Setup (run dir, previous-summary delta detection)
+Phase 1: Apply safe updates (apt upgrade, Docker engine/plugins, cloudflared, k3s restarts, open-webui stable bump)
+Phase 2: Validate (docker ps, k3s pods, 5 localhost curls, tunnel reachability, LLM fallback check)
+Phase 7: Auto-rollback (conditional — reverts to captured pre-versions on pi-web/tunnel failure)
+Phase 3: Audit (apt upgradable, snap list, image ages, runtimes, reboot-required)
+Phase 4: open-webui tag check (no-op if already bumped in Phase 1)
+Phase 5: Heartbeat (failed systemd units, LLM stack health + fallback flag, backup recency, k3s node)
+Phase 6: Write HTML (pure Python string templating, no LLM)
+Phase 8: Send + Archive (SMTP via send_digest.py, 30-day pruning)
+Phase 9: Summary (.md for next-day delta detection)
+```
+
+### Security layer
+
+**unattended-upgrades** is installed, enabled, and runs daily — it handles `noble`, `noble-security`, and ESM pockets. This is the Ubuntu security layer. The update agent handles the non-security `noble-updates` pocket (not in unattended-upgrades allowlist) plus third-party packages (Docker, cloudflared, open-webui).
+
+### Auto-apply scope
+
+| Layer | Auto-apply? | Mechanism | Rollback? |
+|---|---|---|---|
+| Ubuntu noble-updates | ✅ yes | `apt upgrade` | n/a |
+| Docker engine + plugins | ✅ yes | `apt install --only-upgrade` | ✅ capture pre-ver, downgrade on pi-web/tunnel fail |
+| cloudflared | ✅ yes | `apt install --only-upgrade` + restart | ✅ capture pre-ver, downgrade on tunnel fail |
+| open-webui (stable tag) | ✅ yes | GitHub releases/latest → edit compose tag → up -d | ✅ revert compose tag |
+| k3s workload images | ✅ yes | rollout restart (existing) | n/a (self-healing) |
+| Ubuntu security | ✅ unattended-upgrades | automatic | — |
+| snap packages | ✅ snapd auto-refresh | every 6h | — |
+| Manual only | ❌ no | surfaced in email | — |
+
+### Safety rules
+
+- Never `snap refresh docker` (AppArmor risk — but snap refresh step is dropped entirely)
+- Never `sudo apt dist-upgrade` — only `upgrade` / `--only-upgrade`
+- Never `sudo aa-remove-unknown` — breaks Docker
+- Stop on first auto-apply failure — don't continue to next step
+- After Docker daemon restart, verify containers came back before proceeding
+- Rollback is status-code-driven, not LLM-judgment-driven: reversion fires on pi-web or tunnel unhealthy after auto-apply
+
+### Rollback
+
+If Phase 2 validation finds pi-web or the tunnel unhealthy AND Phase 1 auto-applied something:
+1. Revert each auto-applied apt package to its captured pre-version (`--allow-downgrades`)
+2. Revert open-webui compose tag edit
+3. Restart Docker + cloudflared
+4. Re-validate — if healthy, report "rolled back and healthy"; if still unhealthy, report "ROLLBACK FAILED" with container states + docker journal tail
+
+SMTP is Docker-independent (`send_digest.py` talks to the mail server directly), so the failure-red email still goes out even if Docker is down.
+
+### Manual run / debugging
+
+```bash
+# Dry run (skip mutations + email, still audit + archive)
+python3 ~/scripts/update_runner.py --dry-run
+
+# Resume from a failed run (skip phases with existing artifacts)
+python3 ~/scripts/update_runner.py --resume
+
+# Check timer status
+systemctl --user status update-check.timer
+
+# View the latest run's artifacts
+ls ~/digests/updates/$(date +%Y-%m-%d)/
 
 ## Remote Agent Operations
 
