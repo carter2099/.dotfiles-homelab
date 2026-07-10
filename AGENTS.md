@@ -235,6 +235,9 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - **Routing: direct-tunnel pattern** (like pi-web/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
 - **Auth: two layers.** CF Access (edge SSO, manually configured in Zero Trust) + Open WebUI's own login (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`).
 - Manage: `cd ~/open-webui && bash up.sh` (pull + restart); `docker compose -f ~/open-webui/docker-compose.yml logs -f`.
+- **Web search:** Enabled via `ENABLE_WEB_SEARCH=True`, `WEB_SEARCH_ENGINE=searxng`,
+  `SEARXNG_QUERY_URL=http://searxng:8080/search`. Reaches SearXNG container over a
+  shared Docker network (`open-webui_default`). No external API key needed.
 
 
 ### SearXNG (Self-hosted search backend)

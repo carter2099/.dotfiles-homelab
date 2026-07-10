@@ -6,6 +6,10 @@ services:
     # Loopback-only: reachable solely via the CF tunnel (cloudflared hits localhost), never the LAN.
     ports:
       - "127.0.0.1:48100:8080"
+    # Resolve host.docker.internal → host gateway so the container can reach
+    # loopback-bound services (e.g. SearXNG at 127.0.0.1:8080).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env            # OPENAI_API_KEY (the OpenCode Go key) + WEBUI_SECRET_KEY — gitignored
     environment:
@@ -15,6 +19,10 @@ services:
       - WEBUI_AUTH=True
       - ENABLE_SIGNUP=False     # no self-registration; admin already created over loopback
       - WEBUI_NAME=Homelab Chat
+      # Web search via local SearXNG (replaces default search engine)
+      - ENABLE_WEB_SEARCH=True
+      - WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search
     volumes:
       - open-webui:/app/backend/data
     logging:

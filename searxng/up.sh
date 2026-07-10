@@ -15,6 +15,10 @@ if [ ! -f core-config/settings.yml ]; then
   echo "Generated secret_key in core-config/settings.yml (gitignored)"
 fi
 
+echo "Pulling latest image..."
 docker compose pull
 docker compose up -d
+# Connect to the open-webui network so the chat UI container can reach SearXNG
+# by container name (http://searxng:8080). Ignore "already exists" errors.
+docker network connect open-webui_default searxng 2>/dev/null || true
 docker compose ps
