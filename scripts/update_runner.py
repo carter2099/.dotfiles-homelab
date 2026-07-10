@@ -39,7 +39,7 @@ AUTO_PKGS = [
 # Endpoints to validate
 ENDPOINTS = {
     "open-webui": "http://127.0.0.1:48100",
-    "blog": "http://127.0.0.1:3099",
+    "blog": "http://127.0.0.1:33099",
     "delta_neutral": "http://127.0.0.1:43080",
     "pi-web": "http://127.0.0.1:8504",
     "llm-proxy": "http://127.0.0.1:8081/health",
@@ -470,11 +470,21 @@ def phase_apply(run_dir, dry_run=False):
             write_json(artifact, data)
             return data
 
-    # 1c: docker daemon pause
-    steps.append(phase_apply_docker_pause())
+    # 1c: docker daemon pause (only if docker packages were actually upgraded)
+    docker_upgraded = any(
+        s["step"].startswith("auto_docker") and s["status"] == "ok"
+        for s in auto_results
+    )
+    if docker_upgraded:
+        steps.append(phase_apply_docker_pause())
 
-    # 1d: cloudflared restart
-    steps.append(phase_apply_cloudflared_restart())
+    # 1d: cloudflared restart (only if actually upgraded)
+    cloudflared_upgraded = any(
+        s["step"] == "auto_cloudflared" and s["status"] == "ok"
+        for s in auto_results
+    )
+    if cloudflared_upgraded:
+        steps.append(phase_apply_cloudflared_restart())
 
     # 1e: k3s rollouts
     k3s_results = phase_apply_k3s_rollouts()
@@ -1275,12 +1285,16 @@ def phase_rollback(run_dir, dry_run=False):
         print("[phase 7] skipped — pi-web and tunnel healthy")
         return
 
-    # Check if anything was actually auto-applied in Phase 1
-    auto_steps = [s for s in applied.get("steps", []) if s.get("step", "").startswith("auto_")]
-    owu_step = [s for s in applied.get("steps", []) if s.get("step") == "openwebui" and s.get("status") == "bumped"]
+    # Check if anything was actually auto-applied in Phase 1 (status=="ok", not "skipped")
+    auto_steps = [s for s in applied.get("steps", [])
+                  if s.get("step", "").startswith("auto_") and s.get("status") == "ok"]
+    owu_step = [s for s in applied.get("steps", [])
+                if s.get("step") == "openwebui" and s.get("status") == "bumped"]
 
     if not auto_steps and not owu_step:
-        print("[phase 7] skipped — no auto-applied packages to roll back")
+        print("[phase 7] skipped — no packages were actually upgraded (all were already current)")
+        artifact = run_dir / "07-rollback.json"
+        write_json(artifact, {"triggered": False, "reason": "no_mutations", "validation_failed": True})
         return
 
     print("[phase 7] ROLLBACK TRIGGERED — pi-web or tunnel unhealthy after auto-apply")
@@ -1342,19 +1356,19 @@ def phase_rollback(run_dir, dry_run=False):
                 rollback_ok = False
                 reverted.append(f"open-webui FAILED: {e}")
 
-    # Restart docker + pause
-    try:
-        run(["sudo", "systemctl", "restart", "docker"], capture_output=True, text=True)
-    except subprocess.CalledProcessError:
-        pass
-    time.sleep(30)
+    # Only restart docker + cloudflared if we actually reverted something
+    if reverted:
+        try:
+            run(["sudo", "systemctl", "restart", "docker"], capture_output=True, text=True)
+        except subprocess.CalledProcessError:
+            pass
+        time.sleep(30)
 
-    # Restart cloudflared
-    try:
-        run(["sudo", "systemctl", "restart", "cloudflared"], capture_output=True, text=True)
-    except subprocess.CalledProcessError:
-        pass
-    time.sleep(10)
+        try:
+            run(["sudo", "systemctl", "restart", "cloudflared"], capture_output=True, text=True)
+        except subprocess.CalledProcessError:
+            pass
+        time.sleep(10)
 
     # Re-validate
     re_validation = phase_validate(run_dir)
