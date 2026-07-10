@@ -1,0 +1,23 @@
+# SearXNG settings for homelab digest backend.
+# The REPLACE_AT_DEPLOY placeholder is swapped for a random secret by up.sh on first
+# deploy (see up.sh). JSON output enabled for the rpiv-web-tools API; limiter off so
+# no Valkey sidecar is needed. use_default_settings pulls all default engines.
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Homelab SearXNG"
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "REPLACE_AT_DEPLOY"
+  limiter: false
+  image_proxy: false
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
