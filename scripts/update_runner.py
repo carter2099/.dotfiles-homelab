@@ -45,7 +45,6 @@ ENDPOINTS = {
     "llm-proxy": "http://127.0.0.1:8081/health",
 }
 
-TUNNEL_URL = "https://opencode.carter2099.com"
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -553,19 +552,6 @@ def phase_validate(run_dir):
             }
         )
 
-    # Tunnel reachability
-    tunnel_code = run_capture(
-        ["curl", "-so", "/dev/null", "-w", "%{http_code}", TUNNEL_URL],
-    )
-    tunnel_healthy = tunnel_code.startswith("2") or tunnel_code.startswith("3")
-    checks.append(
-        {
-            "name": "tunnel_reachability",
-            "url": TUNNEL_URL,
-            "http_code": tunnel_code,
-            "status": "ok" if tunnel_healthy else "fail",
-        }
-    )
 
     # LLM proxy X-Fallback header
     fallback = run_capture(
@@ -991,16 +977,6 @@ def _html_validation(validation_data):
                 f'{icon} {svc} ({c.get("url","")}) — <strong>{code}</strong>'
                 f"</p>"
             )
-        elif name == "tunnel_reachability":
-            code = c.get("http_code", "?")
-            status = c.get("status", "")
-            icon = "✅" if status == "ok" else "🔴"
-            color = "#2e7d32" if status == "ok" else "#c62828"
-            lines.append(
-                f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
-                f'{icon} tunnel reachability ({TUNNEL_URL}) — <strong>{code}</strong>'
-                f"</p>"
-            )
         elif name == "docker_containers":
             lines.append(
                 f'<p style="margin:0 0 4px; color:#555; font-size:13px;">'
@@ -1179,7 +1155,7 @@ def _html_rollback(rollback_data):
         )
         lines.append(
             '<tr><td style="padding:8px 32px;">'
-            f'<p style="margin:0 0 8px; color:#e65100; font-size:13px;">Auto-applied updates caused a validation failure (pi-web or tunnel unhealthy). '
+            f'<p style="margin:0 0 8px; color:#e65100; font-size:13px;">Auto-applied updates caused a validation failure (pi-web unhealthy). '
             f"Reverted to pre-update versions and re-validated — services are now healthy.</p>"
         )
     else:
@@ -1258,7 +1234,7 @@ def phase_render(run_dir, setup_data):
 
 
 def phase_rollback(run_dir, dry_run=False):
-    """Phase 7: auto-rollback if pi-web or tunnel is unhealthy after Phase 1 auto-apply."""
+    """Phase 7: auto-rollback if pi-web is unhealthy after Phase 1 auto-apply."""
     if dry_run:
         print("[phase 7] DRY RUN — skipping rollback")
         artifact = run_dir / "07-rollback.json"
@@ -1272,17 +1248,14 @@ def phase_rollback(run_dir, dry_run=False):
         print("[phase 7] skipped — no validation or applied data")
         return
 
-    # Check if pi-web or tunnel is unhealthy
+    # Check if pi-web is unhealthy
     pi_web_ok = True
-    tunnel_ok = True
     for c in validation.get("checks", []):
         if c.get("name") == "endpoint_pi-web" and c.get("status") != "ok":
             pi_web_ok = False
-        if c.get("name") == "tunnel_reachability" and c.get("status") != "ok":
-            tunnel_ok = False
 
-    if pi_web_ok and tunnel_ok:
-        print("[phase 7] skipped — pi-web and tunnel healthy")
+    if pi_web_ok:
+        print("[phase 7] skipped — pi-web healthy")
         return
 
     # Check if anything was actually auto-applied in Phase 1 (status=="ok", not "skipped")
@@ -1297,7 +1270,7 @@ def phase_rollback(run_dir, dry_run=False):
         write_json(artifact, {"triggered": False, "reason": "no_mutations", "validation_failed": True})
         return
 
-    print("[phase 7] ROLLBACK TRIGGERED — pi-web or tunnel unhealthy after auto-apply")
+    print("[phase 7] ROLLBACK TRIGGERED — pi-web unhealthy after auto-apply")
 
     reverted = []
     rollback_ok = True
@@ -1378,14 +1351,11 @@ def phase_rollback(run_dir, dry_run=False):
 
     # Check if healthy now
     pi_web_now = True
-    tunnel_now = True
     for c in re_validation.get("checks", []):
         if c.get("name") == "endpoint_pi-web" and c.get("status") != "ok":
             pi_web_now = False
-        if c.get("name") == "tunnel_reachability" and c.get("status") != "ok":
-            tunnel_now = False
 
-    if pi_web_now and tunnel_now:
+    if pi_web_now:
         status = "healthy"
     else:
         status = "failed"
@@ -1394,11 +1364,11 @@ def phase_rollback(run_dir, dry_run=False):
         "triggered": True,
         "status": status,
         "reverted": reverted,
-        "re_validation_healthy": pi_web_now and tunnel_now,
+        "re_validation_healthy": pi_web_now,
     }
 
     # If still unhealthy, gather diagnostic context
-    if not (pi_web_now and tunnel_now):
+    if not pi_web_now:
         diag = {}
         diag["containers"] = run_capture(
             ["docker", "ps", "-a", "--format", "{{.Names}} {{.Status}} {{.Image}}"]
