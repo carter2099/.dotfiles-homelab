@@ -281,6 +281,8 @@ Phase 9: Summary (direct API)                  →  write .md for future dedup
 
 Each phase output is saved to `~/digests/<topic>/YYYY-MM-DD/` for auditability and idempotent resume (if a phase output exists, it's skipped on re-run). Phases that need tools (web_search, web_fetch) use `pi -p`; phases that only transform structured data use direct llm-proxy API calls. All phases use the reasoning model (`qwen-3.6-35b-q6`). Calls are sequential because llama.cpp is single-request.
 
+Digest `pi -p` calls use `--session-dir ~/.pi/agent/sessions-automated` so automated sessions don't pollute `/resume` in interactive Pi sessions. The hyperliquid SDK runner and dependabot webhook do the same. A migration script (`~/scripts/migrate-pi-sessions.py`) handles one-time cleanup of old automated sessions.
+
 ### Stories-in-flight (cross-day story tracking)
 
 A `stories-in-flight.json` file in each digest directory tracks evolving stories across days. The Phase 6 curation agent reads it, updates stories with new developments (resetting the `last_updated` clock), and adds new evolving stories. Two Python-side rules handle pruning deterministically:
