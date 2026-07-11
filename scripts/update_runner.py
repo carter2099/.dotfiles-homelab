@@ -269,6 +269,30 @@ def phase_apply_docker_pause():
     return {"step": "docker_pause", "status": "ok"}
 
 
+def phase_assert_docker_daemon():
+    """After a docker-* upgrade, assert the sole daemon is the apt one
+    (data root /var/lib/docker). Guards against a second daemon (e.g. a snap)
+    creeping back in and stealing /var/run/docker.sock — the exact incident
+    that motivated the apt-only standardization (2026-07-10)."""
+    print("  [1c2] assert docker daemon root == /var/lib/docker")
+    try:
+        root = run(
+            ["docker", "info", "--format", "{{.DockerRootDir}}"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as e:
+        return {"step": "docker_daemon_assert", "status": "failed",
+                "error": f"docker info failed: {e}"}
+    except subprocess.TimeoutExpired:
+        return {"step": "docker_daemon_assert", "status": "failed",
+                "error": "docker info timed out"}
+    if root != "/var/lib/docker":
+        return {"step": "docker_daemon_assert", "status": "failed",
+                "error": f"unexpected DockerRootDir: {root!r} "
+                          f"(expected '/var/lib/docker' — a second daemon may be installed)"}
+    return {"step": "docker_daemon_assert", "status": "ok", "root": root}
+
+
 def phase_apply_cloudflared_restart():
     """Restart cloudflared after upgrade."""
     print("  [1d] restart cloudflared")
@@ -476,6 +500,7 @@ def phase_apply(run_dir, dry_run=False):
     )
     if docker_upgraded:
         steps.append(phase_apply_docker_pause())
+        steps.append(phase_assert_docker_daemon())
 
     # 1d: cloudflared restart (only if actually upgraded)
     cloudflared_upgraded = any(
