@@ -415,6 +415,17 @@ Quick reference (verified 2026-07-11):
 - **Logs/restart/deploy:** `journalctl --user -u llm-proxy -f` · `systemctl --user restart llm-proxy` · `cd ~/dev/llm-proxy && bash release.sh`
 - **Cloud fallback:** requests that can't reach the rig proxy to OpenCode Go (`deepseek-v4-flash`); `X-Fallback: true` response header signals it. Proxy waits up to `STARTUP_GRACE` (45s) for WoL wake before falling back.
 
+### OpenCode Go Proxy (opencode-go-proxy)
+
+**pi's `opencode-go/*` models route through this, not directly to opencode.ai.** If opencode-go models fail, check this service first.
+
+- **What:** An always-on local reverse proxy on `127.0.0.1:8082` that owns **two** OpenCode Go subscriptions and routes each request to the account with more headroom (proactive 60s cookie scrape of `/go`+`/billing` + reactive `cost`-field demote on each 200). Sticky+hysteresis(8pt) among `go_free`, round-robin on PAYG ($25 cap each), 401 self-healing cooldown, cookie-stale email alert. Path-transparent to `https://opencode.ai/zen/go`; injects the real per-account key (clients send a placeholder).
+- **Pi config:** `~/.pi/agent/models.json` → `providers.opencode-go.baseUrl = http://localhost:8082/v1`; `~/.pi/agent/auth.json` → `opencode-go.key = "proxy"` (placeholder; proxy owns both real keys). Built-in opencode-go models are overridden, not redefined. **rollback = revert those two fields.**
+- **Service:** `opencode-go-proxy.service` (systemd user, enabled) · binary `~/.local/bin/opencode-go-proxy` · source `~/dev/opencode-go-proxy/` (repo `carter2099/opencode-go-proxy`) · config `~/.config/opencode-go-proxy/config.json` (600, gitignored — contains real API keys + auth cookies).
+- **Health:** `curl http://localhost:8082/health` → JSON with per-account tier, rolling/weekly/monthly usage, PAYG balance, last_cost, cookie_fresh.
+- **Logs/restart/deploy:** `journalctl --user -u opencode-go-proxy -f` · `systemctl --user restart opencode-go-proxy` · `cd ~/dev/opencode-go-proxy && bash release.sh` (build → install binary+unit → start). Tests: `cd ~/dev/opencode-go-proxy && go test ./...` (no network).
+- **Cookie expiry:** scrape sets `cookie_fresh:false` + `last_error`; one alert email per fresh→stale transition (re-alert ≤24h). Fix: re-grab that account's `auth` cookie on opencode.ai, update `auth_cookie` in `config.json`, restart. Cookies are **separate from** API keys — they authenticate the *dashboard scrape*, not the API calls.
+
 ## Environment
 
 - **Shell:** zsh with vim keybindings
