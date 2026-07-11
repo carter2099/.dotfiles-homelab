@@ -9,9 +9,9 @@ Save the user's idea verbatim as a markdown file in `~/ideas/`. Do not research,
 
 ## Steps
 
-1. **Title.** If the user didn't state one, ask for a short title. If they said one, use it. The title becomes the filename slug.
+1. **Title.** Pick a short descriptive title from the idea itself. The title becomes the filename slug.
 
-2. **Write.** Write the file at `~/ideas/<slug>.md`:
+2. **Write and stop.** Write the file at `~/ideas/<slug>.md` and tell the user the path. Then stop — do not do anything else.
 
    ```markdown
    # <Title>
@@ -21,11 +21,9 @@ Save the user's idea verbatim as a markdown file in `~/ideas/`. Do not research,
    <The idea exactly as the user stated it — no elaboration.>
    ```
 
-3. **Confirm.** Tell the user the path. That's it.
-
 ## Hard rules
 
-- **No elaboration.** Do not expand, research, restructure, or "help" the idea along. Record only what the user said.
-- **No sections.** Just date + status + the idea text. No "What it does", "Notes", or any other sections.
-- **No connections.** Don't link it to other projects, even if a connection seems obvious.
+- **Fire and forget.** Write the file and stop. Do not follow up, offer next steps, ask questions, or continue the conversation about the idea. One and done.
+- **No work.** Do not research, expand, analyze, brainstorm, compare, restructure, evaluate feasibility, suggest related projects, or do anything beyond recording what the user said.
+- **No sections.** Just date + status + the idea text. No subheadings, no "What it does", no "Notes".
 - **Status is always "idea"** — the user can change it later if they start building.
