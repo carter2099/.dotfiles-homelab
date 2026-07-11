@@ -1,0 +1,9 @@
+[Unit]
+Description=Email failure notification for homelab-backup
+After=homelab-backup.service
+# Triggered by homelab-backup.service OnFailure=
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/carter/homelab-backup
+ExecStart=/home/carter/homelab-backup/notify-failure.sh

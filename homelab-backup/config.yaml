@@ -65,8 +65,62 @@ targets:
     type: directory
     source: /home/carter/homelab-backup
     excludes:
-      - homelab-backup
+      - homelab-backup            # the 11MB binary
+      - homelab-backup.baseline   # any rollback copy
 
   - name: k3s-manifests
     type: directory
     source: /home/carter/k3s
+
+  # ---- Secrets (unencrypted in R2; Carter accepts bucket-access = bigger problem) ----
+  # These are gitignored everywhere else; R2 is the DR copy.
+  - name: secrets-blog-master
+    type: directory
+    source: /home/carter/blog/blog/config
+    excludes:
+      - "*.log"
+
+  - name: secrets-delta-master
+    type: directory
+    source: /home/carter/delta_neutral/delta_neutral/config
+    excludes:
+      - "*.log"
+
+  - name: secrets-open-webui-env
+    type: directory
+    source: /home/carter/open-webui
+    excludes:
+      - "*.log"
+
+  - name: secrets-cloudflare
+    type: directory
+    source: /home/carter/.config/cloudflare
+
+  - name: secrets-dependabot
+    type: directory
+    source: /home/carter/.config/dependabot-webhook
+
+  - name: secrets-llm-proxy
+    type: directory
+    source: /home/carter/.config/llm-proxy
+
+  - name: secrets-pi-web
+    type: directory
+    source: /home/carter/.config/pi-web
+
+  - name: secrets-searxng
+    type: directory
+    source: /home/carter/searxng/core-config
+
+  # ---- Host system config + package manifest (populated by pre-collect.sh ExecStartPre) ----
+  - name: host-etc
+    type: directory
+    source: /home/carter/homelab-backup-staging/host-etc
+
+  - name: pkg-manifest
+    type: directory
+    source: /home/carter/homelab-backup-staging/pkg-manifest
+
+  - name: secrets-smtp-and-staged
+    type: directory
+    source: /home/carter/homelab-backup-staging/secrets

@@ -1,0 +1,10 @@
+[Unit]
+Description=Monthly homelab backup restore drill (download + verify newest R2 backup)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/carter/homelab-backup
+EnvironmentFile=/home/carter/homelab-backup/.env
+ExecStart=/home/carter/homelab-backup/restore-drill.sh
