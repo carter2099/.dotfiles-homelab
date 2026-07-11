@@ -19,8 +19,6 @@ services:
       - WEBUI_AUTH=True
       - ENABLE_SIGNUP=False     # no self-registration; admin already created over loopback
       - WEBUI_NAME=Homelab Chat
-      # Disable built-in Ollama — no Ollama server on this host; blocks page load for ~10s on timeout
-      - ENABLE_OLLAMA_API=false
     volumes:
       - open-webui:/app/backend/data
     networks:
