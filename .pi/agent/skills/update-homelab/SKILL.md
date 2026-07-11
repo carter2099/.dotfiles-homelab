@@ -89,6 +89,7 @@ curl -so /dev/null -w '%{http_code}' http://127.0.0.1:48100 && echo " open-webui
 curl -so /dev/null -w '%{http_code}' http://127.0.0.1:3099 && echo " blog"
 curl -so /dev/null -w '%{http_code}' http://127.0.0.1:43080 && echo " delta_neutral"
 curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8504 && echo " pi-web"
+curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8082/health && echo " opencode-go-proxy"
 
 # Disk
 df -h /

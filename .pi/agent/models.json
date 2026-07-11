@@ -173,7 +173,8 @@
           "contextWindow": 262144,
           "maxTokens": 65536
         }
-      ]
+      ],
+      "baseUrl": "http://localhost:8082/v1"
     }
   }
 }

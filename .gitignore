@@ -8,3 +8,4 @@ k3s/middleware/auth/
 .config/dependabot-webhook/
 !.config/dependabot-webhook/pi-sandbox.ts
 .config/opencode-homelab/
+.config/opencode-go-proxy/
