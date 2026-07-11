@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -62,3 +63,45 @@ func cmdLatest(cfg *Config, destDir string) error {
 	fmt.Println(dest)
 	return nil
 }
+
+// cmdList prints every backup object in the bucket (key + parsed date + size),
+// newest-first. Used by the backup-health skill to report R2 contents without
+// needing the aws CLI (which is not installed on this host) or rclone.
+func cmdList(cfg *Config) error {
+	client, err := newS3Client(cfg)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+
+	type entry struct {
+		key  string
+		date time.Time
+		size int64
+	}
+	var all []entry
+	for object := range client.ListObjects(ctx, cfg.S3.Bucket, minio.ListObjectsOptions{Prefix: "homelab-backup-"}) {
+		if object.Err != nil {
+			return object.Err
+		}
+		d, ok := parseBackupDate(object.Key)
+		if !ok {
+			continue
+		}
+		all = append(all, entry{key: object.Key, date: d, size: object.Size})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].date.After(all[j].date) })
+	fmt.Printf("%-44s %-20s %s\n", "KEY", "DATE (UTC)", "SIZE")
+	if len(all) == 0 {
+		fmt.Println("(no backups in bucket)")
+		return nil
+	}
+	for _, e := range all {
+		fmt.Printf("%-44s %s %s\n", e.key, e.date.Format("2006-01-02 15:04:05"), formatSize(e.size))
+	}
+	slog.Info("listed", "count", len(all))
+	return nil
+}
+
+// formatSize lives in backup.go but is referenced here; the compiler links it.
+var _ = strings.TrimSpace

@@ -198,8 +198,11 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ### Homelab Backup (Go)
 - Go service at `~/homelab-backup/`; daily 03:00 UTC via systemd user timer `homelab-backup.{service,.timer}`. Dest: Cloudflare R2 bucket `homelab-backup`; local archives in `~/backups/`.
-- Targets + retention are configured in `~/homelab-backup/config.yaml`; R2 creds via `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`.
-- Use the `backup-health` skill for last-run status, next run, and R2 listing.
+- 22 targets in `~/homelab-backup/config.yaml`: app content + DBs, FreshRSS, Open WebUI (db only), k3s/backup config, **secrets** (rails master.keys, open-webui/.env, cloudflare/dependabot/llm-proxy/pi-web/searxng envs, smtp config — **unencrypted in R2 by design**), host `/etc` (netplan/k3s/ufw via `ExecStartPre=pre-collect.sh` + sudo), and a package manifest. R2 creds via `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` (`~/homelab-backup/.env`, not in the bucket).
+- `OnFailure=homelab-backup-notify.service` **emails Carter the journal tail on failure** (failure-only; SMTP via `~/scripts/send_digest.py`).
+- Subcommands: `run [--local-only]`, `list` (R2 objects — no aws CLI on host), `verify <archive>` (integrity_check every DB), `latest <dest>` (newest R2 download). Restore playbook: `~/homelab-backup/RESTORE.md`.
+- **Monthly restore drill:** `homelab-backup-restore-drill.timer` (1st, 12:00 UTC) downloads the newest R2 backup, runs `verify`, emails PASS/FAIL.
+- Use the `backup-health` skill for last-run status, next run, and R2 listing. **Full architecture (target taxonomy, pre-collection, retention, subcommands, drill, debug) lives in [`~/notes/homelab/homelab-backup.md`](notes/homelab/homelab-backup.md).**
 
 ### Dependabot Webhook (Go)
 - Always-on systemd user service (`dependabot-webhook.service`) listening on `localhost:9099`
@@ -430,5 +433,6 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`local-llm-gaming-rig.md`](notes/homelab/local-llm-gaming-rig.md) — llm-proxy / llama-swap topology, models, env vars, troubleshooting
 - [`email-digests.md`](notes/homelab/email-digests.md) — 9-phase digest workflow, stories-in-flight, audit/debug
 - [`homelab-update-agent.md`](notes/homelab/homelab-update-agent.md) — update-runner phases, auto-apply scope, rollback, debugging
+- [`homelab-backup.md`](notes/homelab/homelab-backup.md) — 22-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 
 Grep the vault (`rg -l "term" ~/notes/`) before starting work on a known topic; the `~/notes/INDEX.md` lists all formal notes.

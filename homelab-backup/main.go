@@ -15,7 +15,7 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: homelab-backup <run|daemon|verify <archive>|latest <dest>> [--config path] [--local-only]\n")
+		fmt.Fprintf(os.Stderr, "Usage: homelab-backup <run|daemon|list|verify <archive>|latest <dest>> [--config path] [--local-only]\n")
 		os.Exit(1)
 	}
 
@@ -68,6 +68,11 @@ func main() {
 		slog.Info("backup completed successfully")
 	case "daemon":
 		runDaemon(cfg, localOnly)
+	case "list":
+		if err := cmdList(cfg); err != nil {
+			slog.Error("list failed", "error", err)
+			os.Exit(1)
+		}
 	case "verify":
 		if len(os.Args) < 3 {
 			fmt.Fprintf(os.Stderr, "Usage: homelab-backup verify <archive.tar.gz>\n")
