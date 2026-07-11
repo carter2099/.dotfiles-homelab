@@ -254,8 +254,11 @@ All four run sequentially via a single systemd timer to avoid conflicts with gam
 | `update-check` | 05:00 | 1:00 AM |
 | `digests-daily` | 08:00 | 4:00 AM |
 | `hyperliquid-sdk` | 08:00 Mon/Thu | 4:00 AM Mon/Thu |
+| `agents-md-audit` | 08:00 Sat | 4:00 AM Sat |
 
 `digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` per topic in order: **ai-tech → agentic-platform → gaming → world**. Total runtime ~2.5–3 hours, done by ~7 AM ET. The old per-topic timers and `run_<topic>_digest.sh` scripts are **disabled/unused**.
+
+**`agents-md-audit`** (weekly, `agents-md-audit.timer`) truth-checks this very file against the live host and emails Carter a PASS/DRIFT/UNVERIFIABLE report with proposed edits — report-only, never modifies files or touches git. Runs on the cloud `opencode-go/deepseek-v4-pro` model so it does not contend with the local-LLM digests. Script: `~/scripts/run_agents_md_audit.sh`. Apply proposed fixes by asking an interactive agent (or just say "apply the latest agents-md-audit").
 
 ### Topics
 
