@@ -110,10 +110,11 @@ dotfiles add -A .pi/                                # OK when scoped to a direct
 ```
 
 ## App Deployment Pattern
-
 All apps follow the same deploy flow:
 1. `release.sh` - pulls latest code, tears down containers, removes old images, calls `up.sh`
 2. `up.sh` - starts Docker Compose in detached mode with production config
+
+**Docker daemon:** apt-installed and sole (`docker.service` + `docker.socket`, data root `/var/lib/docker`, boot-enabled). `systemctl status/restart docker`, `journalctl -u docker`, `docker ps`, and `/var/run/docker.sock` all mean the obvious thing — no snap indirection. (The former snap docker was removed 2026-07-10; see `~/plans/docker-daemon-split-RUNBOOK.md` for the migration history.) `RAILS_MASTER_KEY` note: `sudo` strips env vars, so pass it through with `sudo env RAILS_MASTER_KEY=$(cat config/master.key) docker compose ...` or use the repo's `up.sh`/`release.sh` which set it inline.
 
 Rails apps (blog, hub) pass `RAILS_MASTER_KEY` from `config/master.key` at startup.
 
@@ -153,7 +154,7 @@ Documented for visibility: `blog-web` and other containers on this 16GB host occ
 
 ### Never run aa-remove-unknown
 
-Never run `sudo aa-remove-unknown` on this host. Snap-installed Docker depends on AppArmor profiles (e.g. `snap.docker.dockerd`) that `aa-remove-unknown` classifies as "unknown" and deletes. This causes Docker to crashloop with "missing profile snap.docker.dockerd" and all containers go down. Recovery requires `sudo systemctl restart snapd.apparmor` to reload the profiles, then restarting Docker. If Docker containers can't be stopped/killed due to AppArmor "permission denied" errors, fix by restarting `snapd.apparmor` and then Docker (`sudo systemctl restart snapd.apparmor && sudo snap start docker.dockerd`) — not by clearing AppArmor profiles.
+Never run `sudo aa-remove-unknown` on this host. It can delete AppArmor profiles that containerd/Docker or other services depend on, causing crashloops. (Historically this braked snap Docker via the `snap.docker.dockerd` profile; that snap is now gone, but the caution stands — clearing "unknown" profiles is never safe here.) If Docker containers can't be stopped/killed due to AppArmor "permission denied" errors, fix by reloading AppArmor and restarting the relevant services, not by clearing profiles.
 
 ## Kubernetes (k3s)
 
@@ -171,6 +172,8 @@ k delete pod <name>  # k3s auto-recreates
 Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.).
 
 **k3s server config:** `/etc/rancher/k3s/config.yaml` (tracked copy: `~/k3s/config.yaml`). **Critical:** `flannel-iface` must match the active network interface. WiFi (`wlp6s0`) is disabled — flannel must use `enp3s0f0`. If k3s crashloops with `"flannel exited: failed to find the interface wlp6s0: No IPv4 address found"`, this config regressed. The node IP is `192.168.4.92` (static secondary on the wired interface).
+
+**Pod ↔ host networking requires ufw rules.** Pods reach the API server / kube-dns by DNATing to the host's own addresses, which lands in the host `INPUT` chain. `ufw` defaults to **deny incoming**; without explicit allow-rules for the CNI interfaces, pod→host traffic is dropped (Traefik can't reach the API → loads no Ingresses → 404 on every k3s-routed hostname; metrics-server/coredns/local-path-provisioner CrashLoop). Persistent rules are in `/etc/ufw/user.rules` (`ufw allow in on cni0` + `ufw allow in on flannel.1`). **If pods suddenly can't reach ClusterIPs after a reboot/docker restart/ufw reload, check these first** — a `docker compose down/up` or ufw reset can silently drop the `INPUT` accept and recreate this failure.
 
 ## App Details
 
@@ -208,7 +211,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 ### Homelab Backup (Go)
 - Runs daily at 03:00 UTC via systemd user timer (`homelab-backup.service`/`.timer`)
 - Backs up to Cloudflare R2 bucket (`homelab-backup`) with 14-day daily + 1 monthly + 1 yearly retention
-- Targets: blog posts, reviews, images, blog SQLite DB, FreshRSS SQLite DB + config
+- Targets: blog posts, reviews, images, blog SQLite DB, FreshRSS SQLite DB + config, Open WebUI `webui.db` (`/var/lib/docker/volumes/open-webui_open-webui/_data/webui.db`)
 - Local archives written to `~/backups/`; R2 credentials via env vars `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`
 - Use the `backup-health` skill to check last run status, next scheduled run, and R2 bucket contents
 
@@ -229,15 +232,13 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ### Open WebUI (Homelab Chat)
 - ChatGPT/Claude-style self-hosted chat UI at `https://chat.carter2099.com`. Not an agent — a general chat front-end.
-- Docker Compose in `~/open-webui/` (`ghcr.io/open-webui/open-webui:main`), bound **`127.0.0.1:48100`** (loopback-only).
+- Docker Compose in `~/open-webui/` (pinned tag, currently `ghcr.io/open-webui/open-webui:v0.10.2` — the nightly update runner bumps it), bound **`127.0.0.1:48100`** (loopback-only).
 - **Backend = the OpenCode Go endpoint** (`OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1`) so chat usage rides the **flat-sub session-cap billing**, NOT `zen/v1` pay-as-you-go. The 18 Go models populate automatically; a few (e.g. `qwen3.7-max`) 401 as "not supported for format oa-compat" and are opencode-native-only — just pick another. (See the Zen-vs-Go endpoint note: same account key, the base URL picks product/billing.)
 - Secrets (`OPENAI_API_KEY` = the Go key, `WEBUI_SECRET_KEY`) in gitignored `~/open-webui/.env` (600). Compose + `up.sh` are tracked; `.env` is not.
 - **Routing: direct-tunnel pattern** (like pi-web/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
 - **Auth: two layers.** CF Access (edge SSO, manually configured in Zero Trust) + Open WebUI's own login (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`).
 - Manage: `cd ~/open-webui && bash up.sh` (pull + restart); `docker compose -f ~/open-webui/docker-compose.yml logs -f`.
-- **Web search:** Enabled via `ENABLE_WEB_SEARCH=True`, `WEB_SEARCH_ENGINE=searxng`,
-  `SEARXNG_QUERY_URL=http://searxng:8080/search`. Reaches SearXNG container over a
-  shared Docker network (`open-webui_default`). No external API key needed.
+- **Web search:** Configured in-app via Admin Settings → Web Search: engine `searxng`, query URL `http://searxng:8080/search` (these live in the webui.db config table, not env). Reaches the SearXNG container over a **shared external Docker network `homelab-chat-search`** declared in both `~/open-webui/docker-compose.yml` and `~/searxng/docker-compose.yml` so the `searxng` hostname resolves. No external API key needed. (Previous env-var approach + `open-webui_default`-only network no longer apply.)
 
 
 ### SearXNG (Self-hosted search backend)
@@ -247,6 +248,8 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
   Google/Bing/DDG/etc.; JSON API at `GET /search?q=…&format=json`.
 - **Docker Compose:** `~/searxng/` (`searxng/searxng:latest`). Single container, no
   Valkey (limiter disabled). `restart: unless-stopped` survives reboots.
+  Attached to the `homelab-chat-search` external network so Open WebUI can resolve
+  the `searxng` hostname (see Open WebUI section).
 - **Config source-of-truth:** `~/searxng/settings.yml` (tracked). Runtime copy with the
   real `secret_key` lives in gitignored `~/searxng/core-config/` (generated by `up.sh`).
 - **Manage:** `cd ~/searxng && bash up.sh` (pull + restart). Logs:
@@ -390,9 +393,10 @@ Phase 9: Summary (.md for next-day delta detection)
 
 ### Safety rules
 
-- Never `snap refresh docker` (AppArmor risk — but snap refresh step is dropped entirely)
 - Never `sudo apt dist-upgrade` — only `upgrade` / `--only-upgrade`
-- Never `sudo aa-remove-unknown` — breaks Docker
+- Never `sudo aa-remove-unknown` — can delete load-bearing AppArmor profiles
+- Docker engine lives in the apt repo; `apt install --only-upgrade docker-*` is the auto-apply path (its postinst restarts `docker.service`, the sole daemon — no `snap refresh docker` anymore, snap docker is gone).
+- After a `docker-*` upgrade, assert the daemon is the expected one before declaring success: `docker info --format '{{.DockerRootDir}}'` must equal `/var/lib/docker` (guards against a second daemon creeping back in).
 - Stop on first auto-apply failure — don't continue to next step
 - After Docker daemon restart, verify containers came back before proceeding
 - Rollback is status-code-driven, not LLM-judgment-driven: reversion fires on pi-web or tunnel unhealthy after auto-apply
@@ -424,12 +428,12 @@ ls ~/digests/updates/$(date +%Y-%m-%d)/
 
 ## Remote Agent Operations
 
-This homelab runs an **always-on pi-web agent** accessible from any browser at `https://opencode.carter2099.com`. It runs `pi-web` (installed via `npm install -g @jmfederico/pi-web`) as two systemd user services with `loginctl enable-linger` so they survive reboots. It is **intentionally full-privilege** (no command denylist, no `NoNewPrivileges`); the trust anchor is **Cloudflare Access**.
+This homelab runs an **always-on pi-web agent** accessible from any browser at `https://pi.carter2099.com`. It runs `pi-web` (installed via `npm install -g @jmfederico/pi-web`) as two systemd user services with `loginctl enable-linger` so they survive reboots. It is **intentionally full-privilege** (no command denylist, no `NoNewPrivileges`); the trust anchor is **Cloudflare Access**.
 
 - **Services:** `pi-web-sessiond.service` (session daemon) + `pi-web.service` (web/API at `127.0.0.1:8504`). **Loopback-only bind on purpose** — the sole ingress is the CF tunnel; it is NOT reachable on the LAN (so there's no path that bypasses Cloudflare Access).
-- **Access URL:** `https://opencode.carter2099.com` (browser → CF Access SSO → pi-web UI). The old `pi.carter2099.com` hostname also routes to the same service.
+- **Access URL:** `https://pi.carter2099.com` (browser → CF Access SSO → pi-web UI). The old `opencode.carter2099.com` hostname also routes to the same service.
 - **Auth:** Cloudflare Access (identity gate at the CF edge) — unauthenticated requests get a 302 to `carter2099.cloudflareaccess.com` and never reach the host. Policy is managed in the CF Zero Trust dashboard. No secondary password layer (unlike opencode-web which had `OPENCODE_SERVER_PASSWORD`).
-- **Routing:** direct-tunnel pattern — tunnel ingress `opencode.carter2099.com → http://localhost:8504` (cloudflared runs on the host and reaches loopback). No k3s manifest, no ExternalService/Endpoints, no Traefik hop. DNS: proxied CNAME `opencode` → `<tunnel-id>.cfargotunnel.com`.
+- **Routing:** direct-tunnel pattern — tunnel ingress `pi.carter2099.com → http://localhost:8504` (cloudflared runs on the host and reaches loopback). No k3s manifest, no ExternalService/Endpoints, no Traefik hop. DNS: proxied CNAME `pi` → `<tunnel-id>.cfargotunnel.com`.
 - **Config:** `~/.config/pi-web/config.json` (host, port, allowedHosts).
 - **Logs:** `journalctl --user -u pi-web -f` or `pi-web logs`
 - **Restart:** `systemctl --user restart pi-web pi-web-sessiond` or `pi-web restart`

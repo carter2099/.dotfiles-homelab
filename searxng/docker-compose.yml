@@ -10,6 +10,9 @@ services:
     volumes:
       - ./core-config/:/etc/searxng/:Z
       - core-data:/var/cache/searxng/
+    networks:
+      - default
+      - chat-search          # shared with open-webui so 'searxng' hostname resolves in-app
     logging:
       driver: json-file
       options:
@@ -18,3 +21,8 @@ services:
 
 volumes:
   core-data:
+
+networks:
+  chat-search:
+    external: true
+    name: homelab-chat-search

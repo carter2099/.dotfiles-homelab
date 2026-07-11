@@ -21,6 +21,9 @@ services:
       - WEBUI_NAME=Homelab Chat
     volumes:
       - open-webui:/app/backend/data
+    networks:
+      - default
+      - chat-search          # shared with searxng so 'searxng' hostname resolves in-app
     logging:
       driver: json-file
       options:
@@ -29,3 +32,8 @@ services:
 
 volumes:
   open-webui:
+
+networks:
+  chat-search:
+    external: true
+    name: homelab-chat-search

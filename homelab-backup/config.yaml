@@ -55,6 +55,12 @@ targets:
     container: delta_neutral-web-1
     db_path: /rails/storage/production.sqlite3
 
+  # Open WebUI chat DB + admin account (apt docker volume; sudo sqlite3 .backup)
+  - name: open-webui-db
+    type: sqlite-host
+    source: /var/lib/docker/volumes/open-webui_open-webui/_data/webui.db
+    sudo: true
+
   - name: homelab-backup-config
     type: directory
     source: /home/carter/homelab-backup
