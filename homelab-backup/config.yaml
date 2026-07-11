@@ -104,6 +104,10 @@ targets:
     type: directory
     source: /home/carter/.config/llm-proxy
 
+  - name: secrets-opencode-go-proxy
+    type: directory
+    source: /home/carter/.config/opencode-go-proxy
+
   - name: secrets-pi-web
     type: directory
     source: /home/carter/.config/pi-web
