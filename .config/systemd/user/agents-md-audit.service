@@ -1,0 +1,7 @@
+[Unit]
+Description=Weekly AGENTS.md truth-check against the live host (report-only, email)
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/run_agents_md_audit.sh
+TimeoutStartSec=1800
