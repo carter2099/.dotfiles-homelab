@@ -164,7 +164,7 @@ k delete pod <name>  # k3s auto-recreates
 
 **Architecture pattern:** Two deployment models coexist:
 - **Self-developed webapps** (blog, hub, tbitt, stickies, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92, tbitt/stickies at 192.168.4.102). Note: hub and stickies are not currently live; tbitt is deprecated.
-- **Third-party services** (grafana, prometheus, node-exporter, freshrss, uptime-kuma, traefik) run natively as k3s Deployments/DaemonSets.
+- **Third-party services** (freshrss, uptime-kuma, traefik) run natively as k3s Deployments/DaemonSets. Manifests for grafana, prometheus, and node-exporter exist in `k3s/` but are **not currently deployed** (no pods/deployments) — ignore unless re-deploying.
 
 Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.). Live state: `k get nodes` / `k3s --version`.
 
@@ -212,7 +212,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Release: `cd ~/dev/dependabot-webhook && bash release.sh`
 
 ### Hyperliquid SDK Maintenance (systemd timer)
-- Runs Mon/Thu at 08:00 UTC (4:00 AM ET) via systemd user timer (`hyperliquid-sdk.service`/`.timer`)
+- Runs Mon/Thu at 4:00 AM ET via systemd user timer (`hyperliquid-sdk.service`/`.timer`, `OnCalendar` uses `America/New_York` so it shifts with DST: 08:00 UTC summer / 09:00 UTC winter — the only timer that's ET-locked rather than UTC-locked)
 - Spawns `pi -p --model opencode-go/qwen3.7-max` executing the `hyperliquid-run` skill
 - Script: `~/scripts/run_hyperliquid_sdk.sh`; timeout: 30 min
 
@@ -253,8 +253,10 @@ All four run sequentially via a single systemd timer to avoid conflicts with gam
 | `homelab-backup` | 03:00 | 11:00 PM (prev. day) |
 | `update-check` | 05:00 | 1:00 AM |
 | `digests-daily` | 08:00 | 4:00 AM |
-| `hyperliquid-sdk` | 08:00 Mon/Thu | 4:00 AM Mon/Thu |
+| `hyperliquid-sdk` | 08:00/09:00 Mon/Thu¹ | 4:00 AM Mon/Thu |
 | `agents-md-audit` | 08:00 Sat | 4:00 AM Sat |
+
+¹ `hyperliquid-sdk` is the one ET-locked timer; all others are UTC-locked (stable year-round).
 
 `digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` per topic in order: **ai-tech → agentic-platform → gaming → world**. Total runtime ~2.5–3 hours, done by ~7 AM ET. The old per-topic timers and `run_<topic>_digest.sh` scripts are **disabled/unused**.
 
