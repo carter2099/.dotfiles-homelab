@@ -38,12 +38,8 @@ Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PR
 | **Network** | Gigabit Ethernet (Realtek RTL8111HN/EPV), Wi-Fi 6E, Bluetooth 5.1 |
 
 **Notes:**
-- The wired NIC `enp3s0f0` (Realtek) is the **primary uplink**.
-- **WiFi is disabled** in netplan. The interface `wlp6s0` is down by default.
-- **Network config:** `/etc/netplan/50-cloud-init.yaml` (managed by systemd-networkd)
-  - `enp3s0f0`: DHCP lease `192.168.4.100` (default-route source, `src 192.168.4.100 metric 100`), static `192.168.4.92/22` (k3s node IP, blog/delta_neutral ingress) and `192.168.4.102/22` (tbitt/stickies ingress — not live). On the interface `.92` is the primary scope-global address; `.100` and `.102` show as secondary.
-  - `wlp6s0`: Removed from netplan — down by default
-- **Default route:** Via `192.168.4.1` dev `enp3s0f0` (metric 100)
+- The wired NIC `enp3s0f0` (Realtek) is the **primary uplink**; WiFi (`wlp6s0`) is down by default.
+- **Network config:** `/etc/netplan/50-cloud-init.yaml` (systemd-networkd). `enp3s0f0` carries `.100` (DHCP, default-route source), `.92` (k3s node IP + blog/delta_neutral ingress), `.102` (tbitt/stickies ingress — not live). Run `ip -4 addr show enp3s0f0` for live state.
 
 ## Repository Structure
 
@@ -82,7 +78,7 @@ bundle exec rspec  # run tests
 # make changes, commit, push
 ```
 
-Note: `.ruby-version` in cloned repos may request a Ruby version not installed locally. Installed versions (rbenv): **3.4.3, 3.4.8, 3.4.9**. Use `RBENV_VERSION=<installed-version>` to override for testing if the patch version difference is minor, or install the exact version with `rbenv install <version>`.
+Note: `.ruby-version` in cloned repos may request a Ruby not installed locally. Check `rbenv versions`; use `RBENV_VERSION=<installed-version>` to override for testing if the patch difference is minor, or `rbenv install <version>` for the exact one.
 
 ## Skills
 
@@ -170,7 +166,7 @@ k delete pod <name>  # k3s auto-recreates
 - **Self-developed webapps** (blog, hub, tbitt, stickies, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92, tbitt/stickies at 192.168.4.102). Note: hub and stickies are not currently live; tbitt is deprecated.
 - **Third-party services** (grafana, prometheus, node-exporter, freshrss, uptime-kuma, traefik) run natively as k3s Deployments/DaemonSets.
 
-Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.). Node name: `tp-server`; k3s v1.33.3+k3s1.
+Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.). Live state: `k get nodes` / `k3s --version`.
 
 **k3s server config:** `/etc/rancher/k3s/config.yaml` (tracked copy: `~/k3s/config.yaml`). **Critical:** `flannel-iface` must match the active network interface. WiFi (`wlp6s0`) is disabled — flannel must use `enp3s0f0` (verified current). If k3s crashloops with `"flannel exited: failed to find the interface wlp6s0: No IPv4 address found"`, this config regressed. The node IP is `192.168.4.92`.
 
@@ -179,42 +175,31 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 ## App Details
 
 ### Blog (Rails 8 + SQLite)
-- Deploy dir `~/blog/` wraps `release.sh`/`up.sh`; the actual app is nested at **`~/blog/blog/`** (has its own `AGENTS.md`, `CLAUDE.md`, `Gemfile`). Content lives in `~/blog/blog/app/posts/` and `app/reviews/` (git-ignored).
-- Container: `blog-web-1` (compose v2 names carry the `-1` suffix). Port: 3099 (internal) / 33099 (exposed)
-- Obsidian vault image syntax (`![[file.jpg]]`) converted automatically
-- Ruby 3.4.8, Propshaft, Importmap, Turbo/Stimulus
+- Deploy dir `~/blog/` wraps `release.sh`/`up.sh`; the app is nested at **`~/blog/blog/`** (own `AGENTS.md` + `CLAUDE.md`). Content in `app/posts/` + `app/reviews/` (git-ignored).
+- Rails 8 + SQLite (Propshaft/Importmap/Turbo). Port 3099 internal / 33099 exposed; live container name via `docker ps` (compose v2 appends a `-1` suffix).
+- Obsidian vault image syntax (`![[file.jpg]]`) auto-converted.
 
 ### Hub (React + Rails API) - Not live
-- Code remains on disk but the service is not running. Previously planned for carter2099.com.
-- Client (if deployed): React 19 + TypeScript + Vite (port 3000/13000)
-- Server (if deployed): Rails 8 API-only (port 3001/13001)
-- Hyperliquid SDK for crypto price data
+- Code on disk, not running. Previously planned for carter2099.com. React 19 + Vite client + Rails 8 API server + Hyperliquid SDK — read the source if re-deploying.
 
 ### Tbitt (React + Express) - Deprecated
-- Client: React 18 + TypeScript (port 3000/13000)
-- Server: Express + TypeScript + PostgreSQL (port 3001/13001)
-- Deprecated Aug 2025 (Jupiter API discontinued)
+- React 18 + Express + PostgreSQL. Deprecated Aug 2025 (Jupiter API discontinued).
 
 ### Stickies - Not live
 - Previously a sticky notes app at stickiesapi.carter2099.com
 - Code remains on disk but the service is not running
 
 ### Delta Neutral (Rails 8 + SQLite)
-- Deploy dir `~/delta_neutral/` wraps `release.sh`/`up.sh`; the app is nested at **`~/delta_neutral/delta_neutral/`** (has its own `AGENTS.md`, `CLAUDE.md`, `Gemfile`).
-- Container: `delta_neutral-web-1`. Port: 80 (internal) / 43080 (exposed)
-- Automated rebalancer for Hyperliquid short hedges on Uniswap V3 positions
-- Background jobs via Solid Queue (in-process with Puma via `SOLID_QUEUE_IN_PUMA=1`)
-- Env vars in `config/master.key` (credentials) + `.env.production` (API keys/SMTP)
-- Required env vars: `HYPERLIQUID_PRIVATE_KEY`, `HYPERLIQUID_WALLET_ADDRESS`, `UNISWAP_SUBGRAPH_URL`, `THEGRAPH_API_KEY`
-- Dockerfile requires extra build deps: `autoconf automake libtool libsecp256k1-dev libssl-dev` (for `rbsecp256k1` gem)
-- Ruby 3.4.8, Thruster, Propshaft, Tailwind
+- Deploy dir `~/delta_neutral/` wraps `release.sh`/`up.sh`; the app is nested at **`~/delta_neutral/delta_neutral/`** (own `AGENTS.md` + `CLAUDE.md`).
+- Rails 8 + SQLite (Thruster/Propshaft/Tailwind). Port 80 internal / 43080 exposed; live container name via `docker ps`.
+- Automated rebalancer for Hyperliquid short hedges on Uniswap V3 positions; Solid Queue in-process with Puma (`SOLID_QUEUE_IN_PUMA=1`).
+- Secrets in `config/master.key` + `.env.production` (API keys/SMTP — see the file for the required list).
+- Dockerfile needs extra build deps for `rbsecp256k1`: `autoconf automake libtool libsecp256k1-dev libssl-dev`.
 
 ### Homelab Backup (Go)
-- Source at `~/homelab-backup/`. Runs daily at 03:00 UTC via systemd user timer (`homelab-backup.service`/`.timer`)
-- Backs up to Cloudflare R2 bucket (`homelab-backup`) with 14-day daily + 1 monthly + 1 yearly retention
-- Targets: blog posts, reviews, images, blog SQLite DB, FreshRSS SQLite DB + config, Open WebUI `webui.db` (`/var/lib/docker/volumes/open-webui_open-webui/_data/webui.db`)
-- Local archives written to `~/backups/`; R2 credentials via env vars `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`
-- Use the `backup-health` skill to check last run status, next scheduled run, and R2 bucket contents
+- Go service at `~/homelab-backup/`; daily 03:00 UTC via systemd user timer `homelab-backup.{service,.timer}`. Dest: Cloudflare R2 bucket `homelab-backup`; local archives in `~/backups/`.
+- Targets + retention are configured in `~/homelab-backup/config.yaml`; R2 creds via `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`.
+- Use the `backup-health` skill for last-run status, next run, and R2 listing.
 
 ### Dependabot Webhook (Go)
 - Always-on systemd user service (`dependabot-webhook.service`) listening on `localhost:9099`
@@ -233,7 +218,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ### Open WebUI (Homelab Chat)
 - ChatGPT/Claude-style self-hosted chat UI at `https://chat.carter2099.com`. Not an agent — a general chat front-end.
-- Docker Compose in `~/open-webui/` (pinned tag, currently `ghcr.io/open-webui/open-webui:v0.10.2` — the nightly update runner bumps it), bound **`127.0.0.1:48100`** (loopback-only).
+- Docker Compose in `~/open-webui/` (pinned tag — the nightly update runner bumps it; see the compose file), bound **`127.0.0.1:48100`** (loopback-only).
 - **Backend = the OpenCode Go endpoint** (`OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1`) so chat usage rides the **flat-sub session-cap billing**, NOT `zen/v1` pay-as-you-go. The 18 Go models populate automatically; a few (e.g. `qwen3.7-max`) 401 as "not supported for format oa-compat" and are opencode-native-only — just pick another. (Same account key, the base URL picks product/billing.)
 - Secrets (`OPENAI_API_KEY` = the Go key, `WEBUI_SECRET_KEY`) in gitignored `~/open-webui/.env` (600). Compose + `up.sh` are tracked; `.env` is not.
 - **Routing: direct-tunnel pattern** (like pi-web/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
@@ -417,18 +402,17 @@ The gaming rig runs **llama-swap** over llama.cpp's `llama-server.exe`, serving 
 
 Quick reference (verified 2026-07-11):
 - **Client endpoint:** `http://localhost:8081/v1` (homelab proxy) · **Backend (don't hit directly):** `http://192.168.4.103:8080/v1`
-- **Health:** `curl http://localhost:8081/health` · **Models:** `curl http://localhost:8081/v1/models` → `qwen-3.6-35b-q6` (thinking ON, default) and `qwen-3.6-35b-q6-fast` (thinking OFF, fallback). Single GGUF on disk: `Qwen_Qwen3.6-35B-A3B-Q6_K.gguf`. Context 128K.
+- **Health:** `curl http://localhost:8081/health` · **Models:** `curl http://localhost:8081/v1/models` → `qwen-3.6-35b-q6` (thinking ON, default) / `qwen-3.6-35b-q6-fast` (thinking OFF, fallback). Model files + context config on the rig: `C:\llm\`.
 - **Service:** `llm-proxy.service` · binary `~/.local/bin/llm-proxy` · source `~/dev/llm-proxy/` · config `~/.config/llm-proxy/env`
 - **Logs/restart/deploy:** `journalctl --user -u llm-proxy -f` · `systemctl --user restart llm-proxy` · `cd ~/dev/llm-proxy && bash release.sh`
 - **Cloud fallback:** requests that can't reach the rig proxy to OpenCode Go (`deepseek-v4-flash`); `X-Fallback: true` response header signals it. Proxy waits up to `STARTUP_GRACE` (45s) for WoL wake before falling back.
-- **GPU:** RTX 5070 12GB GDDR7. llama.cpp build label b9870 *(per prior docs; not machine-verifiable via `--version`)*.
 
 ## Environment
 
 - **Shell:** zsh with vim keybindings
 - **Editor:** neovim (built from source in `build/neovim/`)
-- **Ruby:** managed via rbenv (installed: 3.4.3, 3.4.8, 3.4.9)
-- **Node:** managed via fnm (current: v26.3.0)
+- **Ruby:** managed via rbenv (`rbenv versions`)
+- **Node:** managed via fnm (`node -v`)
 - **Tmux prefix:** Ctrl+Space
 - **Git user:** carter2099 <carter2099@pm.me>
 - **GitHub CLI:** `gh` authenticated as carter2099 (HTTPS, broad scopes)
