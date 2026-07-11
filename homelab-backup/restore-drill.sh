@@ -39,15 +39,18 @@ run "$HB" latest "$WORK"
 # path match — robust to stderr/stdout interleaving.
 ARCHIVE="$(grep -Eo '/[^ ]+\.tar\.gz' "$WORK/report.txt" | tail -1)"
 
+EMAIL_TMPL="$HOME/homelab-backup/email-template.sh"
+[ -x "$EMAIL_TMPL" ] || EMAIL_TMPL="/usr/bin/env bash $HOME/homelab-backup/email-template.sh"
+
 if [ -z "${ARCHIVE:-}" ] || [ ! -f "${ARCHIVE:-/nonexistent}" ]; then
   SUBJECT="homelab restore drill FAILED ${TS} (download)"
   {
     echo "FAILED at the download stage. Did R2 creds reach the drill? Is the bucket reachable?"
     echo
     cat "$REPORT"
-  } > /tmp/restore-drill-body.txt
-  python3 "$HOME/scripts/send_digest.py" --subject "$SUBJECT" --body-file /tmp/restore-drill-body.txt --to "$RECIPIENT"
-  rm -f /tmp/restore-drill-body.txt
+  } | bash "$EMAIL_TMPL" fail /tmp/restore-drill-body.html
+  python3 "$HOME/scripts/send_digest.py" --subject "$SUBJECT" --body-file /tmp/restore-drill-body.html --to "$RECIPIENT"
+  rm -f /tmp/restore-drill-body.html
   echo "[restore-drill] FAILED at download; emailed ${RECIPIENT}" >&2
   exit 1
 fi
@@ -59,20 +62,20 @@ run "$HB" verify "$ARCHIVE" || VERIFY_RC=$?
 if [ "$VERIFY_RC" -eq 0 ]; then
   SUBJECT="homelab restore drill PASS ${TS}"
   {
-    echo "✅ PASS — newest R2 backup downloaded and verified intact."
+    echo "PASS — newest R2 backup downloaded and verified intact."
     echo
     cat "$REPORT"
-  } > /tmp/restore-drill-body.txt
+  } | bash "$EMAIL_TMPL" pass /tmp/restore-drill-body.html
 else
   SUBJECT="homelab restore drill FAILED ${TS} (verify)"
   {
-    echo "❌ FAIL — archive downloaded but integrity check failed. Investigate before trusting backups."
+    echo "FAIL — archive downloaded but integrity check failed. Investigate before trusting backups."
     echo
     cat "$REPORT"
-  } > /tmp/restore-drill-body.txt
+  } | bash "$EMAIL_TMPL" fail /tmp/restore-drill-body.html
 fi
 
-python3 "$HOME/scripts/send_digest.py" --subject "$SUBJECT" --body-file /tmp/restore-drill-body.txt --to "$RECIPIENT"
-rm -f /tmp/restore-drill-body.txt
+python3 "$HOME/scripts/send_digest.py" --subject "$SUBJECT" --body-file /tmp/restore-drill-body.html --to "$RECIPIENT"
+rm -f /tmp/restore-drill-body.html
 echo "[restore-drill] done (verify rc=${VERIFY_RC}); emailed ${RECIPIENT}"
 exit "$VERIFY_RC"
