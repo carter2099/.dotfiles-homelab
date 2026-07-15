@@ -307,7 +307,7 @@ def phase_apply_cloudflared_restart():
 def phase_apply_k3s_rollouts():
     """Rollout restart freshrss + uptime-kuma, wait for status."""
     results = []
-    env = {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}
+    env = {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}", "KUBECONFIG": str(HOME / ".kube" / "config")}
     for name, ns, timeout_s in [
         ("freshrss", "freshrss", 120),
         ("uptime-kuma", "default", 120),
@@ -337,11 +337,15 @@ def phase_apply_k3s_rollouts():
             )
             results.append({"step": f"k3s_{name}", "status": "ok"})
         except subprocess.CalledProcessError as e:
+            stderr_tail = (e.stderr or "").strip()
+            msg = str(e)
+            if stderr_tail:
+                msg += f" | stderr: {stderr_tail[-500:]}"
             results.append(
                 {
                     "step": f"k3s_{name}",
                     "status": "failed",
-                    "error": str(e),
+                    "error": msg,
                 }
             )
     return results
