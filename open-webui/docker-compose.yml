@@ -13,8 +13,6 @@ services:
     env_file:
       - .env            # OPENAI_API_KEY (the OpenCode Go key) + WEBUI_SECRET_KEY — gitignored
     environment:
-      # Backend = OpenCode Go endpoint (flat-sub / session-cap billing), NOT zen/v1 (pay-as-you-go)
-      - OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1
       # Second credential layer behind CF Access (first signup = admin)
       - WEBUI_AUTH=True
       - ENABLE_SIGNUP=False     # no self-registration; admin already created over loopback
