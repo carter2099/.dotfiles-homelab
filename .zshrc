@@ -42,6 +42,21 @@ alias k="kubectl"
 alias dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles-homelab/" --work-tree="$HOME"'
 alias carterhelp='nvim ~/README.md'
 
+# omp: auto-add --allow-home when starting from ~
+omp() {
+    if [[ "$PWD" == "$HOME" ]]; then
+        # --allow-home is only for agent sessions, not subcommands.
+        # Subcommands are single-word first args that don't start with -.
+        if [[ $# -eq 0 || "$1" == -* || "$1" == *\ * ]]; then
+            command omp --allow-home "$@"
+        else
+            command omp "$@"
+        fi
+    else
+        command omp "$@"
+    fi
+}
+
 
 export KUBECONFIG=~/.kube/config
 
@@ -64,3 +79,13 @@ export CLOUDFLARE_ZONE_ID=$(cat ~/.config/cloudflare/zone-id 2>/dev/null | tr -d
 export CLOUDFLARE_HOMELAB_TUNNEL_ID=$(cat ~/.config/cloudflare/homelab-tunnel-id 2>/dev/null | tr -d '\n')
 
 alias pi-dev='node ~/dev/pi/packages/coding-agent/dist/cli.js'
+
+# bun completions
+[ -s "/home/carter/.bun/_bun" ] && source "/home/carter/.bun/_bun"
+
+# bun
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+
+# go
+export PATH="$HOME/go/bin:$PATH"
