@@ -1391,6 +1391,13 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
 
+    # Idempotent resume: if today's archive exists, this phase already ran —
+    # don't re-send the email (every other phase skips on existing output).
+    archive_path = digest_dir / f"{today_str}.html"
+    if archive_path.exists():
+        print(f"  [skip] Phase 8 output exists: {archive_path}")
+        return
+
     temp_html = digest_dir / ".daily_digest.html"
     temp_html.write_text(html)
 
@@ -1422,7 +1429,6 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     except subprocess.CalledProcessError as e:
         print(f"  [FAIL] send_email — {e.stderr[:300]}")
 
-    archive_path = digest_dir / f"{today_str}.html"
     shutil.copy(temp_html, archive_path)
     print(f"  [done] archived HTML → {archive_path}")
 
