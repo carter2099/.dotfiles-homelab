@@ -245,7 +245,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ## Email Digests
 
-Four daily HTML email digests produced by a **deterministic 9-phase Python workflow** (`~/scripts/digest_runner.py`). **Architecture, stories-in-flight mechanics, and debugging details live in [`~/notes/homelab/email-digests.md`](notes/homelab/email-digests.md)** — read that note when working on the digest system.
+Five daily HTML email digests produced by a **deterministic 9-phase Python workflow** (`~/scripts/digest_runner.py`). **Architecture, stories-in-flight mechanics, and debugging details live in [`~/notes/homelab/email-digests.md`](notes/homelab/email-digests.md)** — read that note when working on the digest system.
 
 ### Schedule
 
@@ -261,7 +261,7 @@ All four run sequentially via a single systemd timer to avoid conflicts with gam
 
 ¹ `hyperliquid-sdk` is the one ET-locked timer; all others are UTC-locked (stable year-round).
 
-`digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` per topic in order: **ai-tech → agentic-platform → gaming → world**. Total runtime ~2.5–3 hours, done by ~7 AM ET. The old per-topic timers and `run_<topic>_digest.sh` scripts are **disabled/unused**.
+`digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` per topic in order: **ai-tech → agentic-platform → ai-hardware → gaming → world**. Total runtime ~3–3.5 hours, done by ~7:30 AM ET. The old per-topic timers and `run_<topic>_digest.sh` scripts are **disabled/unused**.
 
 **`agents-md-audit`** (weekly, `agents-md-audit.timer`) truth-checks this very file against the live host and emails Carter a PASS/DRIFT/UNVERIFIABLE report with proposed edits — report-only, never modifies files or touches git. Runs on the cloud `opencode-go/deepseek-v4-pro` model so it does not contend with the local-LLM digests. Script: `~/scripts/run_agents_md_audit.sh`. Apply proposed fixes by asking an interactive agent (or just say "apply the latest agents-md-audit").
 
@@ -271,13 +271,14 @@ All four run sequentially via a single systemd timer to avoid conflicts with gam
 |---|---|---|
 | AI & tech | `ai-tech/` | carter2099@pm.me |
 | Agentic platforms | `agentic-platform/` | carter2099@pm.me + CC from `~/.scripts/.smtp_config` |
+| AI hardware | `ai-hardware/` | carter2099@pm.me |
 | Gaming | `gaming-digest/` | carter2099@pm.me |
 | World / U.S. events | `world-digest/` | carter2099@pm.me |
 
 ### Key files
 
 - `~/scripts/digest_runner.py` — 9-phase orchestrator (topic configs in `TOPICS` dict)
-- `~/scripts/run_all_digests.sh` — sequential wrapper for all 4 topics
+- `~/scripts/run_all_digests.sh` — sequential wrapper for all 5 topics
 - `~/scripts/send_digest.py` — SMTP sender (reads `~/.scripts/.smtp_config`)
 - `~/digests/template.html` — shared HTML template
 - `~/.config/systemd/user/digests-daily.{service,timer}` — systemd units

@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-Deterministic multi-phase email digest runner.
+Deterministic 9-phase email digest runner.
 
-Orchestrates a pipeline of focused LLM calls to research, judge, curate,
-and write a daily news digest. Each phase has a narrow, focused prompt so
-the local Qwen model can handle it reliably.
+Each phase is a narrow, self-contained LLM call or Python step so the
+local Qwen model can handle it reliably. Bounding caps prevent any one
+topic from starving the others within the systemd timeout.
+
+Architecture, stories-in-flight mechanics, and debugging:
+  ~/notes/homelab/email-digests.md
 
 Usage:
     python3 ~/scripts/digest_runner.py ai-tech
-    python3 ~/scripts/digest_runner.py agentic-platform  # (avoid during testing)
-    python3 ~/scripts/digest_runner.py gaming
-    python3 ~/scripts/digest_runner.py world
+    python3 ~/scripts/digest_runner.py ai-tech --dry-run
+    python3 ~/scripts/digest_runner.py all
 
-Architecture:
-    Phase 0: Setup (Python) — load config, template, stories-in-flight
-    Phase 1: Research (3 pi -p, parallel) — web_search for stories
-    Phase 2: Judge research (direct API) — filter against date/relevance rules
-    Phase 3: Rank URLs (Python) — sort by impact, cap at N
-    Phase 4: Fetch + Summarize (N pi -p, parallel) — web_fetch each article
-    Phase 5: Judge summaries (direct API) — verify accuracy/faithfulness
-    Phase 6: Curate (direct API) — dedupe, cross-ref, rank, update stories-in-flight
-    Phase 7: Write (direct API) — fill HTML template
-    Phase 8: Send + Archive (Python) — email, save artifacts, write stories-in-flight
-    Phase 9: Summary (direct API) — write .md for future dedup
-
-Idempotent: if a phase output already exists, it's skipped (allows resume).
+Phases:
+    1. Research        — pi -p web_search (3 angles, sequential)
+    2. Judge Research  — batched LLM: Python date pre-tag + LLM quality filter
+    3. Rank URLs       — Python: Pool A (fresh, capped 12) + Pool B (ongoing, capped 5)
+                          + Pool C (stories-in-flight, capped 3, bypasses Phase 4)
+    4. Fetch + Summarize — pi -p web_fetch (fresh first, then ongoing, ≤17 total)
+    5. Judge Summaries — batched LLM: accuracy/fidelity check
+    6. Curate          — 6a Python prep → 6b LLM editorial → 6c Python validate
+    7. Write HTML      — one LLM call filling template
+    8. Send + Archive  — pure Python
+    9. Summary         — one lightweight LLM call
 """
 
 import argparse
@@ -60,6 +60,79 @@ FETCH_TIMEOUT = 900                          # 15 min per article fetch
 MAX_PARALLEL_RESEARCH = 1   # llama.cpp is single-request; keep sequential
 MAX_PARALLEL_FETCH = 1
 
+# ── Batching ───────────────────────────────────────────────────────────────
+BATCH_SIZE = 10  # findings/summaries per LLM call in phases 2 and 5
+
+# ── Caps ───────────────────────────────────────────────────────────────────
+FRESH_CAP = 12      # Pool A: max fresh findings passed to Phase 4
+ONGOING_CAP = 5     # Pool B: max ongoing articles passed to Phase 4
+SIF_CAP = 3         # Pool C: max stories-in-flight passed directly to Phase 6
+
+# ── Stories-in-flight constants ────────────────────────────────────────────
+COOL_AFTER_DAYS = 5     # auto-set status to "cooled" if no updates in 5 days
+PRUNE_AFTER_DAYS = 10   # remove cooled stories entirely after 10 days total
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Importance rubric — shared rules + per-topic specifics
+# ═══════════════════════════════════════════════════════════════════════════
+
+IMPORTANCE_RUBRIC_SHARED = (
+    "IMPORTANCE RUBRIC (shared — applies to every topic):\n"
+    "- high — front-page / lead-story material. Major consequence, broad impact, "
+    "or significant change to the landscape. Would you open the email with it?\n"
+    "- medium — notable and worth including. Meaningful to people who follow the "
+    "space, but not a lead story.\n"
+    "- low — incremental, niche, or minor. Worth including only on a slow day. "
+    "First to get capped.\n"
+)
+
+IMPORTANCE_RUBRIC_SPECIFIC: dict[str, str] = {
+    "ai-tech": (
+        "PER-TOPIC IMPORTANCE:\n"
+        "- high: Major model release (GPT/Claude-tier), $100M+ funding, landmark regulation, "
+        "significant breach.\n"
+        "- medium: New tool/feature from known player, $10M+ round, research paper with "
+        "practical impact, notable acquisition.\n"
+        "- low: Minor version bumps, small rounds, speculative reports, "
+        "\"X announced they will announce\".\n"
+    ),
+    "agentic-platform": (
+        "PER-TOPIC IMPORTANCE:\n"
+        "- high: Breaking change to a major platform (Claude Code, Codex, Copilot), "
+        "new agent architecture that meaningfully changes capabilities, critical vulnerability.\n"
+        "- medium: New feature in a known platform, MCP/server tool releases, "
+        "interesting benchmark result, SDK release.\n"
+        "- low: Minor patch notes, small community projects, pre-announcements without substance.\n"
+    ),
+    "gaming": (
+        "PER-TOPIC IMPORTANCE:\n"
+        "- high: AAA release or announcement, major studio news (closure, acquisition), "
+        "platform-shifting event, esports championship result.\n"
+        "- medium: Notable indie release, significant patch/expansion, industry trend piece, "
+        "hardware news.\n"
+        "- low: Minor updates, DLC announcements, rumors, small esports events.\n"
+    ),
+    "world": (
+        "PER-TOPIC IMPORTANCE:\n"
+        "- high: Armed conflict escalation, major election result, natural disaster with "
+        "casualties, significant policy change, international crisis.\n"
+        "- medium: Diplomatic development, economic data release, legislative progress, "
+        "notable protest or speech.\n"
+        "- low: Process stories, incremental political maneuvering, local-interest pieces.\n"
+    ),
+    "ai-hardware": (
+        "PER-TOPIC IMPORTANCE:\n"
+        "- high: Flagship accelerator launch (NVIDIA/AMD datacenter-class), $1B+ chip or "
+        "datacenter deal, export control change, major supply disruption (HBM, CoWoS, "
+        "TSMC capacity).\n"
+        "- medium: Notable benchmark or perf-per-watt result, consumer GPU launch, hyperscaler "
+        "capex update, startup silicon milestone, memory pricing shift.\n"
+        "- low: Unconfirmed leaks/rumors, minor product refreshes, incremental firmware/driver "
+        "news.\n"
+    ),
+}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Topic definitions
@@ -70,6 +143,7 @@ TOPICS: dict[str, dict[str, Any]] = {
         "title": "AI & Tech Digest",
         "recipients": ["carter2099@pm.me"],
         "category": "ai-tech",
+        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["ai-tech"],
         "research_angles": [
             {
                 "id": "models-releases",
@@ -130,23 +204,24 @@ TOPICS: dict[str, dict[str, Any]] = {
         ],
         "judgment_rules": (
             "For each finding, evaluate against these rules and assign a verdict.\n\n"
-            "1. DATE CHECK (three-tier):\n"
-            "   - Published/updated in the last 24 hours → verdict 'fresh'\n"
-            "   - Published/updated in the last 2-7 days → verdict 'recent'\n"
-            "   - Older than 7 days OR no clear date → drop with reason 'too_old' or 'date_unclear'\n"
-            "2. SOURCE CHECK: Is this from a known reputable outlet? TechCrunch, The Verge, "
+            "1. SOURCE CHECK: Is this from a known reputable outlet? TechCrunch, The Verge, "
             "Ars Technica, Wired, ZDNet, VentureBeat, Hacker News, official company blogs, "
             "GitHub repos with significant activity, academic papers on arxiv. Personal blogs "
             "are OK if they have substance. Content farms, SEO spam, and low-quality "
             "aggregators should be dropped with reason 'unreliable_source'.\n"
-            "3. RELEVANCE CHECK: Is this about AI, tech, developer tools, or the tech industry? "
+            "2. RELEVANCE CHECK: Is this about AI, tech, developer tools, or the tech industry? "
             "If it's general business news, politics, or non-tech topics, drop with reason 'not_relevant'.\n"
-            "4. DUPLICATE CHECK: Is this the same underlying story as another finding? "
+            "3. DUPLICATE CHECK: Is this the same underlying story as another finding? "
             "If yes, mark the lower-quality one as drop with reason 'duplicate_of:<other_finding_index>'.\n"
-            "5. SUBSTANCE CHECK: Does this story have actual news value? Press releases with "
+            "4. SUBSTANCE CHECK: Does this story have actual news value? Press releases with "
             "no new information, minor version bumps, and 'X company announced they will announce "
-            "something' should be dropped with reason 'no_substance'.\n\n"
-            "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
+            "something' should be dropped with reason 'no_substance'.\n"
+            "5. IMPORTANCE REVIEW: Review the importance label from research. Adjust if the "
+            "story's significance differs from the initial estimate.\n\n"
+            "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
+            "to re-check dates. All findings you receive have been pre-filtered for freshness. "
+            "Focus on source quality, relevance, duplicates, substance, and importance accuracy.\n\n"
+            "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
             "Model Releases", "Agentic/Agent Platforms", "Open Source",
@@ -156,8 +231,9 @@ TOPICS: dict[str, dict[str, Any]] = {
     },
     "agentic-platform": {
         "title": "Agentic Platform Digest",
-        "recipients": ["carter2099@pm.me"],  # second recipient added at send time from env
+        "recipients": ["carter2099@pm.me"],
         "category": "agentic-platform",
+        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["agentic-platform"],
         "research_angles": [
             {
                 "id": "platforms-features",
@@ -209,18 +285,17 @@ TOPICS: dict[str, dict[str, Any]] = {
         ],
         "judgment_rules": (
             "For each finding, evaluate against these rules and assign a verdict.\n\n"
-            "1. DATE CHECK (three-tier):\n"
-            "   - Published/updated in the last 24 hours → verdict 'fresh'\n"
-            "   - Published/updated in the last 2-7 days → verdict 'recent'\n"
-            "   - Older than 7 days OR no clear date → drop with reason 'too_old' or 'date_unclear'\n"
-            "2. SOURCE CHECK: Reputable? Tech blogs, official docs, GitHub repos, company blogs "
+            "1. SOURCE CHECK: Reputable? Tech blogs, official docs, GitHub repos, company blogs "
             "are good. Drop content farms and low-quality aggregators.\n"
-            "3. RELEVANCE CHECK: About agentic platforms, coding agents, multi-agent systems, "
+            "2. RELEVANCE CHECK: About agentic platforms, coding agents, multi-agent systems, "
             "MCP ecosystem, agent dev tooling, or AI agent research? Drop general AI news "
             "without an agent angle.\n"
-            "4. DUPLICATE CHECK: Same story? Keep the best version, drop duplicates.\n"
-            "5. SUBSTANCE CHECK: Actual news or meaningful analysis? Drop empty announcements.\n\n"
-            "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
+            "3. DUPLICATE CHECK: Same story? Keep the best version, drop duplicates.\n"
+            "4. SUBSTANCE CHECK: Actual news or meaningful analysis? Drop empty announcements.\n"
+            "5. IMPORTANCE REVIEW: Review and adjust the importance label from research.\n\n"
+            "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
+            "to re-check dates. Focus on source, relevance, duplicates, substance, and importance.\n\n"
+            "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
             "Platform Updates", "New Features", "Launches", "MCP/Ecosystem",
@@ -228,10 +303,120 @@ TOPICS: dict[str, dict[str, Any]] = {
             "Research", "Evaluation", "Community Projects",
         ],
     },
+    "ai-hardware": {
+        "title": "AI Hardware Digest",
+        "recipients": ["carter2099@pm.me"],
+        "category": "ai-hardware",
+        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["ai-hardware"],
+        "research_angles": [
+            {
+                "id": "accelerators-silicon",
+                "prompt": (
+                    "Search for AI accelerator and silicon news from the last 24 hours: new GPUs, "
+                    "TPUs, NPUs, and custom AI ASICs from NVIDIA, AMD, Intel, Google, AWS, Meta, "
+                    "Microsoft, and silicon startups (Cerebras, Groq, Tenstorrent, SambaNova). "
+                    "Check Tom's Hardware (https://www.tomshardware.com/), SemiAnalysis "
+                    "(https://semianalysis.com/), The Next Platform "
+                    "(https://www.nextplatform.com/), Ars Technica (https://arstechnica.com/), "
+                    "and Hacker News (https://news.ycombinator.com/).\n\n"
+                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "- Title\n"
+                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- Source domain (e.g. tomshardware.com)\n"
+                    "- Publication date (from the article, ISO format if available)\n"
+                    "- 1-2 sentence factual summary (no opinion, just what happened)\n"
+                    "- Category: Accelerators & Silicon or Custom/Startup Silicon\n"
+                    "- Estimated importance: high / medium / low\n\n"
+                    "If a source fails to load, try another. Prioritize stories from today. "
+                    "Only include stories you actually fetched and confirmed."
+                ),
+            },
+            {
+                "id": "datacenter-infrastructure",
+                "prompt": (
+                    "Search for AI datacenter and infrastructure hardware news from the last 24 "
+                    "hours: HBM and memory (SK Hynix, Samsung, Micron), interconnect and "
+                    "networking (NVLink, InfiniBand, Ethernet, optical), servers and rack "
+                    "systems, power and cooling, hyperscaler datacenter buildouts and capex, "
+                    "and the fab supply chain (TSMC, CoWoS, advanced packaging). Check The Next "
+                    "Platform (https://www.nextplatform.com/), ServeTheHome "
+                    "(https://www.servethehome.com/), Data Center Dynamics "
+                    "(https://www.datacenterdynamics.com/), SemiAnalysis "
+                    "(https://semianalysis.com/), and Reuters technology "
+                    "(https://www.reuters.com/technology/).\n\n"
+                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "- Title\n"
+                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- Source domain\n"
+                    "- Publication date (from the article, ISO format if available)\n"
+                    "- 1-2 sentence factual summary\n"
+                    "- Category: Memory & HBM, Networking & Interconnect, Datacenter & Power, "
+                    "or Supply Chain & Fabs\n"
+                    "- Estimated importance: high / medium / low\n\n"
+                    "If a source fails to load, try another. Prioritize stories from today. "
+                    "Only include stories you actually fetched and confirmed."
+                ),
+            },
+            {
+                "id": "consumer-edge",
+                "prompt": (
+                    "Search for consumer and edge AI hardware news from the last 24 hours: "
+                    "consumer GPUs (GeForce, Radeon, Arc), AI PC processors and NPUs "
+                    "(Snapdragon X, Intel Core Ultra, AMD Ryzen AI), Apple silicon for local "
+                    "inference, workstation and homelab AI hardware, and edge AI devices. "
+                    "Check Tom's Hardware (https://www.tomshardware.com/), TechPowerUp "
+                    "(https://www.techpowerup.com/), Ars Technica (https://arstechnica.com/), "
+                    "The Verge (https://www.theverge.com/), and Hacker News "
+                    "(https://news.ycombinator.com/).\n\n"
+                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "- Title\n"
+                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- Source domain\n"
+                    "- Publication date (from the article, ISO format if available)\n"
+                    "- 1-2 sentence factual summary\n"
+                    "- Category: Consumer & Edge\n"
+                    "- Estimated importance: high / medium / low\n\n"
+                    "If a source fails to load, try another. Prioritize stories from today. "
+                    "Only include stories you actually fetched and confirmed."
+                ),
+            },
+        ],
+        "judgment_rules": (
+            "For each finding, evaluate against these rules and assign a verdict.\n\n"
+            "1. SOURCE CHECK: Is this from a known reputable outlet? Tom's Hardware, "
+            "SemiAnalysis, The Next Platform, ServeTheHome, Data Center Dynamics, TechPowerUp, "
+            "Ars Technica, The Verge, Reuters, Bloomberg, Hacker News, official company "
+            "newsrooms and blogs. Personal blogs are OK if they have substance. Content farms, "
+            "SEO spam, rumor sites with no track record, and low-quality aggregators should be "
+            "dropped with reason 'unreliable_source'.\n"
+            "2. RELEVANCE CHECK: Is this about hardware that enables AI — accelerators, "
+            "silicon, memory, networking, datacenter infrastructure, fabs, or consumer/edge "
+            "AI hardware? Pure software, model releases, and AI application news belong to "
+            "other digests — drop with reason 'not_relevant'. General PC/tech news with no "
+            "AI angle is also not_relevant.\n"
+            "3. DUPLICATE CHECK: Is this the same underlying story as another finding? "
+            "If yes, mark the lower-quality one as drop with reason 'duplicate_of:<other_finding_index>'.\n"
+            "4. SUBSTANCE CHECK: Does this story have actual news value? Press releases with "
+            "no new information, unconfirmed leaks without evidence, and 'X announced they "
+            "will announce something' should be dropped with reason 'no_substance'.\n"
+            "5. IMPORTANCE REVIEW: Review the importance label from research. Adjust if the "
+            "story's significance differs from the initial estimate.\n\n"
+            "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
+            "to re-check dates. All findings you receive have been pre-filtered for freshness. "
+            "Focus on source quality, relevance, duplicates, substance, and importance accuracy.\n\n"
+            "Output each finding in the 'approved' or 'rejected' array based on your verdict."
+        ),
+        "categories": [
+            "Accelerators & Silicon", "Custom/Startup Silicon", "Memory & HBM",
+            "Networking & Interconnect", "Datacenter & Power", "Supply Chain & Fabs",
+            "Consumer & Edge", "Policy & Export Controls",
+        ],
+    },
     "gaming": {
         "title": "Gaming Digest",
         "recipients": ["carter2099@pm.me"],
         "category": "gaming-digest",
+        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["gaming"],
         "research_angles": [
             {
                 "id": "releases-announcements",
@@ -278,16 +463,15 @@ TOPICS: dict[str, dict[str, Any]] = {
         ],
         "judgment_rules": (
             "For each finding, evaluate and assign a verdict.\n\n"
-            "1. DATE CHECK (three-tier):\n"
-            "   - Published/updated in the last 24 hours → verdict 'fresh'\n"
-            "   - Published/updated in the last 2-7 days → verdict 'recent'\n"
-            "   - Older than 7 days OR no clear date → drop with reason 'too_old' or 'date_unclear'\n"
-            "2. SOURCE CHECK: Reputable gaming press or official sources? Drop spam/content farms.\n"
-            "3. RELEVANCE CHECK: About video games, gaming industry, or gaming hardware? "
+            "1. SOURCE CHECK: Reputable gaming press or official sources? Drop spam/content farms.\n"
+            "2. RELEVANCE CHECK: About video games, gaming industry, or gaming hardware? "
             "Not general entertainment.\n"
-            "4. DUPLICATE CHECK: Same story? Keep best version, drop duplicates.\n"
-            "5. SUBSTANCE CHECK: 'Game X tweeted an emoji' is not news. Drop empty stories.\n\n"
-            "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
+            "3. DUPLICATE CHECK: Same story? Keep best version, drop duplicates.\n"
+            "4. SUBSTANCE CHECK: 'Game X tweeted an emoji' is not news. Drop empty stories.\n"
+            "5. IMPORTANCE REVIEW: Review and adjust the importance label from research.\n\n"
+            "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
+            "to re-check dates. Focus on source, relevance, duplicates, substance, and importance.\n\n"
+            "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
             "Releases", "Updates & Patches", "DLC/Expansions", "Platform News",
@@ -299,6 +483,7 @@ TOPICS: dict[str, dict[str, Any]] = {
         "title": "World Digest",
         "recipients": ["carter2099@pm.me"],
         "category": "world-digest",
+        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["world"],
         "research_angles": [
             {
                 "id": "us-news",
@@ -345,18 +530,17 @@ TOPICS: dict[str, dict[str, Any]] = {
         ],
         "judgment_rules": (
             "For each finding, evaluate and assign a verdict.\n\n"
-            "1. DATE CHECK (three-tier):\n"
-            "   - Published/updated in the last 24 hours → verdict 'fresh'\n"
-            "   - Published/updated in the last 2-7 days → verdict 'recent'\n"
-            "   - Older than 7 days OR no clear date → drop with reason 'too_old' or 'date_unclear'\n"
-            "2. SOURCE CHECK: Reputable news organization? Drop blogs posing as news, "
+            "1. SOURCE CHECK: Reputable news organization? Drop blogs posing as news, "
             "content farms, and known misinformation sources.\n"
-            "3. RELEVANCE CHECK: Significant U.S. or world event? Not local crime, "
+            "2. RELEVANCE CHECK: Significant U.S. or world event? Not local crime, "
             "celebrity gossip, or sports (unless major international significance).\n"
-            "4. DUPLICATE CHECK: Same story? Keep best version, drop duplicates.\n"
-            "5. SUBSTANCE CHECK: Is this actually news? 'Politician says something' "
-            "without significant context or consequence is not news.\n\n"
-            "Output each finding in the 'fresh', 'recent', or 'rejected' array based on your verdict."
+            "3. DUPLICATE CHECK: Same story? Keep best version, drop duplicates.\n"
+            "4. SUBSTANCE CHECK: Is this actually news? 'Politician says something' "
+            "without significant context or consequence is not news.\n"
+            "5. IMPORTANCE REVIEW: Review and adjust the importance label from research.\n\n"
+            "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
+            "to re-check dates. Focus on source, relevance, duplicates, substance, and importance.\n\n"
+            "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
             "Politics", "Policy", "Economy", "Judiciary", "Executive",
@@ -366,6 +550,16 @@ TOPICS: dict[str, dict[str, Any]] = {
         ],
     },
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Utility: importance rubric injection
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _importance_rubric_text(topic: dict) -> str:
+    """Build the full importance rubric for a topic (shared + specific)."""
+    specific = topic.get("importance_rubric_specific", "")
+    return f"{IMPORTANCE_RUBRIC_SHARED}\n{specific}" if specific else IMPORTANCE_RUBRIC_SHARED
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -393,7 +587,6 @@ def _call_llm_proxy(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
     """Call the local Qwen model via llm-proxy. Returns response text."""
-    # Always inject the current date so agents know what "today" means
     date_prefix = _date_context()
     payload: dict[str, Any] = {
         "model": model,
@@ -420,8 +613,8 @@ def _call_pi_p(
     Returns the raw stdout. pi -p needs generous timeouts because the
     local model is slow (sometimes <30 tok/s) and web fetches add latency.
     """
-    cmd = ["pi", "-p", "--provider", "local-llm", "--model", model]
-    # Always inject the current date so agents know what "today" means
+    cmd = ["pi", "-p", "--provider", "local-llm", "--model", model,
+           "--session-dir", str(Path.home() / ".pi/agent/sessions-automated")]
     date_prefix = _date_context()
     full_system = f"{date_prefix}\n\n{append_system}" if append_system else date_prefix
     cmd.extend(["--append-system-prompt", full_system])
@@ -434,7 +627,6 @@ def _call_pi_p(
         timeout=timeout,
         env={**os.environ, "HOME": str(Path.home())},
     )
-    # pi -p outputs to stdout; stderr may have warnings
     if result.returncode != 0 and not result.stdout.strip():
         raise RuntimeError(f"pi -p failed (rc={result.returncode}): {result.stderr[:500]}")
     return result.stdout
@@ -442,7 +634,6 @@ def _call_pi_p(
 
 def _extract_json(text: str, label: str = "output") -> Any:
     """Extract JSON from LLM output. Tries markdown fences first, then raw JSON."""
-    # Try ```json ... ``` fence
     m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
     if m:
         try:
@@ -450,8 +641,6 @@ def _extract_json(text: str, label: str = "output") -> Any:
         except json.JSONDecodeError:
             pass
 
-    # Try to find a JSON object or array in the text
-    # Look for { ... } or [ ... ] at the start or after newlines
     for pattern in [r"\{[\s\S]*\}", r"\[[\s\S]*\]"]:
         m = re.search(pattern, text, re.DOTALL)
         if m:
@@ -460,7 +649,6 @@ def _extract_json(text: str, label: str = "output") -> Any:
             except json.JSONDecodeError:
                 continue
 
-    # Last resort: try the whole text
     text_stripped = text.strip()
     if text_stripped.startswith("{") or text_stripped.startswith("["):
         try:
@@ -469,6 +657,27 @@ def _extract_json(text: str, label: str = "output") -> Any:
             pass
 
     raise ValueError(f"Could not extract JSON from {label}. Raw text (first 500 chars):\n{text[:500]}")
+
+
+def _parse_date(date_str: str | None) -> datetime | None:
+    """Parse a date string into a UTC-aware datetime. Returns None on failure."""
+    if not date_str or not isinstance(date_str, str):
+        return None
+    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%d %H:%M:%S", "%B %d, %Y", "%b %d, %Y"]:
+        try:
+            dt = datetime.strptime(date_str.strip(), fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
+    """Split items into batches of at most `size`."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -485,6 +694,8 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
     if output_path.exists():
         print(f"  [skip] Phase 1 output exists: {output_path}")
         return json.loads(output_path.read_text())
+
+    rubric = _importance_rubric_text(topic)
 
     system_prompt = (
         "You are a research assistant for a daily news digest. Your job is to search "
@@ -504,7 +715,8 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
         '"summary": "1-sentence summary from search result", '
         '"category": "...", "importance": "high|medium|low"}\n\n'
         "Never construct URLs — only use URLs that appeared in web_search results. "
-        "Target 5-8 findings. Be quick — search, compile, output JSON."
+        "Target 5-8 findings. Be quick — search, compile, output JSON.\n\n"
+        f"{rubric}"
     )
 
     def _research_one(angle: dict) -> list[dict]:
@@ -535,23 +747,71 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
 
 
 def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> tuple[list[dict], list[dict]]:
-    """Phase 2: One LLM call judges all research findings against rules.
+    """Phase 2: Python date pre-tagging + batched LLM judge.
 
-    Returns (fresh_findings, recent_findings):
-    - fresh: published in the last 24 hours — goes in the Fresh section
-    - recent: published in the last 2-7 days — candidate for Recent & Relevant
-    - dropped: older than 7 days, bad source, or no substance — rejected
+    1. Python parses date_published → tags each finding as fresh, ongoing, or too_old.
+       too_old findings are dropped without touching the LLM.
+    2. Findings are split into batches of BATCH_SIZE.
+    3. Each batch gets one LLM call with the topic's judgment rules + importance rubric.
+    4. Python merges batch results, handling cross-batch duplicates.
+
+    Returns (fresh_findings, ongoing_findings).
     """
     output_path = run_dir / "02-research-judged.json"
     if output_path.exists():
         print(f"  [skip] Phase 2 output exists: {output_path}")
         data = json.loads(output_path.read_text())
-        return data.get("fresh", []), data.get("recent", [])
+        return data.get("fresh", []), data.get("ongoing", [])
 
     print(f"  [run ] judge_research — {len(findings)} findings to evaluate")
     t0 = time.time()
 
-    findings_json = json.dumps(findings, indent=2)
+    # ── Step 1: Python date pre-tagging ──
+    # Use calendar-date comparison (not exact hours) because most article
+    # dates are date-only strings with no time component. A story dated
+    # "yesterday" could have been published at 23:59 — treating it as fresh
+    # is more conservative than assuming 00:00 and calling it ongoing.
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    ongoing_cutoff_date = today - timedelta(days=5)
+
+    pre_tagged: list[dict] = []
+    too_old_count = 0
+
+    for f in findings:
+        pub_date = _parse_date(f.get("date_published"))
+        if pub_date is None:
+            too_old_count += 1
+            continue
+
+        pub_calendar_date = pub_date.date()
+        if pub_calendar_date >= yesterday:
+            f["date_tag"] = "fresh"
+            pre_tagged.append(f)
+        elif pub_calendar_date >= ongoing_cutoff_date:
+            f["date_tag"] = "ongoing"
+            pre_tagged.append(f)
+        else:
+            too_old_count += 1
+
+    print(f"  Date pre-tag: {sum(1 for f in pre_tagged if f['date_tag'] == 'fresh')} fresh, "
+          f"{sum(1 for f in pre_tagged if f['date_tag'] == 'ongoing')} ongoing, "
+          f"{too_old_count} too_old (dropped)")
+
+    if not pre_tagged:
+        print(f"  [done] judge_research — all findings too old or no date")
+        output = {"fresh": [], "ongoing": [], "rejected": []}
+        output_path.write_text(json.dumps(output, indent=2))
+        return [], []
+
+    # ── Step 2: Batch LLM calls ──
+    rubric = _importance_rubric_text(topic)
+    batches = _batch(pre_tagged, BATCH_SIZE)
+    print(f"  Batched into {len(batches)} LLM call(s) ({BATCH_SIZE}/batch)")
+
+    all_approved: list[dict] = []
+    all_rejected: list[dict] = []
 
     system = (
         "You are a strict editor for a daily news digest. Your job is to filter "
@@ -559,79 +819,151 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         "story included) is worse than a false negative (good story missed).\n\n"
         "You will receive a JSON array of research findings and a set of rules. "
         "For each finding, evaluate it against every rule and output a verdict.\n\n"
-        "Output a JSON object with three arrays wrapped in ```json fences:\n"
+        "Output a JSON object with two arrays wrapped in ```json fences:\n"
         '  {\n'
-        '    "fresh": [<findings for the Fresh section — last 24 hours>],\n'
-        '    "recent": [<findings for Recent & Relevant — last 2-7 days>],\n'
+        '    "approved": [<findings that pass all quality checks>],\n'
         '    "rejected": [{"finding": ..., "reason": "..."}, ...]\n'
         '  }\n'
     )
 
-    user = (
-        f"## Rules\n\n{topic['judgment_rules']}\n\n"
-        f"## Findings to evaluate\n\n{findings_json}\n\n"
-        "Evaluate each finding against every rule. Output the fresh, recent, and "
-        "rejected arrays in ```json fences. Include a clear reason for each rejection."
-    )
+    for batch_idx, batch in enumerate(batches):
+        batch_json = json.dumps(batch, indent=2)
+        user = (
+            f"## Rules\n\n{topic['judgment_rules']}\n\n"
+            f"## Importance Rubric\n\n{rubric}\n\n"
+            f"## Findings to evaluate (batch {batch_idx + 1}/{len(batches)})\n\n"
+            f"{batch_json}\n\n"
+            "Evaluate each finding against every rule. Output the approved and "
+            "rejected arrays in ```json fences. Include a clear reason for each rejection."
+        )
 
-    try:
-        raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
-        result = _extract_json(raw, "judge_research output")
-        fresh = result.get("fresh", [])
-        recent = result.get("recent", [])
-        rejected = result.get("rejected", [])
-        elapsed = time.time() - t0
-        print(f"  [done] judge_research — {len(fresh)} fresh, {len(recent)} recent, {len(rejected)} rejected ({elapsed:.0f}s)")
-        for r in rejected:
-            finding = r.get("finding", {})
-            reason = r.get("reason", "unspecified")
-            print(f"    ✗ {finding.get('title', '?')[:60]}: {reason}")
-    except Exception as e:
-        elapsed = time.time() - t0
-        print(f"  [FAIL] judge_research — {e} ({elapsed:.0f}s), treating all as recent")
-        fresh = []
-        recent = findings
-        rejected = []
+        try:
+            raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
+            result = _extract_json(raw, f"judge_research batch {batch_idx + 1}")
+            batch_approved = result.get("approved", [])
+            batch_rejected = result.get("rejected", [])
+            all_approved.extend(batch_approved)
+            all_rejected.extend(batch_rejected)
+            print(f"  Batch {batch_idx + 1}: {len(batch_approved)} approved, {len(batch_rejected)} rejected")
+        except Exception as e:
+            print(f"  [FAIL] judge_research batch {batch_idx + 1} — {e}, treating all as approved")
+            all_approved.extend(batch)
 
-    output = {"fresh": fresh, "recent": recent, "rejected": rejected}
+    # ── Step 3: Python merge — cross-batch duplicate detection ──
+    seen_urls: set[str] = set()
+    deduped_approved: list[dict] = []
+    dedup_rejected: list[dict] = []
+
+    for f in all_approved:
+        url = f.get("url", "").strip().rstrip("/").lower()
+        if url and url in seen_urls:
+            dedup_rejected.append({"finding": f, "reason": "cross_batch_duplicate"})
+        else:
+            if url:
+                seen_urls.add(url)
+            deduped_approved.append(f)
+
+    if dedup_rejected:
+        print(f"  Cross-batch dedup: removed {len(dedup_rejected)} duplicates")
+
+    # Split by date_tag
+    fresh = [f for f in deduped_approved if f.get("date_tag") == "fresh"]
+    ongoing = [f for f in deduped_approved if f.get("date_tag") == "ongoing"]
+
+    elapsed = time.time() - t0
+    print(f"  [done] judge_research — {len(fresh)} fresh, {len(ongoing)} ongoing, "
+          f"{len(all_rejected) + len(dedup_rejected)} rejected ({elapsed:.0f}s)")
+    for r in all_rejected[:5]:
+        finding = r.get("finding", {})
+        reason = r.get("reason", "unspecified")
+        print(f"    ✗ {finding.get('title', '?')[:60]}: {reason}")
+    if len(all_rejected) > 5:
+        print(f"    ... and {len(all_rejected) - 5} more rejected")
+
+    output = {"fresh": fresh, "ongoing": ongoing, "rejected": all_rejected + dedup_rejected}
     output_path.write_text(json.dumps(output, indent=2))
-    return fresh, recent
+    return fresh, ongoing
 
 
-def phase_3_rank(topic: dict, fresh: list[dict], recent: list[dict], run_dir: Path) -> list[dict]:
-    """Phase 3: Python-side ranking. Tag each finding with its source_verdict,
-    sort fresh by importance (cap at top N), pass recent through.
+def phase_3_rank(
+    topic: dict,
+    fresh: list[dict],
+    ongoing: list[dict],
+    stories_in_flight: dict,
+    run_dir: Path,
+) -> tuple[list[dict], list[dict]]:
+    """Phase 3: Python-side ranking with caps.
 
-    No LLM call — deterministic. Returns combined list.
+    Pool A: Fresh findings
+      - Sort by importance (high → med → low), date_published recency as tiebreaker
+      - Cap: FRESH_CAP (12)
+
+    Pool B: Ongoing articles (2-5 day old articles from Phase 2)
+      - Sort by date_published recency primary, importance as tiebreaker
+      - Cap: ONGOING_CAP (5)
+
+    Pool C: Stories-in-flight — does NOT enter Phase 4
+      - Sort by last_updated descending
+      - Cap: SIF_CAP (3)
+      - Passed directly to Phase 6 with existing summaries + latest_dev fields
+
+    Returns (phase_4_queue, sif_candidates).
+    Phase 4 queue = Pool A + Pool B, with fresh first.
     """
     output_path = run_dir / "03-urls-ranked.json"
     if output_path.exists():
         print(f"  [skip] Phase 3 output exists: {output_path}")
-        return json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text())
+        return data.get("phase_4_queue", []), data.get("sif_candidates", [])
 
-    # Tag each finding with its source verdict
+    importance_order = {"high": 0, "medium": 1, "low": 2}
+
+    # Tag each finding with source_verdict for downstream phases
     for f in fresh:
         f["source_verdict"] = "fresh"
-    for r in recent:
-        r["source_verdict"] = "recent"
+    for o in ongoing:
+        o["source_verdict"] = "ongoing"
 
-    # Rank fresh by importance, cap at 12
-    importance_order = {"high": 0, "medium": 1, "low": 2}
-    ranked_fresh = sorted(fresh, key=lambda f: importance_order.get(f.get("importance", "low"), 2))
-    ranked_fresh = ranked_fresh[:12]
+    # ── Pool A: Fresh findings ──
+    # Sort strategy: stable two-pass. Primary: importance (high→med→low).
+    # Tiebreaker: date_published recency (newer first).
+    pool_a = sorted(fresh, key=lambda f: f.get("date_published", ""), reverse=True)
+    pool_a = sorted(pool_a, key=lambda f: importance_order.get(f.get("importance", "low"), 2))
+    pool_a = pool_a[:FRESH_CAP]
 
-    # Combine: fresh first (ranked), then recent (original order)
-    combined = ranked_fresh + recent
+    # ── Pool B: Ongoing articles ──
+    # Sort strategy: stable two-pass. Primary: date_published recency (newer first).
+    # Tiebreaker: importance (high→med→low).
+    pool_b = sorted(ongoing, key=lambda f: importance_order.get(f.get("importance", "low"), 2))
+    pool_b = sorted(pool_b, key=lambda f: f.get("date_published", ""), reverse=True)
+    pool_b = pool_b[:ONGOING_CAP]
 
-    output_path.write_text(json.dumps(combined, indent=2))
-    print(f"  Phase 3 done: {len(ranked_fresh)} fresh (capped at 12) + {len(recent)} recent = {len(combined)} total")
-    return combined
+    # ── Pool C: Stories-in-flight (bypasses Phase 4) ──
+    active_sif = [s for s in stories_in_flight.get("stories", [])
+                  if s.get("status") == "active"]
+    # Sort by last_updated descending
+    pool_c = sorted(active_sif, key=lambda s: s.get("last_updated", ""), reverse=True)[:SIF_CAP]
+
+    # Phase 4 fetch queue: Pool A (fresh first) + Pool B
+    phase_4_queue = pool_a + pool_b
+
+    output = {
+        "phase_4_queue": phase_4_queue,
+        "sif_candidates": pool_c,
+        "pool_a": pool_a,
+        "pool_b": pool_b,
+    }
+    output_path.write_text(json.dumps(output, indent=2))
+    print(f"  Phase 3 done: Pool A={len(pool_a)} fresh, Pool B={len(pool_b)} ongoing, "
+          f"Pool C={len(pool_c)} SIF (bypass Phase 4) → {len(phase_4_queue)} total for fetch")
+    return phase_4_queue, pool_c
 
 
 def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
     """Phase 4: Fetch each article and write detailed summaries.
 
-    Parallel pi -p calls, each fetching one URL.
+    Fresh stories fetch first (already ordered by Phase 3), then ongoing articles.
+    Total bounded by Phase 3 caps: ≤17 articles (12 fresh + 5 ongoing).
     """
     output_path = run_dir / "04-fetch-summaries.json"
     if output_path.exists():
@@ -658,7 +990,8 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
         url = finding.get("url", "")
         title = finding.get("title", "unknown")
         label = f"fetch:{title[:50]}"
-        print(f"  [run ] {label}")
+        source = finding.get("source_verdict", "?")
+        print(f"  [run ] [{source}] {label}")
         t0 = time.time()
         prompt = (
             f"Fetch this article: {url}\n\n"
@@ -682,12 +1015,13 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
                     "date_confirmed": "", "author": ""}
 
     results: list[dict] = []
+    # Findings are already ordered fresh-first by Phase 3
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_FETCH) as pool:
         futures = {pool.submit(_fetch_one, f): f for f in findings}
         for future in as_completed(futures):
             results.append(future.result())
 
-    # Preserve original order
+    # Preserve original order (fresh first, then ongoing)
     url_order = {f.get("url"): i for i, f in enumerate(findings)}
     results.sort(key=lambda r: url_order.get(r.get("url"), 999))
 
@@ -698,16 +1032,16 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
 
 
 def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -> list[dict]:
-    """Phase 5: Judge summary accuracy and faithfulness.
+    """Phase 5: Batched LLM judge of summary accuracy and faithfulness.
 
-    One LLM call reviews all summaries and flags issues.
+    Splits summaries into batches of BATCH_SIZE (8-10) per LLM call.
+    Python merges results.
     """
     output_path = run_dir / "05-summaries-judged.json"
     if output_path.exists():
         print(f"  [skip] Phase 5 output exists: {output_path}")
         return json.loads(output_path.read_text())
 
-    # Only judge successful fetches
     to_judge = [s for s in summaries if s.get("fetch_success", True)]
     failed = [s for s in summaries if not s.get("fetch_success", True)]
 
@@ -718,7 +1052,8 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     print(f"  [run ] judge_summaries — {len(to_judge)} summaries to evaluate")
     t0 = time.time()
 
-    summaries_json = json.dumps(to_judge, indent=2)
+    batches = _batch(to_judge, BATCH_SIZE)
+    print(f"  Batched into {len(batches)} LLM call(s) ({BATCH_SIZE}/batch)")
 
     system = (
         "You are a strict editor verifying AI-written summaries. You receive article "
@@ -742,115 +1077,140 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
         "numbers, or concrete claims are likely hallucinated — drop them."
     )
 
-    user = (
-        f"## Summaries to judge\n\n{summaries_json}\n\n"
-        "Judge each summary. Output a JSON array of judgments in ```json fences. "
-        "Err on the side of dropping questionable summaries."
-    )
+    all_judgments: list[dict] = []
 
-    try:
-        raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
-        judgments = _extract_json(raw, "judge_summaries output")
-        if not isinstance(judgments, list):
-            judgments = [judgments]
+    for batch_idx, batch in enumerate(batches):
+        batch_json = json.dumps(batch, indent=2)
+        user = (
+            f"## Summaries to judge (batch {batch_idx + 1}/{len(batches)})\n\n"
+            f"{batch_json}\n\n"
+            "Judge each summary. Output a JSON array of judgments in ```json fences. "
+            "Err on the side of dropping questionable summaries."
+        )
 
-        # Apply judgments
-        judged_map = {j.get("url", ""): j for j in judgments}
-        results = []
-        for s in summaries:
-            url = s.get("url", "")
-            j = judged_map.get(url, {})
-            verdict = j.get("verdict", "keep")
-            if s.get("fetch_success") is False:
-                verdict = "drop"
-            if verdict == "fix" and j.get("fixed_summary"):
-                s["summary"] = j["fixed_summary"]
-            s["judge_verdict"] = verdict
-            s["judge_issues"] = j.get("issues", [])
-            results.append(s)
+        try:
+            raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
+            judgments = _extract_json(raw, f"judge_summaries batch {batch_idx + 1}")
+            if not isinstance(judgments, list):
+                judgments = [judgments]
+            all_judgments.extend(judgments)
+            print(f"  Batch {batch_idx + 1}: {len(judgments)} judgments received")
+        except Exception as e:
+            print(f"  [FAIL] judge_summaries batch {batch_idx + 1} — {e}, keeping all in batch")
+            for s in batch:
+                all_judgments.append({"url": s.get("url", ""), "verdict": "keep", "issues": [], "fixed_summary": ""})
 
-        kept = sum(1 for r in results if r.get("judge_verdict") == "keep")
-        fixed = sum(1 for r in results if r.get("judge_verdict") == "fix")
-        dropped = sum(1 for r in results if r.get("judge_verdict") == "drop")
-        elapsed = time.time() - t0
-        print(f"  [done] judge_summaries — {kept} keep, {fixed} fix, {dropped} drop ({elapsed:.0f}s)")
-        for r in results:
-            if r.get("judge_verdict") in ("fix", "drop"):
-                issues = "; ".join(r.get("judge_issues", ["unspecified"]))
-                print(f"    {r['judge_verdict']} {r.get('title', '?')[:60]}: {issues[:120]}")
-    except Exception as e:
-        elapsed = time.time() - t0
-        print(f"  [FAIL] judge_summaries — {e} ({elapsed:.0f}s), keeping all summaries")
-        for s in summaries:
-            s.setdefault("judge_verdict", "keep")
-            s.setdefault("judge_issues", [])
-        results = summaries
+    # Apply judgments
+    judged_map = {j.get("url", ""): j for j in all_judgments}
+    results = []
+    for s in summaries:
+        url = s.get("url", "")
+        j = judged_map.get(url, {})
+        verdict = j.get("verdict", "keep")
+        if s.get("fetch_success") is False:
+            verdict = "drop"
+        if verdict == "fix" and j.get("fixed_summary"):
+            s["summary"] = j["fixed_summary"]
+        s["judge_verdict"] = verdict
+        s["judge_issues"] = j.get("issues", [])
+        results.append(s)
+
+    kept = sum(1 for r in results if r.get("judge_verdict") == "keep")
+    fixed = sum(1 for r in results if r.get("judge_verdict") == "fix")
+    dropped = sum(1 for r in results if r.get("judge_verdict") == "drop")
+    elapsed = time.time() - t0
+    print(f"  [done] judge_summaries — {kept} keep, {fixed} fix, {dropped} drop ({elapsed:.0f}s)")
+    for r in results:
+        if r.get("judge_verdict") in ("fix", "drop"):
+            issues = "; ".join(r.get("judge_issues", ["unspecified"]))
+            print(f"    {r['judge_verdict']} {r.get('title', '?')[:60]}: {issues[:120]}")
 
     output_path.write_text(json.dumps(results, indent=2))
     return results
 
 
-def phase_6_curate(topic: dict, summaries: list[dict], run_dir: Path,
-                   stories_in_flight: dict) -> tuple[list[dict], dict, list[dict]]:
-    """Phase 6: Curate — dedupe, cross-reference, rank, flag gaps, build Recent & Relevant.
+def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict],
+                   stories_in_flight: dict, run_dir: Path) -> tuple[list[dict], dict, list[dict]]:
+    """Phase 6: Curate — split into 6a (Python prep), 6b (LLM editorial), 6c (Python validate).
 
-    Returns (fresh_stories, updated_stories_in_flight, recent_stories).
+    Returns (fresh_stories, updated_stories_in_flight, ongoing_stories).
     """
     output_path = run_dir / "06-curated.json"
     if output_path.exists():
         print(f"  [skip] Phase 6 output exists: {output_path}")
         data = json.loads(output_path.read_text())
-        return data["fresh"], data.get("stories_in_flight", stories_in_flight), data["recent"]
+        return data["fresh"], data.get("stories_in_flight", stories_in_flight), data["ongoing"]
 
     kept = [s for s in summaries if s.get("judge_verdict") in ("keep", "fix")]
     dropped = [s for s in summaries if s.get("judge_verdict") == "drop"]
 
-    # Separate by source_verdict from Phase 2
+    # ── 6a: Python prep ──
     fresh_candidates = [s for s in kept if s.get("source_verdict") == "fresh"]
-    recent_candidates = [s for s in kept if s.get("source_verdict") == "recent"]
+    ongoing_candidates = [s for s in kept if s.get("source_verdict") == "ongoing"]
 
-    print(f"  [run ] curate — {len(fresh_candidates)} fresh candidates, "
-          f"{len(recent_candidates)} recent candidates, {len(dropped)} dropped")
+    # Deduplicate by URL within each pool
+    def _dedup_by_url(items: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        result: list[dict] = []
+        for item in items:
+            url = item.get("url", "").strip().rstrip("/").lower()
+            if url and url not in seen:
+                seen.add(url)
+                result.append(item)
+        return result
+
+    fresh_candidates = _dedup_by_url(fresh_candidates)
+    ongoing_candidates = _dedup_by_url(ongoing_candidates)
+
+    # Pre-rank by importance + recency, cap to top 15 for the LLM
+    importance_order = {"high": 0, "medium": 1, "low": 2}
+    ranked_candidates = sorted(
+        fresh_candidates + ongoing_candidates,
+        key=lambda s: (
+            importance_order.get(s.get("importance", "low"), 2),
+            s.get("date_published", "9999-99-99"),
+        )
+    )[:15]
+
+    print(f"  [6a prep] {len(fresh_candidates)} fresh, {len(ongoing_candidates)} ongoing, "
+          f"{len(sif_candidates)} SIF → {len(ranked_candidates)} capped for LLM")
+
+    # ── 6b: LLM editorial ──
     t0 = time.time()
+    rubric = _importance_rubric_text(topic)
 
-    kept_json = json.dumps(kept, indent=2)
-    fresh_json = json.dumps(fresh_candidates, indent=2)
-    recent_json = json.dumps(recent_candidates, indent=2)
-    sif_json = json.dumps(stories_in_flight, indent=2)
+    candidates_json = json.dumps(ranked_candidates, indent=2)
+    sif_json = json.dumps(sif_candidates, indent=2)
+    tracker_json = json.dumps(stories_in_flight, indent=2)
 
     system = (
-        "You are the lead editor of a daily news digest. You receive two pools of "
-        "vetted article summaries and a 'stories-in-flight' tracker of evolving "
-        "stories from previous days. Your job is to curate the final story selection.\n\n"
-        "The summaries are tagged with 'source_verdict': 'fresh' (last 24 hours) or "
-        "'recent' (last 2-7 days). Fresh candidates go primarily in the Fresh section. "
-        "Recent candidates join stories-in-flight as candidates for the Recent & "
-        "Relevant section.\n\n"
+        "You are the lead editor of a daily news digest. You receive vetted article "
+        "summaries and a 'stories-in-flight' tracker of evolving stories from previous "
+        "days. Your job is to curate the final story selection.\n\n"
         "Tasks:\n"
-        "1. DEDUPLICATE: If two summaries cover the same underlying story, merge them "
-        "(keep the best summary, note the other URL as related).\n"
-        "2. CROSS-REFERENCE: Identify connections between stories (e.g. 'the HN "
-        "discussion of the TechCrunch article above'). Add a 'related_to' field.\n"
-        "3. RANK BY IMPACT: Assign a final rank (1 = most important). 5-7 fresh "
-        "stories for the main section, ordered by importance.\n"
+        "1. CROSS-REFERENCE: Identify connections between fresh articles and stories "
+        "already in the tracker. If today's findings add meaningful new developments "
+        "to a tracker story, update its 'latest_dev' and set 'last_updated' to today's "
+        "date (YYYY-MM-DD) — this resets the auto-cool clock.\n"
+        "2. UPDATE TRACKER: Adjust 'importance' on tracker entries as stories evolve "
+        "(e.g. diplomatic spat → military confrontation → escalate to high; resolved "
+        "story → cool to low). You may set status to 'cooled' if a story has definitively "
+        "resolved (e.g. bill signed, trial verdict, product shipped). Otherwise leave "
+        "status as-is — the system auto-cools stories with no updates after 5 days and "
+        "auto-prunes cooled stories after 10 days total.\n"
+        "3. ADD NEW TRACKER ENTRIES: Major announcements, unfolding events, controversies, "
+        "multi-day stories should be added to the tracker. Each needs: title, url, first_seen "
+        "(today), last_updated (today), latest_dev (1-sentence summary of what's new), "
+        "status: 'active', importance: high/medium/low (default medium), category.\n"
         "4. FLAG GAPS: What important story might be missing? Add a 'gaps' note.\n"
-        "5. UPDATE STORIES-IN-FLIGHT: For each story already in the tracker, check if\n"
-        "today's findings add meaningful new developments. If so, update the story's\n"
-        "'latest_dev' and set 'last_updated' to today's date (YYYY-MM-DD) — this\n"
-        "resets the auto-cool clock and keeps the story active.\n\n"
-        "You may manually set status to 'cooled' if a story has definitively resolved\n"
-        "(e.g. a bill was signed into law, a trial reached a verdict, a product shipped).\n"
-        "Otherwise, leave the status as-is — the system auto-cools stories with no\n"
-        "updates after 7 days and auto-prunes cooled stories after 14 days.\n\n"
-        "Add NEW evolving stories to the tracker: major announcements, unfolding events,\n"
-        "controversies, multi-day stories. Each needs: title, url, first_seen (today),\n"
-        "last_updated (today), latest_dev (1-sentence summary of what's new today),\n"
-        "status: 'active', category.\n"
-        "6. BUILD RECENT & RELEVANT: Select 2-3 stories from the updated tracker with\n"
-        "status 'active' (not 'cooled') for the 'Recent & Relevant' section. For each,\n"
-        "include a WHY line explaining what changed or why it's still relevant.\n"
-        "Recent stories should be DIFFERENT from the fresh stories above — they are\n"
-        "ongoing narratives, not today's headlines.\n\n"
+        "5. WRITE INTRO HOOK: 2-3 sentence editorial intro setting the tone.\n"
+        "6. SELECT FINAL LINEUP: 5-7 fresh stories + 2-3 ongoing from the stories-in-flight "
+        "tracker (NOT from the candidates — those are separate). The ongoing stories should "
+        "be DIFFERENT from the fresh stories — they are ongoing narratives, not today's headlines.\n"
+        "CRITICAL: Candidates have a 'source_verdict' field ('fresh' = today/yesterday, "
+        "'ongoing' = 2-5 days old). Prefer 'source_verdict: fresh' candidates for the "
+        "Fresh section. Only use 'source_verdict: ongoing' candidates if there aren't "
+        "enough fresh ones — and even then, drop the oldest ones first.\n\n"
         "Output a JSON object wrapped in ```json fences with this structure:\n"
         '  {\n'
         '    "fresh": [\n'
@@ -859,7 +1219,7 @@ def phase_6_curate(topic: dict, summaries: list[dict], run_dir: Path,
         '       "related_urls": ["..."]},\n'
         '      ...\n'
         '    ],\n'
-        '    "recent": [\n'
+        '    "ongoing": [\n'
         '      {"title": "...", "url": "...", "category": "...",\n'
         '       "summary": "1-2 sentences (what the story IS, not what changed)",\n'
         '       "why_still_relevant": "what changed or why it matters now"},\n'
@@ -870,9 +1230,9 @@ def phase_6_curate(topic: dict, summaries: list[dict], run_dir: Path,
         '    "intro_hook": "2-3 sentence editorial intro for the email"\n'
         '  }\n\n'
         "Keep summaries tight — these are read on mobile. Prioritize substance over hype.\n"
-        "IMPORTANT: Recent & Relevant stories must be DIFFERENT from Fresh stories. "
-        "Fresh = today's news. Recent = ongoing narratives from earlier days in the tracker. "
-        "Do not put the same story in both sections."
+        "IMPORTANT: Ongoing stories must use URLs from the stories-in-flight tracker, "
+        "NOT from today's candidates. Ongoing = narratives from earlier days. "
+        "Fresh = today's news. Do not put the same story in both sections."
     )
 
     dropped_json = json.dumps(
@@ -881,49 +1241,86 @@ def phase_6_curate(topic: dict, summaries: list[dict], run_dir: Path,
         indent=2)
 
     user = (
-        f"## Fresh Candidates (last 24 hours — for the Fresh section)\n\n{fresh_json}\n\n"
-        f"## Recent Candidates (last 2-7 days — use alongside stories-in-flight for Recent & Relevant)\n\n{recent_json}\n\n"
+        f"## Fresh/Ongoing Candidates (for the Fresh section)\n\n{candidates_json}\n\n"
+        f"## Stories In Flight — Active Candidates (for Ongoing section)\n\n{sif_json}\n\n"
+        f"## Full Stories In Flight Tracker (update this)\n\n{tracker_json}\n\n"
+        f"## Importance Rubric\n\n{rubric}\n\n"
         f"## Dropped Summaries (for reference, do not include)\n\n"
         f"{dropped_json}\n\n"
-        f"## Stories In Flight (from previous days)\n\n{sif_json}\n\n"
         "Curate the final selection. Fresh candidates go in the Fresh section. "
-        "Recent candidates and stories-in-flight go in the Recent & Relevant section. "
+        "Stories-in-flight go in the Ongoing section. "
+        "Update the tracker with new developments and new entries. "
         "Output the JSON object in ```json fences."
     )
 
     try:
         raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
         result = _extract_json(raw, "curate output")
+
+        # ── 6c: Python validate ──
         fresh = result.get("fresh", kept[:7])
-        recent = result.get("recent", [])
+        ongoing = result.get("ongoing", [])
         updated_sif = result.get("stories_in_flight", stories_in_flight)
         gaps = result.get("gaps", "")
         intro = result.get("intro_hook", "")
+
+        # Validate URLs against source data — build the set of known URLs
+        known_urls: set[str] = set()
+        for c in ranked_candidates:
+            u = c.get("url", "").strip().rstrip("/").lower()
+            if u:
+                known_urls.add(u)
+        for s in sif_candidates:
+            u = s.get("url", "").strip().rstrip("/").lower()
+            if u:
+                known_urls.add(u)
+
+        # Check fresh stories' URLs
+        validated_fresh = []
+        for f in fresh:
+            url = f.get("url", "").strip().rstrip("/").lower()
+            if url in known_urls or not url:
+                validated_fresh.append(f)
+            else:
+                print(f"  [6c validate] Dropped hallucinated URL from fresh: {f.get('title', '?')[:60]}")
+
+        # Check ongoing stories' URLs
+        validated_ongoing = []
+        for o in ongoing:
+            url = o.get("url", "").strip().rstrip("/").lower()
+            if url in known_urls or not url:
+                validated_ongoing.append(o)
+            else:
+                print(f"  [6c validate] Dropped hallucinated URL from ongoing: {o.get('title', '?')[:60]}")
+
+        fresh = validated_fresh or fresh  # fall back to unvalidated if all were dropped
+        ongoing = validated_ongoing or ongoing
+
         elapsed = time.time() - t0
-        print(f"  [done] curate — {len(fresh)} fresh, {len(recent)} recent ({elapsed:.0f}s)")
+        print(f"  [done] curate — {len(fresh)} fresh, {len(ongoing)} ongoing ({elapsed:.0f}s)")
         if gaps:
             print(f"    Gaps: {gaps[:200]}")
     except Exception as e:
         elapsed = time.time() - t0
         print(f"  [FAIL] curate — {e} ({elapsed:.0f}s), using raw summaries")
         fresh = kept[:7]
-        recent = []
+        ongoing = []
         updated_sif = stories_in_flight
         intro = ""
+        gaps = ""
 
-    # Attach intro to output for Phase 7
     output = {
         "fresh": fresh,
-        "recent": recent,
+        "ongoing": ongoing,
         "stories_in_flight": updated_sif,
         "intro_hook": intro,
-        "gaps": gaps if 'gaps' in dir() else "",
+        "gaps": gaps,
     }
     output_path.write_text(json.dumps(output, indent=2))
-    return fresh, updated_sif, recent
+    return fresh, updated_sif, ongoing
 
 
-def phase_7_write(topic: dict, fresh: list[dict], recent: list[dict],
+def phase_7_write(topic: dict, fresh: list[dict], ongoing: list[dict],
                   intro_hook: str, run_dir: Path) -> str:
     """Phase 7: Write the HTML email.
 
@@ -934,7 +1331,7 @@ def phase_7_write(topic: dict, fresh: list[dict], recent: list[dict],
         print(f"  [skip] Phase 7 output exists: {output_path}")
         return output_path.read_text()
 
-    print(f"  [run ] write_html — {len(fresh)} fresh, {len(recent)} recent")
+    print(f"  [run ] write_html — {len(fresh)} fresh, {len(ongoing)} ongoing")
     t0 = time.time()
 
     template = TEMPLATE_PATH.read_text()
@@ -944,7 +1341,7 @@ def phase_7_write(topic: dict, fresh: list[dict], recent: list[dict],
     html = template.replace("{{DIGEST_TITLE}}", topic["title"])
     html = html.replace("{{DATE}}", today_str)
 
-    curated_json = json.dumps({"fresh": fresh, "recent": recent}, indent=2)
+    curated_json = json.dumps({"fresh": fresh, "ongoing": ongoing}, indent=2)
 
     system = (
         "You are an HTML email writer for a daily digest. You receive curated story "
@@ -953,7 +1350,7 @@ def phase_7_write(topic: dict, fresh: list[dict], recent: list[dict],
         "CRITICAL RULES:\n"
         "- Every story link must use the exact URL provided — do not alter, guess, or construct URLs.\n"
         "- Use the EXACT story block HTML from the template comments for each story.\n"
-        "- For Recent & Relevant stories, include the WHY line variant with the purple italic text.\n"
+        "- For Ongoing stories, include the WHY line variant with the purple italic text.\n"
         "- Keep summaries concise (2-3 sentences max). These are read on mobile.\n"
         "- Do not add any stories beyond what's in the curated data.\n"
         "- Do not modify the template structure, styling, or layout.\n"
@@ -968,13 +1365,12 @@ def phase_7_write(topic: dict, fresh: list[dict], recent: list[dict],
     user = (
         f"## Intro\n{intro_hook or default_intro}\n\n"
         f"## Fresh Stories (use the standard story block for each)\n{curated_json}\n\n"
-        f"## HTML Template (fill {{INTRO}}, {{FRESH_STORIES}}, {{RECENT_STORIES}})\n\n{html}\n\n"
+        f"## HTML Template (fill {{INTRO}}, {{FRESH_STORIES}}, {{ONGOING_STORIES}})\n\n{html}\n\n"
         "Fill the placeholders with the curated stories. Output the complete HTML document."
     )
 
     try:
         raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
-        # The model should output the complete HTML. Strip any markdown fences.
         html_output = re.sub(r"^```html?\s*\n?", "", raw.strip())
         html_output = re.sub(r"\n?```\s*$", "", html_output)
         elapsed = time.time() - t0
@@ -995,14 +1391,11 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    # Write HTML to temp file for send_digest.py
     temp_html = digest_dir / ".daily_digest.html"
     temp_html.write_text(html)
 
-    # Send email
     recipients = topic["recipients"].copy()
 
-    # For agentic-platform, add the second recipient from .smtp_config
     if topic["category"] == "agentic-platform":
         smtp_config = Path.home() / "scripts" / ".smtp_config"
         if smtp_config.exists():
@@ -1029,23 +1422,20 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     except subprocess.CalledProcessError as e:
         print(f"  [FAIL] send_email — {e.stderr[:300]}")
 
-    # Archive HTML
     archive_path = digest_dir / f"{today_str}.html"
     shutil.copy(temp_html, archive_path)
     print(f"  [done] archived HTML → {archive_path}")
 
-    # Write updated stories-in-flight
     sif_path = digest_dir / "stories-in-flight.json"
     sif_path.write_text(json.dumps(stories_in_flight, indent=2))
     print(f"  [done] stories-in-flight updated")
 
-    # Save curated.json into digest dir for future reference
     curated_src = run_dir / "06-curated.json"
     if curated_src.exists():
         shutil.copy(curated_src, run_dir / "curated_copy.json")
 
 
-def phase_9_summary(topic: dict, fresh: list[dict], recent: list[dict],
+def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
                     run_dir: Path, digest_dir: Path) -> None:
     """Phase 9: Write the .md summary for future dedup.
 
@@ -1062,7 +1452,7 @@ def phase_9_summary(topic: dict, fresh: list[dict], recent: list[dict],
     t0 = time.time()
 
     fresh_json = json.dumps(fresh, indent=2)
-    recent_json = json.dumps(recent, indent=2)
+    ongoing_json = json.dumps(ongoing, indent=2)
 
     system = (
         "You are writing a concise markdown summary of today's email digest for "
@@ -1076,19 +1466,18 @@ def phase_9_summary(topic: dict, fresh: list[dict], recent: list[dict],
         "## Fresh\n"
         "- [Story title](URL) — one-line summary\n"
         "- [Story title](URL) — one-line summary\n\n"
-        "## Recent & Relevant\n"
+        "## Ongoing\n"
         "- [Story title](URL) — one-line summary (why still relevant)\n\n"
         "## Coverage Gaps\n"
         "- Any notable stories or angles that were missed today\n\n"
         "IMPORTANT: Every story MUST include its URL as a markdown link `[title](URL)`. "
         "This is used by the dedup system in future runs. Never omit the URL.\n\n"
         f"## Fresh Stories Data\n\n{fresh_json}\n\n"
-        f"## Recent Stories Data\n\n{recent_json}"
+        f"## Ongoing Stories Data\n\n{ongoing_json}"
     )
 
     try:
         raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
-        # Clean up any markdown fences
         md_output = re.sub(r"^```(?:markdown)?\s*\n?", "", raw.strip())
         md_output = re.sub(r"\n?```\s*$", "", md_output)
         output_path.write_text(md_output + "\n")
@@ -1107,12 +1496,11 @@ def phase_9_summary(topic: dict, fresh: list[dict], recent: list[dict],
         for s in fresh[:10]:
             lines.append(f"- [{s.get('title', '?')}]({s.get('url', '#')}) — {s.get('summary', '')[:100]}")
         lines.append("")
-        lines.append("## Recent & Relevant")
-        for s in recent[:5]:
+        lines.append("## Ongoing")
+        for s in ongoing[:5]:
             lines.append(f"- [{s.get('title', '?')}]({s.get('url', '#')}) — {s.get('summary', '')[:100]}")
         output_path.write_text("\n".join(lines) + "\n")
 
-    # Copy to digest root dir for cross-run dedup
     if output_path.exists():
         shutil.copy(output_path, digest_md_path)
 
@@ -1121,9 +1509,11 @@ def phase_9_summary(topic: dict, fresh: list[dict], recent: list[dict],
 # Stories-in-flight management
 # ═══════════════════════════════════════════════════════════════════════════
 
-# ── Stories-in-flight pruning ──────────────────────────────────────────────
-COOL_AFTER_DAYS = 7    # auto-set status to "cooled" if no updates in 7 days
-PRUNE_AFTER_DAYS = 14  # remove cooled stories entirely after 14 days
+def _ensure_importance(s: dict) -> dict:
+    """Add default 'importance' field to a story-in-flight entry if missing."""
+    if "importance" not in s:
+        s["importance"] = "medium"
+    return s
 
 
 def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
@@ -1131,8 +1521,7 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
 
     Two rules (Python-side, not LLM-dependent):
     1. AUTO-COOL: Any story with status "active" and last_updated older than
-       COOL_AFTER_DAYS → set status to "cooled". This removes it from the
-       "Recent & Relevant" candidate pool.
+       COOL_AFTER_DAYS → set status to "cooled". Removes from Ongoing pool.
     2. AUTO-PRUNE: Any story with status "cooled" and last_updated older than
        PRUNE_AFTER_DAYS → remove from the tracker entirely.
 
@@ -1155,12 +1544,13 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
     auto_pruned = 0
 
     for s in stories:
-        # Parse last_updated date
+        # Ensure importance field exists (schema migration)
+        _ensure_importance(s)
+
         last_str = s.get("last_updated", "")
         try:
             last_date = datetime.strptime(last_str, "%Y-%m-%d").date()
         except (ValueError, TypeError):
-            # Can't parse date — keep it but flag
             s["status"] = "cooled"
             auto_cooled += 1
             kept.append(s)
@@ -1198,7 +1588,6 @@ def cleanup_old_artifacts(digest_dir: Path, max_age_days: int = 14):
     for child in digest_dir.iterdir():
         if child.is_dir() and child.name != "stories-in-flight":
             try:
-                # Parse date from dir name (YYYY-MM-DD)
                 date = datetime.strptime(child.name, "%Y-%m-%d").replace(tzinfo=timezone.utc)
                 if date < cutoff:
                     shutil.rmtree(child)
@@ -1245,43 +1634,43 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         findings = phase_1_research(topic, run_dir)
         if not findings:
             print("  WARNING: No research findings. Digest will be empty.")
-            # Continue anyway — later phases handle empty input
 
-        # Phase 2: Judge Research
+        # Phase 2: Judge Research (batched + date pre-tag)
         print("\n── Phase 2: Judge Research ──")
         if findings:
-            fresh_findings, recent_findings = phase_2_judge_research(topic, findings, run_dir)
+            fresh_findings, ongoing_findings = phase_2_judge_research(topic, findings, run_dir)
         else:
-            fresh_findings, recent_findings = [], []
+            fresh_findings, ongoing_findings = [], []
 
-        # Phase 3: Rank URLs (combines fresh + recent, tags each with source_verdict)
+        # Phase 3: Rank URLs (Pools A/B/C with caps)
         print("\n── Phase 3: Rank URLs ──")
-        if fresh_findings or recent_findings:
-            ranked = phase_3_rank(topic, fresh_findings, recent_findings, run_dir)
+        if fresh_findings or ongoing_findings:
+            phase_4_queue, sif_candidates = phase_3_rank(
+                topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir)
         else:
-            ranked = []
+            phase_4_queue, sif_candidates = [], []
 
-        # Phase 4: Fetch + Summarize
+        # Phase 4: Fetch + Summarize (fresh first, then ongoing, ≤17 total)
         print("\n── Phase 4: Fetch & Summarize ──")
-        if ranked:
-            summaries = phase_4_fetch(topic, ranked, run_dir)
+        if phase_4_queue:
+            summaries = phase_4_fetch(topic, phase_4_queue, run_dir)
         else:
             summaries = []
 
-        # Phase 5: Judge Summaries
+        # Phase 5: Judge Summaries (batched)
         print("\n── Phase 5: Judge Summaries ──")
         if summaries:
             judged = phase_5_judge_summaries(topic, summaries, run_dir)
         else:
             judged = []
 
-        # Phase 6: Curate
+        # Phase 6: Curate (6a prep → 6b LLM → 6c validate)
         print("\n── Phase 6: Curate ──")
         if judged:
-            fresh, stories_in_flight, recent = phase_6_curate(
-                topic, judged, run_dir, stories_in_flight)
+            fresh, stories_in_flight, ongoing = phase_6_curate(
+                topic, judged, sif_candidates, stories_in_flight, run_dir)
         else:
-            fresh, recent = [], []
+            fresh, ongoing = [], []
 
         # Phase 7: Write
         print("\n── Phase 7: Write HTML ──")
@@ -1289,9 +1678,8 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             if (run_dir / "06-curated.json").exists() else {}
         intro_hook = curated_data.get("intro_hook", "")
         if fresh:
-            html = phase_7_write(topic, fresh, recent, intro_hook, run_dir)
+            html = phase_7_write(topic, fresh, ongoing, intro_hook, run_dir)
         else:
-            # Minimal fallback HTML
             html = (
                 f'<html><body><h1>{topic["title"]}</h1>'
                 f'<p>{today_str}</p><p>No stories found today.</p></body></html>'
@@ -1302,12 +1690,10 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         print("\n── Phase 8: Send & Archive ──")
         if dry_run:
             print("  [skip] DRY RUN — skipping email send")
-            # Still archive locally
             today_str = datetime.now().strftime("%Y-%m-%d")
             archive_path = digest_dir / f"{today_str}.html"
             shutil.copy(run_dir / "digest.html", archive_path)
             print(f"  [done] archived HTML → {archive_path}")
-            # Still update stories-in-flight
             sif_path = digest_dir / "stories-in-flight.json"
             sif_path.write_text(json.dumps(stories_in_flight, indent=2))
             print(f"  [done] stories-in-flight updated")
@@ -1316,7 +1702,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
 
         # Phase 9: Summary
         print("\n── Phase 9: Summary ──")
-        phase_9_summary(topic, fresh, recent, run_dir, digest_dir)
+        phase_9_summary(topic, fresh, ongoing, run_dir, digest_dir)
 
     except Exception as e:
         print(f"\n  FATAL: {e}")

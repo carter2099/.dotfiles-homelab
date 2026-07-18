@@ -1,9 +1,9 @@
 [Unit]
-Description=Run all 4 daily email digests sequentially
+Description=Run all 5 daily email digests sequentially
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/home/carter/scripts/run_all_digests.sh
-TimeoutStartSec=14400
+TimeoutStartSec=21600
