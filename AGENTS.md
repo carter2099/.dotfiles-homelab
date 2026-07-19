@@ -198,7 +198,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ### Homelab Backup (Go)
 - Go service at `~/homelab-backup/`; daily 03:00 UTC via systemd user timer `homelab-backup.{service,.timer}`. Dest: Cloudflare R2 bucket `homelab-backup`; local archives in `~/backups/`.
-- 22 targets in `~/homelab-backup/config.yaml`: app content + DBs, FreshRSS, Open WebUI (db only), k3s/backup config, **secrets** (rails master.keys, open-webui/.env, cloudflare/dependabot/llm-proxy/pi-web/searxng envs, smtp config — **unencrypted in R2 by design**), host `/etc` (netplan/k3s/ufw via `ExecStartPre=pre-collect.sh` + sudo), and a package manifest. R2 creds via `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` (`~/homelab-backup/.env`, not in the bucket).
+- 23 targets in `~/homelab-backup/config.yaml`: app content + DBs, FreshRSS, Open WebUI (db only), k3s/backup config, **secrets** (rails master.keys, open-webui/.env, cloudflare/dependabot/llm-proxy/pi-web/searxng envs, smtp config — **unencrypted in R2 by design**), host `/etc` (netplan/k3s/ufw via `ExecStartPre=pre-collect.sh` + sudo), and a package manifest. R2 creds via `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` (`~/homelab-backup/.env`, not in the bucket).
 - `OnFailure=homelab-backup-notify.service` **emails Carter the journal tail on failure** (failure-only; SMTP via `~/scripts/send_digest.py`).
 - Subcommands: `run [--local-only]`, `list` (R2 objects — no aws CLI on host), `verify <archive>` (integrity_check every DB), `latest <dest>` (newest R2 download). Restore playbook: `~/homelab-backup/RESTORE.md`.
 - **Monthly restore drill:** `homelab-backup-restore-drill.timer` (1st, 12:00 UTC) downloads the newest R2 backup, runs `verify`, emails PASS/FAIL.
@@ -216,7 +216,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ### Hyperliquid SDK Maintenance (systemd timer)
 - Runs Mon/Thu at 4:00 AM ET via systemd user timer (`hyperliquid-sdk.service`/`.timer`, `OnCalendar` uses `America/New_York` so it shifts with DST: 08:00 UTC summer / 09:00 UTC winter — the only timer that's ET-locked rather than UTC-locked)
-- Spawns `pi -p --model opencode-go/qwen3.7-max` executing the `hyperliquid-run` skill
+- Spawns `pi -p --model opencode-go/glm-5.2` executing the `hyperliquid-run` skill
 - Script: `~/scripts/run_hyperliquid_sdk.sh`; timeout: 30 min
 
 ### Open WebUI (Homelab Chat)
