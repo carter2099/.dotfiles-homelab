@@ -60,6 +60,112 @@ FETCH_TIMEOUT = 900                          # 15 min per article fetch
 MAX_PARALLEL_RESEARCH = 1   # llama.cpp is single-request; keep sequential
 MAX_PARALLEL_FETCH = 1
 
+# ── Search Health Monitoring ──────────────────────────────────────────────
+SEARXNG_URL = "http://localhost:8080"
+HEALTH_LOG_PATH = DIGESTS_DIR / ".search-health.log"
+MAX_ENGINE_ERRORS_BEFORE_HALT = 100  # per-engine suspended errors in 1h
+MIN_WORKING_ENGINES = 2               # minimum engines returning results
+
+
+def check_search_health(label: str = "") -> dict[str, Any]:
+    """Check SearXNG health and return a status dict.
+
+    Performs a test search and checks engine config. Returns:
+        {
+            "ok": True/False,
+            "results": count,
+            "engines_working": [names],
+            "engines_suspended": [(name, reason), ...],
+            "recent_errors": count (1h),
+            "recommendation": "ok" | "warn" | "halt",
+        }
+    """
+    status: dict[str, Any] = {
+        "ok": False, "results": 0, "engines_working": [],
+        "engines_suspended": [], "recent_errors": 0,
+        "recommendation": "ok", "label": label,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        # 1. Test search
+        resp = requests.get(
+            f"{SEARXNG_URL}/search",
+            params={"q": "test news today", "format": "json", "language": "en"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])
+        status["results"] = len(results)
+
+        engines_seen: set[str] = set()
+        for r in results:
+            engines_seen.add(r.get("engine", "?"))
+        status["engines_working"] = sorted(engines_seen)
+
+        unresponsive = data.get("unresponsive_engines", [])
+        status["engines_suspended"] = [
+            {"engine": e[0], "reason": e[1]} for e in unresponsive
+        ]
+
+        # 2. Check engine config for enabled general/web engines
+        cfg_resp = requests.get(f"{SEARXNG_URL}/config?format=json", timeout=10)
+        cfg = cfg_resp.json()
+        enabled_general = 0
+        for e in cfg.get("engines", []):
+            cats = e.get("categories", [])
+            if ("general" in cats or "web" in cats) and e.get("enabled"):
+                enabled_general += 1
+        status["enabled_general_engines"] = enabled_general
+
+        # 3. Check recent SearXNG errors via docker logs (fast grep)
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "searxng", "--since", "1h"],
+                capture_output=True, text=True, timeout=10,
+            )
+            error_count = result.stdout.count("ERROR:searx.engines")
+            status["recent_errors"] = error_count
+        except Exception:
+            status["recent_errors"] = -1  # couldn't check
+
+        # 4. Determine recommendation
+        working_count = len(status["engines_working"])
+        suspended_count = len(status["engines_suspended"])
+
+        if working_count == 0 or (working_count < MIN_WORKING_ENGINES and suspended_count > 3):
+            status["recommendation"] = "halt"
+            status["ok"] = False
+        elif suspended_count >= 3 or status.get("recent_errors", 0) > MAX_ENGINE_ERRORS_BEFORE_HALT:
+            status["recommendation"] = "warn"
+            status["ok"] = True
+        else:
+            status["recommendation"] = "ok"
+            status["ok"] = True
+
+    except Exception as e:
+        status["error"] = str(e)[:200]
+        status["recommendation"] = "warn"
+        status["ok"] = False
+
+    # 5. Log to health file
+    try:
+        with open(HEALTH_LOG_PATH, "a") as f:
+            f.write(json.dumps(status) + "\n")
+    except Exception:
+        pass
+
+    # 6. Print summary
+    emoji = {"ok": "✓", "warn": "⚠", "halt": "✕"}.get(status["recommendation"], "?")
+    print(f"  [health:{label}] {emoji} {status['results']} results from "
+          f"{status['engines_working']} | "
+          f"{len(status['engines_suspended'])} suspended | "
+          f"{status.get('recent_errors', '?')} errors/1h | "
+          f"rec: {status['recommendation']}")
+
+    return status
+
 # ── Batching ───────────────────────────────────────────────────────────────
 BATCH_SIZE = 10  # findings/summaries per LLM call in phases 2 and 5
 
@@ -729,10 +835,15 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
             findings = _extract_json(raw, f"{label} output")
             elapsed = time.time() - t0
             print(f"  [done] {label} — {len(findings)} findings in {elapsed:.0f}s")
+            # Check search health after each angle
+            h = check_search_health(f"after-{angle['id']}")
+            if h.get("recommendation") == "halt":
+                print(f"  *** HALT during {label}: search health critical ***")
             return findings
         except Exception as e:
             elapsed = time.time() - t0
             print(f"  [FAIL] {label} — {e} ({elapsed:.0f}s)")
+            check_search_health(f"fail-{angle['id']}")
             return []
 
     findings: list[dict] = []
@@ -740,6 +851,12 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
         futures = {pool.submit(_research_one, a): a for a in topic["research_angles"]}
         for future in as_completed(futures):
             findings.extend(future.result())
+
+    # Filter out non-dict artifacts (LLMs sometimes produce stray strings)
+    artifacts = [f for f in findings if not isinstance(f, dict)]
+    findings = [f for f in findings if isinstance(f, dict)]
+    if artifacts:
+        print(f"  Filtered {len(artifacts)} non-dict artifact(s): {artifacts}")
 
     output_path.write_text(json.dumps(findings, indent=2))
     print(f"  Phase 1 done: {len(findings)} total findings")
@@ -1637,7 +1754,14 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     try:
         # Phase 1: Research
         print("\n── Phase 1: Research ──")
+        check_search_health("pre-phase1")
         findings = phase_1_research(topic, run_dir)
+        health = check_search_health("post-phase1")
+        if health.get("recommendation") == "halt":
+            print("  *** HALT: Search engine health critical. Stopping digest. ***")
+            print(f"  Working engines: {health.get('engines_working')}")
+            print(f"  Suspended: {health.get('engines_suspended')}")
+            sys.exit(2)
         if not findings:
             print("  WARNING: No research findings. Digest will be empty.")
 
@@ -1658,6 +1782,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
 
         # Phase 4: Fetch + Summarize (fresh first, then ongoing, ≤17 total)
         print("\n── Phase 4: Fetch & Summarize ──")
+        check_search_health("pre-phase4")
         if phase_4_queue:
             summaries = phase_4_fetch(topic, phase_4_queue, run_dir)
         else:

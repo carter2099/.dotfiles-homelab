@@ -1,12 +1,12 @@
 {
-  "lastChangelogVersion": "0.79.7",
+  "lastChangelogVersion": "0.80.10",
   "theme": "one-dark",
   "defaultProvider": "opencode-go",
   "defaultModel": "deepseek-v4-pro",
   "defaultThinkingLevel": "high",
   "packages": [
     "npm:@juicesharp/rpiv-web-tools",
-    "../../dev/pi-go-bars",
-    "npm:@nehlis/pi-effort"
+    "npm:@nehlis/pi-effort",
+    "../../dev/pi-omp-coder"
   ]
 }
