@@ -314,7 +314,7 @@ ls ~/digests/steward/$(date +%Y-%m-%d)/            # latest run artifacts
 This homelab runs an **always-on pi-web agent** accessible from any browser at `https://pi.carter2099.com`. It runs `pi-web` (installed via `npm install -g @jmfederico/pi-web`) as two systemd user services with `loginctl enable-linger` so they survive reboots. It is **intentionally full-privilege** (no command denylist, no `NoNewPrivileges`); the trust anchor is **Cloudflare Access**.
 
 - **Services:** `pi-web-sessiond.service` (session daemon) + `pi-web.service` (web/API at `127.0.0.1:8504`). **Loopback-only bind on purpose** — the sole ingress is the CF tunnel; it is NOT reachable on the LAN (so there's no path that bypasses Cloudflare Access).
-- **Access URL:** `https://pi.carter2099.com` (browser → CF Access SSO → pi-web UI). The old `opencode.carter2099.com` hostname also routes to the same service.
+- **Access URL:** `https://pi.carter2099.com` (browser → CF Access SSO → pi-web UI). The old `opencode.carter2099.com` hostname was removed as it is no longer in DNS or tunnel ingress.
 - **Auth:** Cloudflare Access (identity gate at the CF edge) — unauthenticated requests get a 302 to `carter2099.cloudflareaccess.com` and never reach the host. Policy is managed in the CF Zero Trust dashboard. No secondary password layer.
 - **Routing:** direct-tunnel pattern — tunnel ingress `pi.carter2099.com → http://localhost:8504` (cloudflared runs on the host and reaches loopback). No k3s manifest, no ExternalService/Endpoints, no Traefik hop. DNS: proxied CNAME `pi` → `<tunnel-id>.cfargotunnel.com`.
 - **Config:** `~/.config/pi-web/config.json` (host, port, allowedHosts).
