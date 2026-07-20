@@ -11,3 +11,8 @@ k3s/middleware/auth/
 .config/opencode-go-proxy/
 
 dev/
+# steward session noise
+scripts/__pycache__/
+scripts/.smtp_config
+scripts/.claude-digests-backup/
+.config/systemd/user/*.wants/
