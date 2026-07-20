@@ -268,7 +268,7 @@ All five digests run sequentially via a single systemd timer to avoid conflicts 
 | Topic | Category dir | Recipients |
 |---|---|---|
 | AI & tech | `ai-tech/` | carter2099@pm.me |
-| Agentic platforms | `agentic-platform/` | carter2099@pm.me + CC from `~/.scripts/.smtp_config` |
+| Agentic platforms | `agentic-platform/` | carter2099@pm.me + CC from `~/scripts/.smtp_config` |
 | AI hardware | `ai-hardware/` | carter2099@pm.me |
 | Gaming | `gaming-digest/` | carter2099@pm.me |
 | World / U.S. events | `world-digest/` | carter2099@pm.me |
@@ -277,7 +277,7 @@ All five digests run sequentially via a single systemd timer to avoid conflicts 
 
 - `~/scripts/digest_runner.py` — 9-phase orchestrator (topic configs in `TOPICS` dict)
 - `~/scripts/run_all_digests.sh` — sequential wrapper for all 5 topics
-- `~/scripts/send_digest.py` — SMTP sender (reads `~/.scripts/.smtp_config`)
+- `~/scripts/send_digest.py` — SMTP sender (reads `~/scripts/.smtp_config`)
 - `~/digests/template.html` — shared HTML template
 - `~/.config/systemd/user/digests-daily.{service,timer}` — systemd units
 
