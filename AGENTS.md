@@ -249,21 +249,19 @@ Five daily HTML email digests produced by a **deterministic 9-phase Python workf
 
 ### Schedule
 
-All four run sequentially via a single systemd timer to avoid conflicts with gaming (the llm-proxy kills the LLM when gaming is detected).
+All five digests run sequentially via a single systemd timer to avoid conflicts with gaming (the llm-proxy kills the LLM when gaming is detected).
 
 | Timer | Fires (UTC) | Fires (ET) |
 |---|---|---|
 | `homelab-backup` | 03:00 | 11:00 PM (prev. day) |
-| `update-check` | 05:00 | 1:00 AM |
+| `homelab-backup-restore-drill` | 12:00 (1st of month) | 8:00 AM (1st of month) |
+| `homelab-steward` | 05:00 | 1:00 AM |
 | `digests-daily` | 08:00 | 4:00 AM |
 | `hyperliquid-sdk` | 08:00/09:00 Mon/Thu¹ | 4:00 AM Mon/Thu |
-| `agents-md-audit` | 08:00 Sat | 4:00 AM Sat |
 
 ¹ `hyperliquid-sdk` is the one ET-locked timer; all others are UTC-locked (stable year-round).
 
 `digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` per topic in order: **ai-tech → agentic-platform → ai-hardware → gaming → world**. Total runtime ~3–3.5 hours, done by ~7:30 AM ET. The old per-topic timers and `run_<topic>_digest.sh` scripts are **disabled/unused**.
-
-**`agents-md-audit`** (weekly, `agents-md-audit.timer`) truth-checks this very file against the live host and emails Carter a PASS/DRIFT/UNVERIFIABLE report with proposed edits — report-only, never modifies files or touches git. Runs on the cloud `opencode-go/deepseek-v4-pro` model so it does not contend with the local-LLM digests. Script: `~/scripts/run_agents_md_audit.sh`. Apply proposed fixes by asking an interactive agent (or just say "apply the latest agents-md-audit").
 
 ### Topics
 
@@ -289,9 +287,11 @@ python3 ~/scripts/digest_runner.py ai-tech --dry-run    # single topic, skip ema
 bash ~/scripts/run_all_digests.sh                     # run all topics
 ```
 
-## Homelab Update Agent
+## Homelab Steward
 
-Nightly maintenance at **1:00 AM ET** (05:00 UTC) via `update-check.timer`. The agent is a **deterministic Python orchestrator** (`~/scripts/update_runner.py`) — zero LLM in the loop. **Phase-by-phase architecture, the auto-apply scope table, rollback procedure, and debugging live in [`~/notes/homelab/homelab-update-agent.md`](notes/homelab/homelab-update-agent.md).** The safety rules below stay here because they govern any maintainer doing apt/Docker work, not just the nightly run.
+Nightly maintenance at **1:00 AM ET** (05:00 UTC) via `homelab-steward.timer`. The steward is a deterministic Python orchestrator (`~/scripts/steward_runner.py`) cloned from `digest_runner.py` mechanics, replacing both `update-check` and `agents-md-audit`. Every agent step is reviewed by an independent llm-as-judge pass (dsv4-pro), evidence-grounded. **Phase-by-phase architecture, the work queue, executor mechanics, budget guard, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md).** The safety rules below stay here because they govern any maintainer doing apt/Docker work, not just the nightly run.
+
+**Phases (P0–P9):** P0 setup+guard (budget snapshot, dependabot in-flight check) · P1 update apply (apt, Docker, cloudflared, k3s, open-webui bump) · P2 validate (docker ps, k3s pods, endpoint curls, X-Fallback) · P3 rollback (conditional: pi-web/tunnel unhealthy → downgrade) · P4 heartbeat (failed units, LLM stack, backup recency, disk, TLS, ddns) · P5 work queue (ideas/plans scan, consistency checks, pick next plan) · P6 executor (≤1 approved plan/night, dsv4-pro driver + kimi-k3 via `delegate_omp` for coding, post-impl review, monthly cap) · P7 audit (7 nightly sections, collector→delta-gate→worker→judge) · P8 render+send (structured data → pure-Python HTML → `send_digest.py`) · P9 archive (summary .md, `.runs.jsonl`).
 
 ### Safety rules
 
@@ -304,10 +304,10 @@ Nightly maintenance at **1:00 AM ET** (05:00 UTC) via `update-check.timer`. The 
 - Rollback is status-code-driven, not LLM-judgment-driven: reversion fires on pi-web or tunnel unhealthy after auto-apply. SMTP is Docker-independent (`send_digest.py` talks to the mail server directly), so the failure-red email still goes out even if Docker is down.
 
 ```bash
-python3 ~/scripts/update_runner.py --dry-run      # skip mutations + email, still audit + archive
-python3 ~/scripts/update_runner.py --resume      # resume (skip phases w/ existing artifacts)
-systemctl --user status update-check.timer
-ls ~/digests/updates/$(date +%Y-%m-%d)/          # latest run artifacts
+python3 ~/scripts/steward_runner.py --dry-run      # skip mutations + email, still audit + archive
+python3 ~/scripts/steward_runner.py --resume      # resume (skip phases w/ existing artifacts)
+systemctl --user status homelab-steward.timer
+ls ~/digests/steward/$(date +%Y-%m-%d)/            # latest run artifacts
 ```
 
 ## Remote Agent Operations
@@ -446,7 +446,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 
 - [`local-llm-gaming-rig.md`](notes/homelab/local-llm-gaming-rig.md) — llm-proxy / llama-swap topology, models, env vars, troubleshooting
 - [`email-digests.md`](notes/homelab/email-digests.md) — 9-phase digest workflow, stories-in-flight, audit/debug
-- [`homelab-update-agent.md`](notes/homelab/homelab-update-agent.md) — update-runner phases, auto-apply scope, rollback, debugging
+- [`homelab-steward.md`](notes/homelab/homelab-steward.md) — steward phases, work queue, executor, budget guard, debugging
 - [`homelab-backup.md`](notes/homelab/homelab-backup.md) — 22-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 
 Grep the vault (`rg -l "term" ~/notes/`) before starting work on a known topic; the `~/notes/INDEX.md` lists all formal notes.

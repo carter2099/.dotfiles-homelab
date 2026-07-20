@@ -1,0 +1,10 @@
+[Unit]
+Description=Homelab steward — nightly orchestrator (updates, audit, work queue, executor)
+Wants=network-online.target
+After=network-online.target
+OnFailure=homelab-steward-notify.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/carter/scripts/steward_runner.py
+TimeoutStartSec=7200

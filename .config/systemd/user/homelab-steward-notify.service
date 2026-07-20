@@ -1,0 +1,8 @@
+[Unit]
+Description=Email failure notification for homelab-steward
+After=homelab-steward.service
+# Triggered by homelab-steward.service OnFailure=
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/steward-notify-failure.sh
