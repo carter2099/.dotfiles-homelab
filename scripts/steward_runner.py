@@ -31,7 +31,7 @@ K3S = "/usr/local/bin/k3s"
 GH_API = "https://api.github.com/repos/open-webui/open-webui/releases/latest"
 OPENWEBUI_COMPOSE = HOME / "open-webui" / "docker-compose.yml"
 DIGEST_SCRIPT = HOME / "scripts" / "send_digest.py"
-SESSION_DIR = HOME / ".pi" / "agent" / "sessions-automated"
+SESSION_DIR = HOME / ".omp" / "agent" / "sessions-automated"
 IDEAS_DIR = HOME / "ideas"
 PLANS_DIR = HOME / "plans"
 AUTO_PKGS = [
@@ -46,8 +46,6 @@ ENDPOINTS = {
     "llm-proxy": "http://127.0.0.1:8081/health",
 }
 STEWARD_MODEL = "opencode-go/deepseek-v4-pro"
-K3_MODEL = "opencode-go/kimi-k3"
-OMP_DELEGATE_EXT = HOME / "dev" / "pi-omp-coder" / "extensions" / "omp-delegate.ts"
 PROXY_HEALTH = "http://localhost:8082/health"
 GUARD_ROLLING_DEFER = 90
 GUARD_SKIP = 90
@@ -56,6 +54,7 @@ EXECUTOR_MONTHLY_CAP = 4
 MAX_WORKERS = 3
 EXECUTOR_TIMEOUT = 2700
 EXECUTOR_MODE = "execute"
+PENDING_PATH = HOME / "agent-state" / "pending.md"
 
 # ── default template ─────────────────────────────────────────────────
 
@@ -74,8 +73,7 @@ DEFAULT_TEMPLATE = """<!DOCTYPE html>
 <p style="margin:6px 0 0; color:#a0a0b8; font-size:14px;">{{DATE}}</p></td></tr>
 <tr><td style="padding:24px 32px 16px;">
 <p style="margin:0; color:#444; font-size:15px; line-height:1.6;">{{TLDR}}</p></td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-{{ROLLBACK}}
+{{TROUBLESHOOT}}
 <tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#2e7d32; font-size:15px; font-weight:700;">Updates Applied</h2></td></tr>
 <tr><td style="padding:8px 32px 16px;">{{UPDATES}}</td></tr>
 <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
@@ -209,11 +207,12 @@ def _date_context():
     )
 
 
-def _call_pi_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
-    """Call pi -p (headless text mode). Returns stdout."""
+def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
+    """Call omp -p (headless text mode). Returns stdout."""
     cmd = [
-        "pi", "-p", "--model", model,
+        "omp", "-p", "--model", model,
         "--session-dir", str(SESSION_DIR),
+        "--allow-home",
     ]
     if append_system:
         cmd.extend(["--append-system-prompt", append_system])
@@ -228,7 +227,7 @@ def _call_pi_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
     )
     if result.returncode != 0 and not result.stdout.strip():
         raise RuntimeError(
-            f"pi -p failed (rc={result.returncode}): {result.stderr[:500]}"
+            f"omp -p failed (rc={result.returncode}): {result.stderr[:500]}"
         )
     return result.stdout
 
@@ -292,11 +291,12 @@ def extract_from_ndjson(stdout):
     return "".join(accumulated), stats
 
 
-def _call_pi_p_json(prompt, timeout=EXECUTOR_TIMEOUT, extra_args=None):
-    """Call pi -p in --mode json. Returns (accumulated_text, stats, packet, raw_stdout)."""
+def _call_omp_p_json(prompt, timeout=EXECUTOR_TIMEOUT, extra_args=None):
+    """Call omp -p in --mode json. Returns (accumulated_text, stats, packet, raw_stdout)."""
     cmd = [
-        "pi", "-p", "--model", STEWARD_MODEL, "--mode", "json",
+        "omp", "-p", "--model", STEWARD_MODEL, "--mode", "json",
         "--session-dir", str(SESSION_DIR),
+        "--allow-home",
     ]
     if extra_args:
         cmd.extend(extra_args)
@@ -311,7 +311,7 @@ def _call_pi_p_json(prompt, timeout=EXECUTOR_TIMEOUT, extra_args=None):
     )
     if result.returncode != 0 and not result.stdout.strip():
         raise RuntimeError(
-            f"pi -p json failed (rc={result.returncode}): {result.stderr[:500]}"
+            f"omp -p json failed (rc={result.returncode}): {result.stderr[:500]}"
         )
 
     text, stats = extract_from_ndjson(result.stdout)
@@ -339,6 +339,47 @@ def _load_prev_artifact(run_dir, prev_date_str, name):
             return None
     return None
 
+
+
+def _reboot_if_needed(run_dir, phase_label, dry_run=False):
+    """Check /var/run/reboot-required. If present and not dry-run, write pending.md and reboot.
+
+    Returns True if a reboot was triggered (caller should exit after this).
+    """
+    REBOOT_FLAG = Path("/var/run/reboot-required")
+    if not REBOOT_FLAG.exists():
+        return False
+
+    if dry_run:
+        print(f"  [reboot] DRY RUN — /var/run/reboot-required exists (would reboot)")
+        return False
+
+    print(f"  [reboot] /var/run/reboot-required detected — writing pending.md and rebooting")
+
+    # Write pending.md with full context for boot-time resume
+    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pending_content = f"""# Pending Task — {now_ts}
+**Reason:** Kernel update requires reboot after steward {phase_label}
+**Action:** Run `python3 ~/scripts/steward_runner.py --resume` to continue
+**Run dir:** {run_dir}
+**Completed phases:** through {phase_label}
+**Context:** The homelab steward was mid-run when a kernel update (or other
+/var/run/reboot-required trigger) was detected. On resume, the steward will
+pick up from the next phase in {run_dir}.
+"""
+    PENDING_PATH.write_text(pending_content)
+    print(f"  [reboot] wrote {PENDING_PATH}")
+
+    try:
+        run(["sudo", "systemctl", "reboot"], capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"  [reboot] reboot command failed: {e}")
+        return False
+
+    # If we get here, reboot was accepted — but Python may continue briefly.
+    # The caller should still exit.
+    return True
 
 # ── P0: setup ────────────────────────────────────────────────────────
 
@@ -694,14 +735,19 @@ def phase_2_validate(run_dir):
     return data
 
 
-# ── P3: rollback (ported from update_runner) ─────────────────────────
+# ── P3: troubleshoot ─────────────────────────────────────────────────
 
 
-def phase_3_rollback(run_dir, dry_run=False):
-    """Phase 3: auto-rollback if pi-web is unhealthy after Phase 1 auto-apply."""
+def phase_3_troubleshoot(run_dir, dry_run=False):
+    """Phase 3: spawn omp troubleshooting agent if pi-web is unhealthy after P1 auto-apply.
+
+    Instead of deterministic rollback, we spawn a deepseek-v4-pro agent with full system
+    access to diagnose and fix the issue on the new versions. If the agent can't fix it,
+    the failure is reported — we stay on the new versions and let Carter handle it.
+    """
     if dry_run:
-        print("[P3] DRY RUN — skipping rollback")
-        write_json(run_dir / "03-rollback.json", {"triggered": False, "dry_run": True})
+        print("[P3] DRY RUN — skipping troubleshooting agent")
+        write_json(run_dir / "03-troubleshoot.json", {"triggered": False, "dry_run": True})
         return
 
     validation_path = run_dir / "02-validation.json"
@@ -720,6 +766,7 @@ def phase_3_rollback(run_dir, dry_run=False):
 
     if pi_web_ok:
         print("[P3] skipped — pi-web healthy")
+        write_json(run_dir / "03-troubleshoot.json", {"triggered": False, "reason": "healthy"})
         return
 
     auto_steps = [s for s in applied.get("steps", [])
@@ -729,60 +776,80 @@ def phase_3_rollback(run_dir, dry_run=False):
 
     if not auto_steps and not owu_step:
         print("[P3] skipped — no packages were actually upgraded")
-        write_json(run_dir / "03-rollback.json",
+        write_json(run_dir / "03-troubleshoot.json",
                    {"triggered": False, "reason": "no_mutations", "validation_failed": True})
         return
 
-    print("[P3] ROLLBACK TRIGGERED — pi-web unhealthy after auto-apply")
-    reverted = []
-    rollback_ok = True
+    print("[P3] TROUBLESHOOT — pi-web unhealthy after auto-apply, spawning diagnostic agent")
 
-    for s in auto_steps:
-        pkg = s["step"].replace("auto_", "")
-        pre_ver = s.get("pre_version")
-        if pre_ver:
-            print(f"  reverting {pkg} -> {pre_ver}")
-            try:
-                run(["sudo", "apt", "install", f"{pkg}={pre_ver}", "--allow-downgrades", "-y"],
-                    capture_output=True, text=True)
-                reverted.append(f"{pkg} -> {pre_ver}")
-            except subprocess.CalledProcessError as e:
-                rollback_ok = False
-                reverted.append(f"{pkg} FAILED: {e}")
+    # Gather full diagnostic context
+    diag = {
+        "applied_steps": applied.get("steps", []),
+        "validation": {c["name"]: c.get("status", "?") for c in validation.get("checks", [])},
+        "containers": run_capture(
+            ["docker", "ps", "-a", "--format", "{{.Names}} {{.Status}} {{.Image}}"]),
+        "docker_journal": run_capture(
+            ["sudo", "journalctl", "-u", "docker", "--since", "30 min ago",
+             "--no-pager", "-n", "80"]),
+        "pi_web_journal": run_capture(
+            ["journalctl", "--user", "-u", "pi-web", "--since", "30 min ago",
+             "--no-pager", "-n", "50"], env=user_env()),
+        "pi_web_sessiond_journal": run_capture(
+            ["journalctl", "--user", "-u", "pi-web-sessiond", "--since", "30 min ago",
+             "--no-pager", "-n", "50"], env=user_env()),
+    }
 
-    for s in owu_step:
-        old_tag = s.get("current_tag")
-        new_tag = s.get("latest_tag")
-        if old_tag and new_tag and OPENWEBUI_COMPOSE.exists():
-            print(f"  reverting open-webui: {new_tag} -> {old_tag}")
-            compose_text = OPENWEBUI_COMPOSE.read_text()
-            new_compose = compose_text.replace(
-                f"ghcr.io/open-webui/open-webui:{new_tag}",
-                f"ghcr.io/open-webui/open-webui:{old_tag}",
-            )
-            OPENWEBUI_COMPOSE.write_text(new_compose)
-            try:
-                run(["docker", "compose", "-f", str(OPENWEBUI_COMPOSE), "pull"],
-                    cwd=OPENWEBUI_COMPOSE.parent, capture_output=True, text=True)
-                run(["docker", "compose", "-f", str(OPENWEBUI_COMPOSE), "up", "-d"],
-                    cwd=OPENWEBUI_COMPOSE.parent, capture_output=True, text=True)
-                reverted.append(f"open-webui {new_tag} -> {old_tag}")
-            except subprocess.CalledProcessError as e:
-                rollback_ok = False
-                reverted.append(f"open-webui FAILED: {e}")
+    troubleshoot_prompt = f"""
+You are a homelab troubleshooter. The nightly steward auto-applied updates and now
+pi-web (the always-on remote agent at pi.carter2099.com) is DOWN or unhealthy.
 
-    if reverted:
-        try:
-            run(["sudo", "systemctl", "restart", "docker"], capture_output=True, text=True)
-        except subprocess.CalledProcessError:
-            pass
-        time.sleep(30)
-        try:
-            run(["sudo", "systemctl", "restart", "cloudflared"], capture_output=True, text=True)
-        except subprocess.CalledProcessError:
-            pass
-        time.sleep(10)
+Your job: diagnose WHY it's down and FIX IT so we stay on the new versions.
+Rolling back is a LAST RESORT — prefer fixing forward.
 
+WHAT CHANGED (P1 applied steps):
+{json.dumps(diag["applied_steps"], indent=2)}
+
+VALIDATION RESULTS:
+{json.dumps(diag["validation"], indent=2)}
+
+DIAGNOSTICS:
+- Containers:
+{diag["containers"]}
+- Docker journal:
+{diag["docker_journal"]}
+- pi-web journal:
+{diag["pi_web_journal"]}
+- pi-web-sessiond journal:
+{diag["pi_web_sessiond_journal"]}
+
+RULES:
+- You have full system access — use it.
+- Common causes: orphaned docker-proxy holding a port (check ss -tlnp), docker daemon
+  failed to restart after engine upgrade, cloudflared tunnel down, pi-web config mismatch,
+  sessiond crash.
+- Export XDG_RUNTIME_DIR=/run/user/$(id -u) before any systemctl --user commands.
+- If the fix is restarting a service, do it. If it's killing a docker-proxy, do it.
+- If you genuinely cannot fix it, say so clearly and explain why.
+
+Return a fenced ```json packet:
+{{"status": "fixed"|"partial"|"failed",
+ "diagnosis": "root cause in one sentence",
+ "actions_taken": ["action 1", "action 2"],
+ "pi_web_healthy": true|false,
+ "remaining_issues": ["..."]}}
+"""
+
+    agent_output = ""
+    agent_packet = {}
+    try:
+        agent_output = _call_omp_p(troubleshoot_prompt, timeout=600)
+        agent_packet = _extract_json(agent_output, "troubleshoot packet")
+    except Exception as e:
+        agent_packet = {"status": "agent-failed", "diagnosis": str(e),
+                        "actions_taken": [], "pi_web_healthy": False,
+                        "remaining_issues": []}
+
+    # Re-validate after agent
     re_validation = phase_2_validate(run_dir)
     write_json(run_dir / "02b-validation.json", re_validation)
 
@@ -793,26 +860,23 @@ def phase_3_rollback(run_dir, dry_run=False):
 
     data = {
         "triggered": True,
-        "status": "healthy" if pi_web_now else "failed",
-        "reverted": reverted,
+        "agent_status": agent_packet.get("status", "unknown"),
+        "diagnosis": agent_packet.get("diagnosis", ""),
+        "actions_taken": agent_packet.get("actions_taken", []),
+        "pi_web_healthy": pi_web_now,
+        "remaining_issues": agent_packet.get("remaining_issues", []),
+        "agent_raw": agent_output[:4000],
         "re_validation_healthy": pi_web_now,
     }
     if not pi_web_now:
-        data["diagnostics"] = {
+        data["final_diagnostics"] = {
             "containers": run_capture(
                 ["docker", "ps", "-a", "--format", "{{.Names}} {{.Status}} {{.Image}}"]),
-            "docker_journal": run_capture(
-                ["sudo", "journalctl", "-u", "docker", "--since", "10 min ago",
-                 "--no-pager", "-n", "50"]),
         }
-    write_json(run_dir / "03-rollback.json", data)
-    print(f"[P3] done -> {run_dir / '03-rollback.json'} (status: {data['status']})")
+    write_json(run_dir / "03-troubleshoot.json", data)
+    print(f"[P3] done -> {run_dir / '03-troubleshoot.json'} "
+          f"(agent: {agent_packet.get('status')}, pi-web: {'healthy' if pi_web_now else 'still down'})")
     return data
-
-
-# ── P4: heartbeat (extended) ─────────────────────────────────────────
-
-
 def phase_4_heartbeat(run_dir):
     """Phase 4: extended heartbeat block."""
     print("[P4] heartbeat checks")
@@ -1221,8 +1285,7 @@ CRITICAL RULES:
 - Run the repo's test suite before committing
 - Commit + push to main branch
 - Deploy via release.sh ONLY if the plan says `deploy: true` (check the plan metadata)
-- Use delegate_omp(model='{K3_MODEL}') for all non-trivial coding tasks
-- Update AGENTS.md + ~/notes/ if the plan changes units, ports, schedules, or structure
+- Use omp's task tool to fan out parallel implementation work
 - End your response with a fenced ```json packet:
   {{"status": "success"|"partial"|"failed",
     "summary": "...",
@@ -1242,15 +1305,9 @@ LIVE MODE: Commit and push to main. Deploy if deploy:true. Full execution.
 
     full_prompt = context_contract + "\n\n--- PLAN ---\n\n" + plan_content
 
-    extra_args = [
-        "-e", str(OMP_DELEGATE_EXT),
-        "--tools", "bash,read,write,edit,grep,find,ls,delegate_omp",
-    ]
-
-    print(f"  spawning executor agent (timeout={EXECUTOR_TIMEOUT}s, mode={EXECUTOR_MODE})")
+    extra_args = []
     try:
-        raw_text, stats, packet, raw_ndjson = _call_pi_p_json(
-            full_prompt, timeout=EXECUTOR_TIMEOUT, extra_args=extra_args
+        raw_text, stats, packet, raw_ndjson = _call_omp_p_json(
         )
     except Exception as e:
         print(f"  EXECUTOR FAILED: {e}")
@@ -1287,7 +1344,7 @@ Return a fenced ```json packet:
  "findings": [{{"criterion": "...", "met": true|false, "evidence_cited": "...", "your_assessment": "..."}}]}}
 """
     try:
-        review_text = _call_pi_p(review_prompt, timeout=300)
+        review_text = _call_omp_p(review_prompt, timeout=300)
         review_packet = _extract_json(review_text, "review packet")
     except Exception as e:
         review_packet = {"verdict": "fail", "findings": [],
@@ -1702,7 +1759,7 @@ COLLECTED EVIDENCE:
 {json.dumps(evidence, indent=2, default=str)[:8000]}
 """
     try:
-        worker_text = _call_pi_p(worker_prompt, timeout=section["timeout"])
+        worker_text = _call_omp_p(worker_prompt, timeout=section["timeout"])
         worker_packet = _extract_json(worker_text, f"worker-{section_name}")
     except Exception as e:
         return {
@@ -1732,7 +1789,7 @@ Return a fenced ```json packet:
  "rejected": [{{"claim": "...", "reason": "..."}}]}}
 """
     try:
-        judge_text = _call_pi_p(judge_prompt, timeout=section["timeout"])
+        judge_text = _call_omp_p(judge_prompt, timeout=section["timeout"])
         judge_packet = _extract_json(judge_text, f"judge-{section_name}")
     except Exception as e:
         judge_packet = {
@@ -2152,7 +2209,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     # Load all phase data
     applied = read_json(run_dir / "01-applied.json") if (run_dir / "01-applied.json").exists() else {"steps": []}
     validation = read_json(run_dir / "02-validation.json") if (run_dir / "02-validation.json").exists() else {"checks": []}
-    rollback = read_json(run_dir / "03-rollback.json") if (run_dir / "03-rollback.json").exists() else None
+    troubleshoot = read_json(run_dir / "03-troubleshoot.json") if (run_dir / "03-troubleshoot.json").exists() else None
     heartbeat = read_json(run_dir / "04-heartbeat.json") if (run_dir / "04-heartbeat.json").exists() else {}
     queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
     executor = read_json(run_dir / "06-executor.json") if (run_dir / "06-executor.json").exists() else {}
@@ -2191,30 +2248,38 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         tldr += (f'<br><span style="color:#c62828; font-weight:700;">'
                  f'⚠ Phase failures: {", ".join(phase_failures)}</span>')
 
-    # Rollback section
-    rollback_html = ""
-    if rollback and rollback.get("triggered"):
-        rb_status = rollback.get("status", "unknown")
-        if rb_status == "healthy":
-            rollback_html = (
-                '<tr><td style="padding:16px 32px 8px;">'
-                '<h2 style="margin:0; color:#e65100; font-size:15px; font-weight:700;">Rollback Triggered</h2>'
-                '</td></tr>'
-                '<tr><td style="padding:8px 32px 16px;">'
-                '<p style="margin:0; color:#e65100; font-size:13px;">Updates reverted — services healthy.</p>'
-                '</td></tr>'
-                '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
-            )
+    # Troubleshoot section
+    troubleshoot_html = ""
+    if troubleshoot and troubleshoot.get("triggered"):
+        ts_status = troubleshoot.get("agent_status", "unknown")
+        pi_web_ok = troubleshoot.get("pi_web_healthy", False)
+        diagnosis = troubleshoot.get("diagnosis", "")
+        actions = troubleshoot.get("actions_taken", [])
+        if pi_web_ok:
+            badge = '<span style="color:#2e7d32; font-weight:700;">FIXED</span>'
+            color = "#2e7d32"
+        elif ts_status == "fixed":
+            badge = '<span style="color:#2e7d32; font-weight:700;">FIXED</span>'
+            color = "#2e7d32"
+        elif ts_status == "partial":
+            badge = '<span style="color:#e65100; font-weight:700;">PARTIAL</span>'
+            color = "#e65100"
         else:
-            rollback_html = (
-                '<tr><td style="padding:16px 32px 8px;">'
-                '<h2 style="margin:0; color:#c62828; font-size:15px; font-weight:700;">ROLLBACK FAILED</h2>'
-                '</td></tr>'
-                '<tr><td style="padding:8px 32px 16px;">'
-                '<p style="margin:0; color:#c62828; font-size:13px;">Rollback did not restore health — investigate.</p>'
-                '</td></tr>'
-                '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
-            )
+            badge = '<span style="color:#c62828; font-weight:700;">FAILED</span>'
+            color = "#c62828"
+        actions_html = "".join(f"<li>{a}</li>" for a in actions)
+        troubleshoot_html = (
+            '<tr><td style="padding:16px 32px 8px;">'
+            f'<h2 style="margin:0; color:{color}; font-size:15px; font-weight:700;">'
+            f'Troubleshooting Agent {badge}</h2>'
+            '</td></tr>'
+            '<tr><td style="padding:8px 32px 16px;">'
+            f'<p style="margin:0 0 8px; color:#444; font-size:13px;"><strong>Diagnosis:</strong> {diagnosis}</p>'
+            f'<p style="margin:0 0 4px; color:#666; font-size:12px;">Actions taken:</p>'
+            f'<ul style="margin:0; padding-left:20px; color:#555; font-size:12px;">{actions_html}</ul>' if actions else ''
+            '</td></tr>'
+            '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
+        )
 
     # Footer
     engine = "steward_runner.py (dry-run)" if dry_run else "steward_runner.py"
@@ -2231,7 +2296,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         .replace("{{DATE}}", date_str)
         .replace("{{TLDR}}", tldr)
         .replace("{{UPDATES}}", _html_updates(applied))
-        .replace("{{ROLLBACK}}", rollback_html)
+        .replace("{{TROUBLESHOOT}}", troubleshoot_html)
         .replace("{{VALIDATION}}", _html_validation(validation))
         .replace("{{HEARTBEAT}}", _html_heartbeat(heartbeat))
         .replace("{{AUDIT}}", _html_audit(audit))
@@ -2424,14 +2489,18 @@ def main():
         write_json(run_dir / "02-validation.json",
                    {"checks": [], "phase_failed": True, "error": str(e)})
 
-    # P3: rollback
+    # P3: troubleshoot
     try:
-        phase_3_rollback(run_dir, dry_run=args.dry_run)
+        phase_3_troubleshoot(run_dir, dry_run=args.dry_run)
     except Exception as e:
         print(f"[P3] FAILED: {e}")
-        write_json(run_dir / "03-rollback.json",
+        write_json(run_dir / "03-troubleshoot.json",
                    {"triggered": False, "phase_failed": True, "error": str(e)})
 
+    # Check for reboot-required (kernel update from P1 apt upgrade)
+    if _reboot_if_needed(run_dir, "P3", dry_run=args.dry_run):
+        print("[reboot] system is going down for reboot — will resume on boot")
+        sys.exit(0)
     # P4: heartbeat
     try:
         if should_run("04-heartbeat.json"):

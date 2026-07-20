@@ -109,7 +109,7 @@ All apps follow the same deploy flow:
 1. `release.sh` - pulls latest code, tears down containers, removes old images, calls `up.sh`
 2. `up.sh` - starts Docker Compose in detached mode with production config
 
-**Docker daemon:** apt-installed and sole (`docker.service` + `docker.socket`, data root `/var/lib/docker`, boot-enabled). `systemctl status/restart docker`, `journalctl -u docker`, `docker ps`, and `/var/run/docker.sock` all mean the obvious thing — no snap indirection. (The former snap docker was removed 2026-07-10; see `~/plans/docker-daemon-split-RUNBOOK.md` for the migration history.) `RAILS_MASTER_KEY` note: `sudo` strips env vars, so pass it through with `sudo env RAILS_MASTER_KEY=$(cat config/master.key) docker compose ...` or use the repo's `up.sh`/`release.sh` which set it inline.
+**Docker daemon:** apt-installed and sole (`docker.service` + `docker.socket`, data root `/var/lib/docker`, boot-enabled). `systemctl status/restart docker`, `journalctl -u docker`, `docker ps`, and `/var/run/docker.sock` all mean the obvious thing — no snap indirection. (The former snap docker was removed 2026-07-10; see `~/plans/done/docker-daemon-split-RUNBOOK.md` for the migration history.) `RAILS_MASTER_KEY` note: `sudo` strips env vars, so pass it through with `sudo env RAILS_MASTER_KEY=$(cat config/master.key) docker compose ...` or use the repo's `up.sh`/`release.sh` which set it inline.
 
 Rails apps (blog, hub) pass `RAILS_MASTER_KEY` from `config/master.key` at startup.
 
@@ -257,11 +257,8 @@ All five digests run sequentially via a single systemd timer to avoid conflicts 
 | `homelab-backup` | 03:00 | 11:00 PM (prev. day) |
 | `homelab-backup-restore-drill` | 12:00 (1st of month) | 8:00 AM (1st of month) |
 | `homelab-steward` | 05:00 | 1:00 AM |
+| `homelab-steward-resume` | on-boot (2 min delay) | — |
 | `digests-daily` | 08:00 | 4:00 AM |
-| `hyperliquid-sdk` | 08:00/09:00 Mon/Thu¹ | 4:00 AM Mon/Thu |
-
-¹ `hyperliquid-sdk` is the one ET-locked timer; all others are UTC-locked (stable year-round).
-
 `digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` per topic in order: **ai-tech → agentic-platform → ai-hardware → gaming → world**. Total runtime ~3–3.5 hours, done by ~7:30 AM ET. The old per-topic timers and `run_<topic>_digest.sh` scripts are **disabled/unused**.
 
 ### Topics
@@ -290,10 +287,11 @@ bash ~/scripts/run_all_digests.sh                     # run all topics
 
 ## Homelab Steward
 
-Nightly maintenance at **1:00 AM ET** (05:00 UTC) via `homelab-steward.timer`. The steward is a deterministic Python orchestrator (`~/scripts/steward_runner.py`) cloned from `digest_runner.py` mechanics, replacing both `update-check` and `agents-md-audit`. Every agent step is reviewed by an independent llm-as-judge pass (dsv4-pro), evidence-grounded. **Phase-by-phase architecture, the work queue, executor mechanics, budget guard, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md).** The safety rules below stay here because they govern any maintainer doing apt/Docker work, not just the nightly run.
+Nightly maintenance at **1:00 AM ET** (05:00 UTC) via `homelab-steward.timer`. The steward is a 9-phase deterministic Python orchestrator (`~/scripts/steward_runner.py`) replacing both `update-check` and `agents-md-audit`. All LLM agents run as native `omp -p` subprocesses (no `pi` dependency), currently on `opencode-go/deepseek-v4-pro`. Every agent step is reviewed by an independent judge pass, evidence-grounded. **Full architecture, phase details, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md).** The safety rules below govern any maintainer doing apt/Docker work, not just the nightly run.
 
-**Phases (P0–P9):** P0 setup+guard (budget snapshot, dependabot in-flight check) · P1 update apply (apt, Docker, cloudflared, k3s, open-webui bump) · P2 validate (docker ps, k3s pods, endpoint curls, X-Fallback) · P3 rollback (conditional: pi-web/tunnel unhealthy → downgrade) · P4 heartbeat (failed units, LLM stack, backup recency, disk, TLS, ddns) · P5 work queue (ideas/plans scan, consistency checks, pick next plan) · P6 executor (≤1 approved plan/night, dsv4-pro driver + kimi-k3 via `delegate_omp` for coding, post-impl review, monthly cap) · P7 audit (7 nightly sections, collector→delta-gate→worker→judge) · P8 render+send (structured data → pure-Python HTML → `send_digest.py`) · P9 archive (summary .md, `.runs.jsonl`).
+**Phases (P0–P9):** P0 setup (usage report via proxy health, stop dependabot-webhook to prevent racing, prev-summary delta) · P1 update apply (apt, Docker, cloudflared, k3s, open-webui bump) · P2 validate (docker ps, k3s pods, endpoint curls) · P3 troubleshoot (if pi-web unhealthy after P1: spawn omp diagnostic agent to fix forward) · P4 heartbeat (failed units, LLM stack, backup recency, disk, TLS, ddns) · P5 work queue (ideas/plans scan, consistency checks, pick next plan) · P6 executor (≤1 approved plan/night via native omp agent, post-impl review, monthly cap) · P7 audit (7 nightly sections, collector→delta-gate→worker+judge omp pairs) · P8 render+send (structured data → HTML → `send_digest.py`) · P9 archive (summary.md, `.runs.jsonl`, restart dependabot).
 
+**Restart handling:** If a kernel update (`/var/run/reboot-required`) is detected after P3, the steward writes `~/agent-state/pending.md` with run context and reboots. On boot, `homelab-steward-resume.service` checks `pending.md` and calls `steward_runner.py --resume` to continue from where it left off.
 ### Safety rules
 
 - Never `sudo apt dist-upgrade` — only `upgrade` / `--only-upgrade`
@@ -302,7 +300,7 @@ Nightly maintenance at **1:00 AM ET** (05:00 UTC) via `homelab-steward.timer`. T
 - After a `docker-*` upgrade, assert the daemon is the expected one before declaring success: `docker info --format '{{.DockerRootDir}}'` must equal `/var/lib/docker` (guards against a second daemon creeping back in).
 - Stop on first auto-apply failure — don't continue to next step
 - After Docker daemon restart, verify containers came back before proceeding
-- Rollback is status-code-driven, not LLM-judgment-driven: reversion fires on pi-web or tunnel unhealthy after auto-apply. SMTP is Docker-independent (`send_digest.py` talks to the mail server directly), so the failure-red email still goes out even if Docker is down.
+- P3 troubleshooting agent runs after P1 auto-apply if pi-web is down; it tries to fix forward rather than rolling back. If it can't fix, the failure is reported — Carter must intervene. SMTP is Docker-independent (`send_digest.py` talks to the mail server directly), so the failure email still goes out even if Docker is down.
 
 ```bash
 python3 ~/scripts/steward_runner.py --dry-run      # skip mutations + email, still audit + archive

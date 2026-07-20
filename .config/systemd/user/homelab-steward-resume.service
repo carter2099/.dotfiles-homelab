@@ -1,0 +1,9 @@
+[Unit]
+Description=Homelab steward post-reboot resume — continues from pending.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/steward-resume.sh
+TimeoutStartSec=7200
