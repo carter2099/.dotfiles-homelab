@@ -2651,18 +2651,10 @@ def _html_validation(validation_data):
     lines = []
     for c in checks:
         name = c.get("name", "")
-        if name.startswith("endpoint_"):
-            svc = name.replace("endpoint_", "")
-            code = c.get("http_code", "?")
-            ok = c.get("status") == "ok"
-            icon = "OK" if ok else "FAIL"
-            color = "#2e7d32" if ok else "#c62828"
-            lines.append(f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
-                         f'{icon} {svc} — HTTP {code}</p>')
-        elif name == "k3s_pods":
+        if name == "k3s_pods":
             bad = c.get("bad_pods", [])
             if bad:
-                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                lines.append(f'<p style="margin:0 0 4px; color:#f57f17; font-size:13px;">'
                              f'k3s: {len(bad)} pods not Running/Completed</p>')
             else:
                 lines.append(f'<p style="margin:0 0 4px; color:#2e7d32; font-size:13px;">'
@@ -2671,6 +2663,29 @@ def _html_validation(validation_data):
             fb = c.get("fallback_active", False)
             lines.append(f'<p style="margin:0 0 4px; color:#{"f57f17" if fb else "2e7d32"}; font-size:13px;">'
                          f'LLM: {"CLOUD FALLBACK" if fb else "local"}</p>')
+        elif name == "openwebui_image_match":
+            st = c.get("status", "?")
+            color = {"ok": "#2e7d32", "warning": "#f57f17", "error": "#c62828"}.get(st, "#555")
+            lines.append(f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
+                         f'open-webui image: {st}</p>')
+        elif name.startswith("endpoint_"):
+            svc = name.replace("endpoint_", "")
+            ok = c.get("status") == "ok"
+            icon = "OK" if ok else "FAIL"
+            color = "#2e7d32" if ok else "#c62828"
+            # Tunnel health: show connector count instead of HTTP code
+            if svc == "tunnel-health":
+                detail = f'{c.get("active_connections", "?")} connectors'
+            else:
+                code = c.get("http_code", "?")
+                detail = f'HTTP {code}'
+            lines.append(f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
+                         f'{icon} {svc} — {detail}</p>')
+        elif name == "docker_containers":
+            out = c.get("output", "")
+            if out:
+                lines.append(f'<p style="margin:0 0 4px; color:#2e7d32; font-size:13px;">'
+                             f'containers: all running</p>')
     return "\n".join(lines)
 
 
@@ -2688,7 +2703,6 @@ def _sparkline(values, width=10):
     def bucket(v):
         idx = int((v - mn) / (mx - mn) * (len(chars) - 1))
         return chars[min(idx, len(chars) - 1)]
-    # If more values than width, sample evenly
     if len(values) > width:
         step = len(values) / width
         sampled = [values[int(i * step)] for i in range(width)]
@@ -2697,14 +2711,16 @@ def _sparkline(values, width=10):
     return "".join(bucket(v) for v in sampled)
 
 def _html_heartbeat(hb_data, sparklines=None):
-    """Render heartbeat block as HTML."""
+    """Render heartbeat block as compact HTML."""
     lines = []
-    # Failed units
+
+    # ── Units ──
     uf = hb_data.get("failed_units", {})
     user_f = uf.get("user", [])
     sys_f = uf.get("system", [])
     total_f = len([x for x in user_f if x]) + len([x for x in sys_f if x])
-    if total_f == 0:
+    missing_units = hb_data.get("units", {}).get("missing", [])
+    if total_f == 0 and not missing_units:
         lines.append('<p style="margin:0; color:#2e7d32; font-size:13px;">All units healthy</p>')
     else:
         for u in user_f:
@@ -2713,52 +2729,133 @@ def _html_heartbeat(hb_data, sparklines=None):
         for u in sys_f:
             if u.strip():
                 lines.append(f'<p style="margin:0; color:#c62828; font-size:13px;">FAILED system: {u.strip()}</p>')
+        if missing_units:
+            lines.append(f'<p style="margin:0; color:#f57f17; font-size:13px;">Missing units: {", ".join(missing_units)}</p>')
 
-    # LLM
+    # ── LLM ──
     fb = hb_data.get("llm_stack", {}).get("falling_back", False)
     lines.append(f'<p style="margin:0; color:#{"f57f17" if fb else "2e7d32"}; font-size:13px;">'
                  f'LLM: {"CLOUD FALLBACK" if fb else "local"}</p>')
 
-    # Backup
+    # ── Backup ──
     bt = hb_data.get("backup", {}).get("last_run", "")
-    lines.append(f'<p style="margin:0; color:#555; font-size:13px;">Backup: {bt}</p>')
+    if bt:
+        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">Backup: {bt}</p>')
 
-    # k3s
+    # ── k3s ──
     nodes = hb_data.get("k3s_nodes", [])
     if nodes:
-        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">k3s: {nodes[0].strip() if nodes else "unknown"}</p>')
+        for n in nodes:
+            if "NAME" in n and "STATUS" in n:
+                continue  # skip header row
+            parts = n.split()
+            if len(parts) >= 2:
+                lines.append(f'<p style="margin:0; color:#555; font-size:13px;">k3s: {parts[0]} {parts[1]}</p>')
+                break
 
-    # Disk
+    # ── Disk + Journal ──
+    parts_line = []
     disk = hb_data.get("disk", {})
     if disk.get("df_root"):
         parts = disk["df_root"].splitlines()[-1].split()
         if len(parts) >= 5:
-            lines.append(f'<p style="margin:0; color:#555; font-size:13px;">Disk /: {parts[4]} used ({parts[2]}/{parts[1]})</p>')
+            parts_line.append(f'Disk: {parts[4]} used ({parts[2]}/{parts[1]})')
+    journal = hb_data.get("journal_disk_usage", "")
+    if journal:
+        # "Archived and active journals take up 3.3G in the file system."
+        jm = re.search(r"take up (\S+)", journal)
+        if jm:
+            parts_line.append(f'journal: {jm.group(1)}')
+    if parts_line:
+        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">{" · ".join(parts_line)}</p>')
 
-    # Reboot
+    # ── Disk + Journal ──
+    parts_line = []
+    disk = hb_data.get("disk", {})
+
+    # ── Reboot ──
     rb = hb_data.get("reboot", {})
     if rb.get("needed"):
         lines.append(f'<p style="margin:0; color:#c62828; font-size:13px;">Reboot needed (kernel: {rb.get("kernel","?")})</p>')
     else:
         lines.append('<p style="margin:0; color:#2e7d32; font-size:13px;">No reboot needed</p>')
 
-    # TLS
+    # ── Memory ──
+    mem = hb_data.get("memory", {})
+    mem_avail = mem.get("available", "")
+    mem_pressure = mem.get("pressure", "")
+    if mem_avail:
+        pressure_short = ""
+        if mem_pressure:
+            m = re.search(r"some avg10=([\d.]+).*full avg10=([\d.]+)", mem_pressure)
+            if m:
+                pressure_short = f'pressure: {m.group(1)}/{m.group(2)}'
+        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">Memory: {mem_avail} available{" · " + pressure_short if pressure_short else ""}</p>')
+
+    # ── NVMe SMART ──
+    smart = hb_data.get("smart", {})
+    if smart.get("wear_pct") or smart.get("available_spare"):
+        lines.append(f'<p style="margin:0; color:#2e7d32; font-size:13px;">'
+                     f'NVMe: {smart.get("wear_pct","?")} wear, {smart.get("available_spare","?")} spare, '
+                     f'{smart.get("media_errors","?")} errors</p>')
+    elif smart.get("status") == "skipped":
+        pass  # smartmontools not installed — silent
+
+    # ── /etc/hosts ──
+    hosts = hb_data.get("hosts", {})
+    for hostname, info in hosts.items():
+        color = "#2e7d32" if info.get("resolves") else "#c62828"
+        ip = info.get("output", "").split()[0] if info.get("output") else "?"
+        lines.append(f'<p style="margin:0; color:{color}; font-size:13px;">{hostname}: {ip}</p>')
+
+    # ── DNS ──
+    dns = hb_data.get("dns", {})
+    if dns:
+        ok = sum(1 for v in dns.values() if v.get("resolves"))
+        total = len(dns)
+        color = "#2e7d32" if ok == total else "#f57f17" if ok > 0 else "#c62828"
+        lines.append(f'<p style="margin:0; color:{color}; font-size:13px;">DNS: {ok}/{total} hostnames resolve</p>')
+
+    # ── docker-user-rules ──
+    dur = hb_data.get("docker_user_rules", {})
+    if dur:
+        color = "#2e7d32" if dur.get("has_drop_default") else "#c62828"
+        status = "DROP present" if dur.get("has_drop_default") else "MISSING DROP"
+        lines.append(f'<p style="margin:0; color:{color}; font-size:13px;">docker-user-rules: {status}</p>')
+
+    # ── bundle-audit ──
+    ba = hb_data.get("bundle_audit", {})
+    if ba:
+        ba_parts = []
+        for app, result in ba.items():
+            icon = "✓" if "no vulnerabilities" in str(result) else "⚠"
+            ba_parts.append(f'{app} {icon}')
+        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">bundle-audit: {", ".join(ba_parts)}</p>')
+
+    # ── TLS ──
     tls = hb_data.get("tls_certs", {})
+    tls_parts = []
     for host, expiry in tls.items():
-        lines.append(f'<p style="margin:0; color:#555; font-size:12px;">TLS {host}: {expiry}</p>')
+        # Extract just the date
+        m = re.search(r"notAfter=(.+?\d{4})\s", expiry)
+        date_str = m.group(1) if m else expiry[:20]
+        tls_parts.append(f'{host.split(".")[0]}: {date_str}')
+    if tls_parts:
+        lines.append(f'<p style="margin:0; color:#555; font-size:12px;">TLS: {", ".join(tls_parts)}</p>')
 
-    # Extra units
-    extra = hb_data.get("units", {}).get("extra", [])
-    if extra:
-        lines.append(f'<p style="margin:0; color:#f57f17; font-size:13px;">Extra units: {", ".join(extra)}</p>')
+    # ── self-drift summary ──
+    sd = hb_data.get("self_drift", {})
+    if sd:
+        drift_items = []
+        for section, data in sd.items():
+            if isinstance(data, dict):
+                issues = sum(1 for v in data.values() if v and (isinstance(v, list) and len(v) > 0))
+                if issues:
+                    drift_items.append(f'{section}: {issues} drift')
+        if drift_items:
+            lines.append(f'<p style="margin:0; color:#f57f17; font-size:12px;">config drift: {", ".join(drift_items)}</p>')
 
-    # Agent state stale
-    stale = hb_data.get("agent_state_stale", [])
-    if stale:
-        names = [s["file"] for s in stale]
-        lines.append(f'<p style="margin:0; color:#f57f17; font-size:13px;">Stale agent-state: {", ".join(names)}</p>')
-
-    # Sparklines (30-day trends from .runs.jsonl)
+    # ── Sparklines ──
     if sparklines:
         lines.append('<p style="margin:12px 0 4px; color:#1a1a2e; font-size:12px; font-weight:600;">30-day trends</p>')
         for label, values in sparklines:
@@ -2773,7 +2870,7 @@ def _html_heartbeat(hb_data, sparklines=None):
 
 
 def _html_audit(audit_data):
-    """Render audit sections as HTML."""
+    """Render audit sections as compact HTML."""
     sections = audit_data.get("sections", [])
     if not sections:
         return '<p style="margin:0; color:#888; font-size:13px;">No audit results.</p>'
@@ -2783,20 +2880,35 @@ def _html_audit(audit_data):
         name = sec.get("name", "unknown")
         verdict = sec.get("verdict", "UNKNOWN")
         badge = _badge(verdict)
-        lines.append(f'<p style="margin:0 0 2px; font-size:13px;"><strong>{name}:</strong> {badge}</p>')
         confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", [])
-        for finding in confirmed:
-            claim = finding.get("claim", finding.get("evidence", ""))
-            lines.append(f'<p style="margin:0 0 2px 16px; color:#555; font-size:12px;">- {claim[:200]}</p>')
         rejected = sec.get("judge_rejected", [])
-        for r in rejected:
+        n_confirmed = len(confirmed)
+        n_rejected = len(rejected)
+
+        # Section header with counts
+        summary = f'{n_confirmed} finding{"s" if n_confirmed != 1 else ""}'
+        if n_rejected:
+            summary += f', {n_rejected} rejected'
+        lines.append(f'<p style="margin:0 0 2px; font-size:13px;"><strong>{name}:</strong> {badge} <span style="color:#888; font-size:11px;">({summary})</span></p>')
+
+        # Show first 3 confirmed findings
+        for finding in confirmed[:3]:
+            claim = finding.get("claim", finding.get("evidence", ""))
+            lines.append(f'<p style="margin:0 0 2px 16px; color:#555; font-size:12px;">- {claim[:160]}</p>')
+        if n_confirmed > 3:
+            lines.append(f'<p style="margin:0 0 2px 16px; color:#888; font-size:11px;">… and {n_confirmed - 3} more</p>')
+
+        # Show rejected only if few, with short reasons
+        for r in rejected[:2]:
             claim = r.get("claim", "")
             reason = r.get("reason", "")
             lines.append(
                 f'<p style="margin:0 0 2px 16px; color:#888; font-size:12px; text-decoration:line-through;">'
                 f'- {claim[:120]}</p>'
-                f'<p style="margin:0 0 4px 16px; color:#888; font-size:11px;">Judge rejected: {reason[:200]}</p>'
+                f'<p style="margin:0 0 4px 16px; color:#888; font-size:11px;">Judge: {reason[:100]}</p>'
             )
+        if n_rejected > 2:
+            lines.append(f'<p style="margin:0 0 2px 16px; color:#888; font-size:11px;">… and {n_rejected - 2} more rejected</p>')
     return "\n".join(lines)
 
 
