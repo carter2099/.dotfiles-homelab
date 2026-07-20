@@ -176,7 +176,7 @@ SIF_CAP = 3         # Pool C: max stories-in-flight passed directly to Phase 6
 
 # ── Stories-in-flight constants ────────────────────────────────────────────
 COOL_AFTER_DAYS = 5     # auto-set status to "cooled" if no updates in 5 days
-PRUNE_AFTER_DAYS = 10   # remove cooled stories entirely after 10 days total
+PRUNE_AFTER_DAYS = 7    # remove cooled stories entirely after 7 days total
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1669,6 +1669,10 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
     for s in stories:
         # Ensure importance field exists (schema migration)
         _ensure_importance(s)
+
+        # Ensure first_seen field exists (schema migration — default to last_updated)
+        if "first_seen" not in s:
+            s["first_seen"] = s.get("last_updated", today.isoformat())
 
         last_str = s.get("last_updated", "")
         try:

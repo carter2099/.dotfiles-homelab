@@ -47,14 +47,12 @@ ENDPOINTS = {
 }
 STEWARD_MODEL = "opencode-go/deepseek-v4-pro"
 PROXY_HEALTH = "http://localhost:8082/health"
-GUARD_ROLLING_DEFER = 90
-GUARD_SKIP = 90
-GUARD_RESTRICT = 70
 EXECUTOR_MONTHLY_CAP = 4
 MAX_WORKERS = 3
 EXECUTOR_TIMEOUT = 2700
 EXECUTOR_MODE = "execute"
 PENDING_PATH = HOME / "agent-state" / "pending.md"
+DEPENDABOT_UNIT = "dependabot-webhook.service"
 
 # ── default template ─────────────────────────────────────────────────
 
@@ -92,8 +90,11 @@ DEFAULT_TEMPLATE = """<!DOCTYPE html>
 <tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#00838f; font-size:15px; font-weight:700;">Executor</h2></td></tr>
 <tr><td style="padding:8px 32px 16px;">{{EXECUTOR}}</td></tr>
 <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#555; font-size:15px; font-weight:700;">Budget</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{BUDGET}}</td></tr>
+<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#1b5e20; font-size:15px; font-weight:700;">Auto-Fixes</h2></td></tr>
+<tr><td style="padding:8px 32px 16px;">{{FIXES}}</td></tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#37474f; font-size:15px; font-weight:700;">OpenCode Go Usage</h2></td></tr>
+<tr><td style="padding:8px 32px 16px;">{{USAGE}}</td></tr>
 <tr><td style="padding:24px 32px; background-color:#f8f8fb; border-top:1px solid #e8e8ee;">
 <p style="margin:0; color:#999; font-size:12px; text-align:center;">{{FOOTER}}</p></td></tr>
 </table></td></tr></table></body></html>"""
@@ -211,15 +212,13 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
     """Call omp -p (headless text mode). Returns stdout."""
     cmd = [
         "omp", "-p", "--model", model,
+        "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
         "--allow-home",
     ]
-    if append_system:
-        cmd.extend(["--append-system-prompt", append_system])
-
+    cmd.append(prompt)
     result = subprocess.run(
         cmd,
-        input=prompt,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -295,15 +294,16 @@ def _call_omp_p_json(prompt, timeout=EXECUTOR_TIMEOUT, extra_args=None):
     """Call omp -p in --mode json. Returns (accumulated_text, stats, packet, raw_stdout)."""
     cmd = [
         "omp", "-p", "--model", STEWARD_MODEL, "--mode", "json",
+        "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
         "--allow-home",
     ]
     if extra_args:
         cmd.extend(extra_args)
 
+    cmd.append(prompt)
     result = subprocess.run(
         cmd,
-        input=prompt,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -382,10 +382,8 @@ pick up from the next phase in {run_dir}.
     return True
 
 # ── P0: setup ────────────────────────────────────────────────────────
-
-
 def phase_0_setup(args):
-    """Create run dir, budget guard, dependabot check, prev-summary delta."""
+    """Create run dir, snapshot usage, stop dependabot, load prev-summary delta."""
     today = datetime.now()
     date_str = today.strftime("%Y-%m-%d")
     run_dir = RUN_DIR_BASE / date_str
@@ -396,58 +394,49 @@ def phase_0_setup(args):
     prev_md = RUN_DIR_BASE / f"{prev_date_str}" / "summary.md"
     prev_summary = parse_previous_summary(prev_md)
 
-    # Budget guard — snapshot proxy health
-    budget = {"rolling_pct": 0, "weekly_pct": 0, "monthly_pct": 0,
-              "guard_verdict": "full", "accounts": []}
+    # Usage report — snapshot proxy health (no gating, just reporting)
+    usage = {"accounts": [], "proxy_error": None}
     try:
         req = urllib.request.Request(PROXY_HEALTH)
         with urllib.request.urlopen(req, timeout=10) as resp:
             proxy_health = json.loads(resp.read().decode())
     except Exception as e:
         proxy_health = {"error": str(e)}
-        budget["guard_verdict"] = "proxy_unreachable"
+        usage["proxy_error"] = str(e)
 
     if "accounts" in proxy_health:
-        max_rolling = 0
-        max_weekly = 0
-        max_monthly = 0
         for acct in proxy_health["accounts"]:
-            rp = acct.get("rolling", {}).get("pct", 0)
-            wp = acct.get("weekly", {}).get("pct", 0)
-            mp = acct.get("monthly", {}).get("pct", 0)
-            max_rolling = max(max_rolling, rp)
-            max_weekly = max(max_weekly, wp)
-            max_monthly = max(max_monthly, mp)
-            budget["accounts"].append({
+            usage["accounts"].append({
+                "name": acct.get("name", "?"),
                 "tier": acct.get("tier", "unknown"),
-                "rolling_pct": rp, "weekly_pct": wp, "monthly_pct": mp,
+                "rolling_pct": acct.get("rolling", {}).get("pct", 0),
+                "weekly_pct": acct.get("weekly", {}).get("pct", 0),
+                "monthly_pct": acct.get("monthly", {}).get("pct", 0),
+                "payg_balance": acct.get("payg", {}).get("balance_usd"),
+                "payg_monthly_used": acct.get("payg", {}).get("monthly_usage_usd"),
+                "payg_monthly_limit": acct.get("payg", {}).get("monthly_limit_usd"),
             })
-        budget["rolling_pct"] = max_rolling
-        budget["weekly_pct"] = max_weekly
-        budget["monthly_pct"] = max_monthly
 
-        if max_rolling >= GUARD_ROLLING_DEFER:
-            budget["guard_verdict"] = "defer_all"
-        elif max_weekly >= GUARD_SKIP or max_monthly >= GUARD_SKIP:
-            budget["guard_verdict"] = "skip_agents"
-        elif max_weekly >= GUARD_RESTRICT:
-            budget["guard_verdict"] = "anomaly_only"
-        else:
-            budget["guard_verdict"] = "full"
-
-    # Dependabot in-flight check
-    dep_check = {"in_flight": False, "raw": ""}
-    try:
-        dep_out = run_capture(
-            ["journalctl", "--user", "-u", "dependabot-webhook",
-             "--since", "15 min ago", "--no-pager", "-q"],
-            env=user_env(),
-        )
-        dep_check["raw"] = dep_out[:500]
-        if dep_out.strip() and "processing" in dep_out.lower():
-            dep_check["in_flight"] = True
-    except Exception as e:
-        dep_check["error"] = str(e)
+    # Dependabot management — stop the webhook so it doesn't race our executor
+    dep = {"was_active": False, "stopped": False, "error": None}
+    if not args.dry_run:
+        try:
+            active = run_capture(
+                ["systemctl", "--user", "is-active", DEPENDABOT_UNIT],
+                env=user_env(),
+            ).strip()
+            dep["was_active"] = (active == "active")
+            if dep["was_active"]:
+                run(["systemctl", "--user", "stop", DEPENDABOT_UNIT], env=user_env())
+                dep["stopped"] = True
+                print("  dependabot: stopped for steward run")
+            else:
+                print("  dependabot: already inactive")
+        except Exception as e:
+            dep["error"] = str(e)
+            print(f"  dependabot: stop failed — {e}")
+    else:
+        print("  dependabot: DRY RUN — would stop if active")
 
     data = {
         "date": date_str,
@@ -456,19 +445,29 @@ def phase_0_setup(args):
         "prev_summary_exists": prev_md.exists(),
         "dry_run": args.dry_run,
         "resume": args.resume,
-        "budget": budget,
-        "dependabot": dep_check,
+        "usage": usage,
+        "dependabot": dep,
     }
     artifact = run_dir / "00-setup.json"
     write_json(artifact, data)
-    print(f"[P0] setup -> {artifact}")
-    print(f"  budget guard: {budget['guard_verdict']} "
-          f"(rolling={budget['rolling_pct']}%, weekly={budget['weekly_pct']}%, "
-          f"monthly={budget['monthly_pct']}%)")
-    if dep_check["in_flight"]:
-        print("  dependabot: IN FLIGHT — executor deferred")
-    return data
 
+    # Print usage summary
+    acct_lines = []
+    for a in usage["accounts"]:
+        extra = ""
+        if a["payg_balance"] is not None:
+            extra = f", PAYG ${a['payg_balance']:.2f} remaining"
+        acct_lines.append(f"    {a['name']} ({a['tier']}): "
+                          f"rolling={a['rolling_pct']}%, weekly={a['weekly_pct']}%, "
+                          f"monthly={a['monthly_pct']}%{extra}")
+    print(f"[P0] setup -> {artifact}")
+    if usage["proxy_error"]:
+        print(f"  proxy: UNREACHABLE ({usage['proxy_error']})")
+    else:
+        print(f"  usage ({len(usage['accounts'])} accounts):")
+        for line in acct_lines:
+            print(line)
+    return data
 
 # ── P1: update apply (ported from update_runner) ─────────────────────
 
@@ -1205,9 +1204,8 @@ def phase_6_executor(run_dir, setup_data, dry_run=False):
 
     queue = read_json(queue_path)
     candidate = queue.get("executor_candidate")
-    budget = setup_data.get("budget", {})
+    usage = setup_data.get("usage", {})
 
-    # Guard checks
     if dry_run:
         print("  DRY RUN — skipping executor")
         data = {"executed": False, "reason": "dry_run"}
@@ -1217,24 +1215,6 @@ def phase_6_executor(run_dir, setup_data, dry_run=False):
     if not candidate:
         print("  skipped — no approved plan")
         data = {"executed": False, "reason": "no_approved_plan"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    if budget.get("guard_verdict") in ("defer_all", "proxy_unreachable"):
-        print(f"  skipped — budget guard: {budget.get('guard_verdict')}")
-        data = {"executed": False, "reason": f"budget_{budget.get('guard_verdict')}"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    if budget.get("guard_verdict") == "skip_agents" and not candidate.get("urgent"):
-        print("  skipped — budget guard: skip_agents (plan not urgent)")
-        data = {"executed": False, "reason": "budget_skip_agents"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    if setup_data.get("dependabot", {}).get("in_flight"):
-        print("  skipped — dependabot in flight")
-        data = {"executed": False, "reason": "dependabot_in_flight"}
         write_json(run_dir / "06-executor.json", data)
         return data
 
@@ -1255,7 +1235,6 @@ def phase_6_executor(run_dir, setup_data, dry_run=False):
             data = {"executed": False, "reason": f"lock_exists: {lock_content}"}
             write_json(run_dir / "06-executor.json", data)
             return data
-
     # Proceed with execution
     plan_file = PLANS_DIR / candidate["file"]
     if not plan_file.exists():
@@ -1675,7 +1654,7 @@ AUDIT_SECTIONS = [
             "Judge the quality of the 5 daily digests over the trailing 7 days using the collector metrics plus "
             "your own read of ~/digests/<topic>/<date>/ artifacts: run completeness per topic/day, story freshness, "
             "cross-day duplication vs summary.md files, template placeholder leakage, source diversity "
-            "(unique domains), stories-in-flight.json hygiene (7d cool / 14d prune enforced), duration trends, "
+            "(unique domains), stories-in-flight.json hygiene (5d cool / 7d prune enforced), duration trends, "
             "llm-proxy fallback in the digest window. Sample up to 3 links per digest with curl -sI (read-only)."
         ),
     },
@@ -1813,8 +1792,6 @@ Return a fenced ```json packet:
 def phase_7_audit(run_dir, setup_data, dry_run=False):
     """Phase 7: audit sections — collector -> delta gate -> parallel worker+judge."""
     print("[P7] audit")
-    budget = setup_data.get("budget", {})
-    guard = budget.get("guard_verdict", "full")
     prev_date_str = setup_data.get("prev_date", "")
 
     all_results = []
@@ -1858,24 +1835,6 @@ def phase_7_audit(run_dir, setup_data, dry_run=False):
                 all_results.append(result)
                 continue
 
-        if guard in ("skip_agents", "proxy_unreachable"):
-            print(f"    budget: {guard} -> skipped")
-            result = {"name": section_name, "verdict": "skipped-budget",
-                      "evidence_hash": current_hash, "judge_rejected": [],
-                      "confirmed_findings": []}
-            write_json(run_dir / artifact_name, result)
-            all_results.append(result)
-            continue
-
-        if guard == "anomaly_only" and section_name not in ("security-posture", "agent-fleet-review"):
-            print("    budget: anomaly_only, non-critical section -> skipped")
-            result = {"name": section_name, "verdict": "skipped-budget",
-                      "evidence_hash": current_hash, "judge_rejected": [],
-                      "confirmed_findings": []}
-            write_json(run_dir / artifact_name, result)
-            all_results.append(result)
-            continue
-
         if dry_run:
             print("    dry-run: collector only")
             result = {"name": section_name, "verdict": "dry-run-collector-only",
@@ -1912,7 +1871,7 @@ def phase_7_audit(run_dir, setup_data, dry_run=False):
     # Master artifact in canonical section order
     order = {s["name"]: i for i, s in enumerate(AUDIT_SECTIONS)}
     all_results.sort(key=lambda r: order.get(r["name"], 99))
-    master = {"sections": all_results, "guard_verdict": guard}
+    master = {"sections": all_results}
     write_json(run_dir / "07-audit.json", master)
     print(f"[P7] done -> {run_dir / '07-audit.json'}")
     return master
@@ -1931,7 +1890,7 @@ def _badge(verdict):
         "cached-PASS": '<span style="color:#aaa; font-weight:400;">cached-PASS</span>',
         "collector-failed": '<span style="color:#c62828; font-weight:700;">COLLECTOR FAILED</span>',
         "worker-failed": '<span style="color:#c62828; font-weight:700;">WORKER FAILED</span>',
-        "skipped-budget": '<span style="color:#888;">skipped (budget)</span>',
+
         "dry-run-collector-only": '<span style="color:#888;">collector-only (dry-run)</span>',
     }
     if verdict.startswith("cached-"):
@@ -1941,6 +1900,152 @@ def _badge(verdict):
         return f'<span style="color:{color}; font-weight:400;">cached-{base}</span>'
     return badges.get(verdict, f'<span style="color:#888;">{verdict}</span>')
 
+
+def _fix_one_section(section_name, confirmed_findings, dry_run):
+    """Fix all confirmed findings for one audit section. Returns fix result dict."""
+    if dry_run:
+        return {
+            "section": section_name,
+            "status": "dry-run",
+            "findings_count": len(confirmed_findings),
+            "fixes_applied": [],
+            "judge_verdict": "dry-run",
+        }
+
+    # Skip if no findings or none are actionable
+    actionable = confirmed_findings  # all confirmed findings are actionable
+    if not actionable:
+        return {
+            "section": section_name,
+            "status": "skipped",
+            "reason": "no actionable findings",
+            "findings_count": len(confirmed_findings),
+            "fixes_applied": [],
+        }
+
+    # Build fix prompt with all findings for this section
+    findings_text = json.dumps(actionable, indent=2)
+    fix_prompt = (
+        f"Fix the following homelab issues found by the steward audit "
+        f"for section '{section_name}'.\n\n"
+        f"You are a homelab maintenance agent. For each finding below, apply "
+        f"the fix described. Work in ~/dev/ clones for code changes, commit + push, "
+        f"and update AGENTS.md if needed.\n\n"
+        f"RULES:\n"
+        f"- Fix ONLY what the finding describes — don't go beyond scope.\n"
+        f"- For AGENTS.md edits: apply the exact OLD_TEXT to NEW_TEXT replacement.\n"
+        f"- For config drift (k3s, dotfiles, notes): sync the live config to tracked copies.\n"
+        f"- For resource issues: prune old files, clean up disk.\n"
+        f"- For agent fleet issues: restart failed services, fix timers.\n"
+        f"- Skip findings that would require upgrading production infrastructure "
+        f"(k3s, Docker daemon, etc.) — mark those as 'deferred'.\n"
+        f"- Commit each fix with a clear message referencing the audit section.\n"
+        f"- Return a fenced ```json packet with your results.\n\n"
+        f"FINDINGS:\n{findings_text}\n\n"
+        f'Return JSON:\n'
+        f'{{"fixes_applied": [{{"finding": "...", "action": "...", '
+        f'"commit": "hash or N/A", "status": "fixed"|"deferred"|"failed"}}], '
+        f'"summary": "one sentence"}}'
+    )
+    try:
+        fix_output = _call_omp_p(fix_prompt, timeout=600)
+        fix_packet = _extract_json(fix_output, f"fix-{section_name}")
+    except Exception as e:
+        fix_packet = {"fixes_applied": [], "summary": str(e), "error": str(e)}
+
+    # Judge review of all fixes
+    fixes_json = json.dumps(fix_packet.get("fixes_applied", []), indent=2)
+    judge_prompt = (
+        f"Review these automated fixes for audit section '{section_name}'.\n\n"
+        f"For each fix, verify it was applied correctly by checking the actual "
+        f"files/state. Flag any fix that was incorrect, incomplete, or overreaching.\n\n"
+        f"FIXES APPLIED:\n{fixes_json}\n\n"
+        f'Return JSON:\n'
+        f'{{"verdict": "pass"|"partial"|"fail", '
+        f'"reviewed": [{{"finding": "...", "ok": true|false, "note": "..."}}], '
+        f'"summary": "one sentence"}}'
+    )
+    try:
+        judge_output = _call_omp_p(judge_prompt, timeout=600)
+        judge_packet = _extract_json(judge_output, f"judge-fix-{section_name}")
+    except Exception as e:
+        judge_packet = {"verdict": "fail", "reviewed": [], "summary": str(e)}
+
+    return {
+        "section": section_name,
+        "status": "fixed",
+        "findings_count": len(confirmed_findings),
+        "actionable_count": len(actionable),
+        "fixes_applied": fix_packet.get("fixes_applied", []),
+        "fix_summary": fix_packet.get("summary", ""),
+        "judge_verdict": judge_packet.get("verdict", "unknown"),
+        "judge_summary": judge_packet.get("summary", ""),
+        "judge_reviewed": judge_packet.get("reviewed", []),
+    }
+
+
+def phase_7b_fix(run_dir, dry_run=False):
+    """Phase 7b: auto-fix confirmed audit findings, with judge review."""
+    print("[P7b] auto-fix")
+    audit_path = run_dir / "07-audit.json"
+    if not audit_path.exists():
+        print("  skipped — no audit data")
+        write_json(run_dir / "07b-fixes.json", {"sections": [], "status": "no_audit"})
+        return
+
+    audit = read_json(audit_path)
+    sections = audit.get("sections", [])
+
+    # Collect sections with confirmed findings
+    to_fix = []
+    for s in sections:
+        confirmed = s.get("judge_confirmed", [])
+        if not confirmed:
+            continue
+        to_fix.append((s["name"], confirmed))
+
+    if not to_fix:
+        print("  skipped — no confirmed findings to fix")
+        write_json(run_dir / "07b-fixes.json", {"sections": [], "status": "nothing_to_fix"})
+        return
+
+    print(f"  fixing {len(to_fix)} sections (max_workers={MAX_WORKERS})")
+    fix_results = []
+
+    if dry_run:
+        for name, findings in to_fix:
+            r = _fix_one_section(name, findings, dry_run=True)
+            fix_results.append(r)
+            print(f"    {name}: DRY RUN — {len(findings)} findings would be fixed")
+    else:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(_fix_one_section, name, findings, False): name
+                for name, findings in to_fix
+            }
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    r = fut.result()
+                except Exception as e:
+                    r = {"section": name, "status": "fix-failed", "error": str(e)}
+                fix_results.append(r)
+                applied = len(r.get("fixes_applied", []))
+                jv = r.get("judge_verdict", "?")
+                print(f"    {name}: {r['status']} — {applied} fixes, judge: {jv}")
+
+    # Sort to canonical section order
+    order = {s["name"]: i for i, s in enumerate(AUDIT_SECTIONS)}
+    fix_results.sort(key=lambda r: order.get(r.get("section", ""), 99))
+
+    master = {"sections": fix_results, "status": "done"}
+    write_json(run_dir / "07b-fixes.json", master)
+
+    total_fixes = sum(len(r.get("fixes_applied", [])) for r in fix_results)
+    judge_oks = sum(1 for r in fix_results if r.get("judge_verdict") == "pass")
+    print(f"[P7b] done -> {run_dir / '07b-fixes.json'} "
+          f"({total_fixes} fixes across {len(fix_results)} sections, {judge_oks} judge-pass)")
+    return master
 
 def _html_updates(applied_data):
     """Render update steps as HTML."""
@@ -2184,18 +2289,57 @@ def _html_executor(exec_data):
     return "\n".join(lines)
 
 
-def _html_budget(budget_data):
-    """Render budget guard summary."""
+def _html_fixes(fixes_data):
+    """Render auto-fix results as HTML."""
+    sections = fixes_data.get("sections", [])
+    if not sections:
+        return '<p style="margin:0; color:#888; font-size:13px;">No fixes applied.</p>'
     lines = []
-    lines.append(f'<p style="margin:0; color:#555; font-size:13px;">'
-                 f'Guard: {budget_data.get("guard_verdict", "?")} '
-                 f'(rolling={budget_data.get("rolling_pct",0)}%, '
-                 f'weekly={budget_data.get("weekly_pct",0)}%, '
-                 f'monthly={budget_data.get("monthly_pct",0)}%)</p>')
-    for acct in budget_data.get("accounts", []):
-        lines.append(f'<p style="margin:0 0 2px 12px; color:#888; font-size:12px;">'
-                     f'{acct.get("tier","?")}: rolling={acct.get("rolling_pct",0)}% '
-                     f'weekly={acct.get("weekly_pct",0)}% monthly={acct.get("monthly_pct",0)}%</p>')
+    for s in sections:
+        status = s.get("status", "?")
+        if status == "dry-run":
+            lines.append(f'<p style="margin:0 0 8px; color:#888; font-size:13px;">'
+                         f'<strong>{s["section"]}</strong>: DRY RUN '
+                         f'({s.get("findings_count",0)} findings)</p>')
+            continue
+        if status == "skipped":
+            lines.append(f'<p style="margin:0 0 8px; color:#888; font-size:13px;">'
+                         f'<strong>{s["section"]}</strong>: skipped '
+                         f'({s.get("reason","")})</p>')
+            continue
+        jv = s.get("judge_verdict", "?")
+        jv_color = {"pass": "#2e7d32", "partial": "#e65100", "fail": "#c62828"}.get(jv, "#888")
+        fixes = s.get("fixes_applied", [])
+        lines.append(f'<p style="margin:0 0 4px; color:#444; font-size:14px;">'
+                     f'<strong>{s["section"]}</strong>: {len(fixes)} fixes, '
+                     f'judge: <span style="color:{jv_color};">{jv}</span></p>')
+        for f in fixes:
+            st = f.get("status", "?")
+            st_color = {"fixed": "#2e7d32", "deferred": "#e65100", "failed": "#c62828"}.get(st, "#888")
+            lines.append(f'<p style="margin:0 0 2px 16px; color:#555; font-size:12px;">'
+                         f'<span style="color:{st_color};">{st}</span>: '
+                         f'{f.get("finding","")[:120]} '
+                         f'<span style="color:#888;">{f.get("action","")[:80]}</span></p>')
+    return "\n".join(lines)
+
+
+def _html_usage(usage_data):
+    """Render OpenCode Go usage report."""
+    lines = []
+    for acct in usage_data.get("accounts", []):
+        extra = ""
+        if acct.get("payg_balance") is not None:
+            extra = f' \u00b7 PAYG ${acct["payg_balance"]:.2f} remaining'
+        lines.append(f'<p style="margin:0 0 2px 0; color:#555; font-size:13px;">'
+                     f'<strong>{acct.get("name","?")}</strong> ({acct.get("tier","?")}): '
+                     f'rolling={acct.get("rolling_pct",0)}% '
+                     f'weekly={acct.get("weekly_pct",0)}% '
+                     f'monthly={acct.get("monthly_pct",0)}%{extra}</p>')
+    if usage_data.get("proxy_error"):
+        lines.append(f'<p style="margin:4px 0 0; color:#c62828; font-size:12px;">'
+                     f'Proxy unreachable: {usage_data["proxy_error"]}</p>')
+    if not lines:
+        lines.append('<p style="margin:0; color:#888; font-size:13px;">No usage data.</p>')
     return "\n".join(lines)
 
 
@@ -2204,7 +2348,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     print("[P8] render + send")
 
     date_str = setup_data["date"]
-    budget = setup_data.get("budget", {})
+    usage = setup_data.get("usage", {})
 
     # Load all phase data
     applied = read_json(run_dir / "01-applied.json") if (run_dir / "01-applied.json").exists() else {"steps": []}
@@ -2213,6 +2357,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     heartbeat = read_json(run_dir / "04-heartbeat.json") if (run_dir / "04-heartbeat.json").exists() else {}
     queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
     executor = read_json(run_dir / "06-executor.json") if (run_dir / "06-executor.json").exists() else {}
+    fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
     audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {"sections": []}
 
     # Phase failures anywhere in the pipeline (each artifact records phase_failed)
@@ -2230,6 +2375,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     n_audit_drift = sum(1 for s in audit.get("sections", []) if s.get("verdict") in ("DRIFT", "ATTENTION"))
     n_ideas = queue.get("ideas", {}).get("total_outstanding", 0)
     n_plans_approved = len(queue.get("plans", {}).get("approved", []))
+    n_fixes = sum(len(s.get("fixes_applied", [])) for s in fixes.get("sections", []))
     exec_status = "idle"
     if executor.get("executed"):
         exec_status = executor.get("status", "done")
@@ -2243,6 +2389,8 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         tldr_parts.append("audit clean")
     tldr_parts.append(f"{n_ideas} ideas, {n_plans_approved} plans approved")
     tldr_parts.append(f"executor: {exec_status}")
+    if n_fixes:
+        tldr_parts.append(f"{n_fixes} fixes applied")
     tldr = " · ".join(tldr_parts) + "."
     if phase_failures:
         tldr += (f'<br><span style="color:#c62828; font-weight:700;">'
@@ -2302,7 +2450,8 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         .replace("{{AUDIT}}", _html_audit(audit))
         .replace("{{QUEUE}}", _html_queue(queue))
         .replace("{{EXECUTOR}}", _html_executor(executor))
-        .replace("{{BUDGET}}", _html_budget(budget))
+        .replace("{{FIXES}}", _html_fixes(fixes))
+        .replace("{{USAGE}}", _html_usage(usage))
         .replace("{{FOOTER}}", footer)
     )
 
@@ -2345,7 +2494,7 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     print("[P9] archive")
 
     date_str = setup_data["date"]
-    budget = setup_data.get("budget", {})
+    usage = setup_data.get("usage", {})
 
     # Load key artifacts for summary
     applied = read_json(run_dir / "01-applied.json") if (run_dir / "01-applied.json").exists() else {}
@@ -2353,11 +2502,13 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {}
     queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
     executor = read_json(run_dir / "06-executor.json") if (run_dir / "06-executor.json").exists() else {}
+    fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
+    fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
 
     # Build summary.md
     lines = [
         f"# Steward Report — {date_str}",
-        f"**Engine:** steward_runner.py | **Guard:** {budget.get('guard_verdict','?')}",
+        f"**Engine:** steward_runner.py",
         "",
         "## Updates Applied",
     ]
@@ -2394,9 +2545,8 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
 
     lines.append("")
     lines.append("## Queue")
-    lines.append(f"- Ideas outstanding: {queue.get('ideas', {}).get('total_outstanding', 0)}")
+    executor = read_json(run_dir / "06-executor.json") if (run_dir / "06-executor.json").exists() else {}
     lines.append(f"- Plans approved: {len(queue.get('plans', {}).get('approved', []))}")
-
     lines.append("")
     lines.append("## Executor")
     if executor.get("executed"):
@@ -2410,7 +2560,7 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     # Append runs.jsonl
     n_sections_fired = sum(
         1 for s in audit.get("sections", [])
-        if s.get("verdict") not in ("cached-PASS", "skipped-budget", "dry-run-collector-only")
+        if s.get("verdict") not in ("cached-PASS", "dry-run-collector-only")
     )
     n_judge_rejected = sum(
         len(s.get("judge_rejected", [])) for s in audit.get("sections", [])
@@ -2419,7 +2569,7 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "duration_s": round(elapsed_s),
         "applied": sum(1 for s in applied.get("steps", []) if s.get("status") in ("ok", "bumped")),
-        "guard": budget.get("guard_verdict", "?"),
+        "usage_accounts": len(usage.get("accounts", [])),
         "executor": executor.get("status") if executor.get("executed") else None,
         "sections_fired": n_sections_fired,
         "judge_rejections": n_judge_rejected,
@@ -2545,6 +2695,13 @@ def main():
         write_json(run_dir / "07-audit.json",
                    {"sections": [], "phase_failed": True, "error": str(e)})
 
+    # P7b: auto-fix
+    try:
+        phase_7b_fix(run_dir, dry_run=args.dry_run)
+    except Exception as e:
+        print(f"[P7b] FAILED: {e}")
+        write_json(run_dir / "07b-fixes.json",
+                   {"sections": [], "phase_failed": True, "error": str(e)})
     # P8: render + send
     try:
         phase_8_render_send(run_dir, setup, dry_run=args.dry_run)
@@ -2560,8 +2717,15 @@ def main():
     except Exception as e:
         print(f"[P9] FAILED: {e}")
 
+    # Restart dependabot-webhook (stopped in P0)
+    dep = setup.get("dependabot", {})
+    if dep.get("stopped") and not args.dry_run:
+        try:
+            run(["systemctl", "--user", "start", DEPENDABOT_UNIT], env=user_env())
+            print("[cleanup] dependabot-webhook restarted")
+        except Exception as e:
+            print(f"[cleanup] dependabot restart failed: {e}")
+
     print(f"\nDone in {elapsed:.0f}s")
-
-
 if __name__ == "__main__":
     main()

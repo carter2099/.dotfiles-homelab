@@ -16,11 +16,16 @@ for topic in "${TOPICS[@]}"; do
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) START $topic" | tee -a "$LOGFILE"
     START_TS=$(date +%s)
 
-    python3 "$HOME/scripts/digest_runner.py" "$topic"
-
-    END_TS=$(date +%s)
-    DURATION=$((END_TS - START_TS))
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DONE  $topic duration=${DURATION}s" | tee -a "$LOGFILE"
+    if python3 "$HOME/scripts/digest_runner.py" "$topic"; then
+        END_TS=$(date +%s)
+        DURATION=$((END_TS - START_TS))
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DONE  $topic duration=${DURATION}s" | tee -a "$LOGFILE"
+    else
+        RC=$?
+        END_TS=$(date +%s)
+        DURATION=$((END_TS - START_TS))
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FAIL  $topic (exit=$RC) duration=${DURATION}s — continuing" | tee -a "$LOGFILE"
+    fi
 done
 
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ALL DONE" | tee -a "$LOGFILE"
