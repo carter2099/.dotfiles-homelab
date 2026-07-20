@@ -63,42 +63,75 @@ DEFAULT_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
-<body style="margin:0; padding:0; background-color:#f4f4f7; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-<table role="presentation" width="100%" style="background-color:#f4f4f7; padding:24px 0;">
+<body style="margin:0; padding:0; background-color:#f4f4f7; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; color:#2a2a36;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7; padding:24px 0;">
 <tr><td align="center">
-<table role="presentation" width="600" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.08);">
-<tr><td style="background-color:#1a1a2e; padding:28px 32px;">
-<h1 style="margin:0; color:#ffffff; font-size:22px; font-weight:600;">Homelab Steward</h1>
-<p style="margin:6px 0 0; color:#a0a0b8; font-size:14px;">{{DATE}}</p></td></tr>
-<tr><td style="padding:24px 32px 16px;">
-<p style="margin:0; color:#444; font-size:15px; line-height:1.6;">{{TLDR}}</p></td></tr>
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 2px 10px rgba(20,20,40,0.06);">
+<!-- Header -->
+<tr><td style="background-color:#1a1a2e; padding:26px 32px;">
+<h1 style="margin:0; color:#ffffff; font-size:20px; font-weight:600; letter-spacing:0.2px;">Homelab Steward</h1>
+<p style="margin:6px 0 0; color:#b8b8d0; font-size:13px;">{{DATE}}</p>
+</td></tr>
+<!-- Summary -->
+<tr><td style="padding:22px 32px 14px;">
+<p style="margin:0; color:#2a2a36; font-size:14px; line-height:1.55;">{{TLDR}}</p>
+</td></tr>
 {{TROUBLESHOOT}}
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#2e7d32; font-size:15px; font-weight:700;">Updates Applied</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{UPDATES}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#1565c0; font-size:15px; font-weight:700;">Validation</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{VALIDATION}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#1a1a2e; font-size:15px; font-weight:700;">Heartbeat</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{HEARTBEAT}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#6a1b9a; font-size:15px; font-weight:700;">Audit</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{AUDIT}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#e65100; font-size:15px; font-weight:700;">Work Queue</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{QUEUE}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#00838f; font-size:15px; font-weight:700;">Executor</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{EXECUTOR}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#1b5e20; font-size:15px; font-weight:700;">Auto-Fixes</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{FIXES}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
-<tr><td style="padding:16px 32px 8px;"><h2 style="margin:0; color:#37474f; font-size:15px; font-weight:700;">OpenCode Go Usage</h2></td></tr>
-<tr><td style="padding:8px 32px 16px;">{{USAGE}}</td></tr>
-<tr><td style="padding:24px 32px; background-color:#f8f8fb; border-top:1px solid #e8e8ee;">
-<p style="margin:0; color:#999; font-size:12px; text-align:center;">{{FOOTER}}</p></td></tr>
-</table></td></tr></table></body></html>"""
+<!-- Updates Applied -->
+<tr><td style="padding:18px 32px 0;">
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #2e7d32; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Updates Applied</h2>
+</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{UPDATES}}</td></tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
+<!-- Validation -->
+<tr><td style="padding:18px 32px 0;">
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #1565c0; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Validation</h2>
+</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{VALIDATION}}</td></tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
+<!-- Heartbeat -->
+<tr><td style="padding:18px 32px 0;">
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #5b3cc4; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Status Heartbeat</h2>
+</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{HEARTBEAT}}</td></tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
+<!-- Audit -->
+<tr><td style="padding:18px 32px 0;">
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #00838f; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Nightly Audit</h2>
+</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{AUDIT}}</td></tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
+<!-- Work Queue -->
+<tr><td style="padding:18px 32px 0;">
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #e65100; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Work Queue</h2>
+</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{QUEUE}}</td></tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
+<!-- Executor -->
+<tr><td style="padding:18px 32px 0;">
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #6a1b9a; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Executor</h2>
+</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{EXECUTOR}}</td></tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
+<!-- Auto-Fixes -->
+<tr><td style="padding:18px 32px 0;">
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #2e7d32; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Auto-Fixes</h2>
+</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{FIXES}}</td></tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
+<!-- Usage -->
+<tr><td style="padding:18px 32px 0;">
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #37474f; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">OpenCode Go Usage</h2>
+</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{USAGE}}</td></tr>
+<!-- Footer -->
+<tr><td style="padding:18px 32px; background-color:#f8f8fb; border-top:1px solid #ececf2;">
+<p style="margin:0; color:#7b7b8a; font-size:11px; text-align:center;">{{FOOTER}}</p>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>"""
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -2434,25 +2467,75 @@ def phase_7_audit(run_dir, setup_data, dry_run=False):
 # ── P8: render + send ────────────────────────────────────────────────
 
 
-def _badge(verdict):
-    """Return an HTML status badge for an audit verdict."""
-    badges = {
-        "PASS": '<span style="color:#2e7d32; font-weight:700;">PASS</span>',
-        "DRIFT": '<span style="color:#c62828; font-weight:700;">DRIFT</span>',
-        "ATTENTION": '<span style="color:#f57f17; font-weight:700;">ATTENTION</span>',
-        "UNVERIFIABLE": '<span style="color:#888; font-weight:700;">UNVERIFIABLE</span>',
-        "cached-PASS": '<span style="color:#aaa; font-weight:400;">cached-PASS</span>',
-        "collector-failed": '<span style="color:#c62828; font-weight:700;">COLLECTOR FAILED</span>',
-        "worker-failed": '<span style="color:#c62828; font-weight:700;">WORKER FAILED</span>',
+def _chip(text, color):
+    """Inline rounded status chip."""
+    return (
+        f'<span style="display:inline-block; padding:1px 8px; border-radius:10px; '
+        f'background-color:{color}1f; color:{color}; font-size:10px; font-weight:700; '
+        f'letter-spacing:0.6px; text-transform:uppercase; white-space:nowrap;">{text}</span>'
+    )
 
-        "dry-run-collector-only": '<span style="color:#888;">collector-only (dry-run)</span>',
+
+def _dot(level):
+    color = {"ok": "#2e7d32", "warn": "#e65100",
+             "danger": "#c62828", "muted": "#9aa0b2"}.get(level, "#9aa0b2")
+    return (
+        f'<span style="display:inline-block; width:7px; height:7px; border-radius:50%; '
+        f'background-color:{color}; vertical-align:middle; margin-right:5px; '
+        f'font-size:0; line-height:0;">&nbsp;</span>'
+    )
+
+
+def _sub_header(label):
+    return (
+        f'<p style="margin:12px 0 3px; color:#7b7b8a; font-size:10px; font-weight:700; '
+        f'letter-spacing:0.8px; text-transform:uppercase;">{label}</p>'
+    )
+
+
+def _kv_rows(rows):
+    """rows: list of (label, value_html). Returns a 2-column nested table."""
+    if not rows:
+        return ""
+    out = ['<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+           'style="font-size:13px; color:#2a2a36; border-collapse:collapse;">']
+    for label, val in rows:
+        out.append(
+            '<tr>'
+            f'<td width="40%" style="padding:4px 12px 4px 0; vertical-align:top; '
+            f'color:#7b7b8a; font-size:12px;">{label}</td>'
+            f'<td style="padding:4px 0; vertical-align:top; color:#2a2a36;">{val}</td>'
+            '</tr>'
+        )
+    out.append('</table>')
+    return "".join(out)
+
+
+def _badge(verdict):
+    """Return an HTML status chip for an audit verdict."""
+    palette = {
+        "PASS": "#2e7d32",
+        "DRIFT": "#c62828",
+        "ATTENTION": "#e65100",
+        "UNVERIFIABLE": "#9aa0b2",
+        "collector-failed": "#c62828",
+        "worker-failed": "#c62828",
+        "dry-run-collector-only": "#9aa0b2",
     }
+    label = verdict
+    if verdict == "dry-run-collector-only":
+        label = "collector-only · dry-run"
+    elif verdict == "collector-failed":
+        label = "collector failed"
+    elif verdict == "worker-failed":
+        label = "worker failed"
+    color = palette.get(verdict, "#9aa0b2")
     if verdict.startswith("cached-"):
         base = verdict.removeprefix("cached-")
         color = {"PASS": "#2e7d32", "DRIFT": "#c62828",
-                 "ATTENTION": "#f57f17"}.get(base, "#888")
-        return f'<span style="color:{color}; font-weight:400;">cached-{base}</span>'
-    return badges.get(verdict, f'<span style="color:#888;">{verdict}</span>')
+                 "ATTENTION": "#e65100"}.get(base, "#9aa0b2")
+        return _chip(f"CACHED {base}", color)
+    return _chip(label, color)
 
 
 def _fix_one_section(section_name, confirmed_findings, dry_run):
@@ -2691,355 +2774,479 @@ def _html_validation(validation_data):
 
 
 
-def _sparkline(values, width=10):
-    """Return a Unicode sparkline string for a list of numeric values."""
-    if not values or all(v == 0 for v in values):
-        return "no data"
-    mn = min(values)
-    mx = max(values)
-    if mx == mn:
-        return "\u2584" * min(len(values), width)
-    chars = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-    def bucket(v):
-        idx = int((v - mn) / (mx - mn) * (len(chars) - 1))
-        return chars[min(idx, len(chars) - 1)]
-    if len(values) > width:
-        step = len(values) / width
-        sampled = [values[int(i * step)] for i in range(width)]
-    else:
-        sampled = values
-    return "".join(bucket(v) for v in sampled)
+def _trend_bar(values, segments=14, color="#5b3cc4"):
+    """Email-safe trend visualization: a row of cells whose shade ramps with value.
+    Uses a nested table (no SVG, no flexbox) so it renders in every mail client."""
+    nums = [float(v) for v in (values or []) if v is not None]
+    if not nums:
+        return '<span style="color:#9aa0b2; font-size:11px;">no data</span>'
+    mn, mx = min(nums), max(nums)
+    shades = ["#eef0f6", "#d8def0", "#bcc7e8", "#9daee0",
+              "#7c91d4", "#5b71c4", "#3d4fa8", "#2a2e78"]
+    cell_w = 100.0 / segments
+    n = len(nums)
+    cells = []
+    for i in range(segments):
+        idx = int(i * n / segments)
+        if idx >= n:
+            idx = n - 1
+        v = nums[idx]
+        if mx == mn:
+            si = len(shades) // 2 if mn > 0 else 0
+        else:
+            si = int(round((v - mn) / (mx - mn) * (len(shades) - 1)))
+        shade = shades[si]
+        cells.append(
+            f'<td width="{cell_w:.2f}%" style="background-color:{shade}; '
+            f'height:8px; line-height:8px; font-size:0;" align="left">&nbsp;</td>'
+        )
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;"><tr>' + "".join(cells) + '</tr></table>'
+    )
+
+
+def _fmt_num(v):
+    if v is None:
+        return "—"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return f"{f:g}"
+
 
 def _html_heartbeat(hb_data, sparklines=None):
-    """Render heartbeat block as compact HTML."""
-    lines = []
+    """Render the heartbeat as grouped, scannable HTML instead of a wall of <p>."""
+    out = []
 
-    # ── Units ──
-    uf = hb_data.get("failed_units", {})
-    user_f = uf.get("user", [])
-    sys_f = uf.get("system", [])
-    total_f = len([x for x in user_f if x]) + len([x for x in sys_f if x])
-    missing_units = hb_data.get("units", {}).get("missing", [])
-    if total_f == 0 and not missing_units:
-        lines.append('<p style="margin:0; color:#2e7d32; font-size:13px;">All units healthy</p>')
+    def append_group(header, rows):
+        if not rows:
+            return
+        out.append(_sub_header(header))
+        out.append(_kv_rows(rows))
+
+    # ── Systemd units + reboot ──
+    sys_rows = []
+    uf = hb_data.get("failed_units", {}) or {}
+    user_f = [x for x in uf.get("user", []) if x and x.strip()]
+    sys_f = [x for x in uf.get("system", []) if x and x.strip()]
+    missing = (hb_data.get("units", {}) or {}).get("missing", [])
+    if not user_f and not sys_f and not missing:
+        sys_rows.append(("Systemd units", _dot("ok") + "All units healthy"))
     else:
         for u in user_f:
-            if u.strip():
-                lines.append(f'<p style="margin:0; color:#c62828; font-size:13px;">FAILED user: {u.strip()}</p>')
+            sys_rows.append(("Failed (user)", _dot("danger") + u.strip()))
         for u in sys_f:
-            if u.strip():
-                lines.append(f'<p style="margin:0; color:#c62828; font-size:13px;">FAILED system: {u.strip()}</p>')
-        if missing_units:
-            lines.append(f'<p style="margin:0; color:#f57f17; font-size:13px;">Missing units: {", ".join(missing_units)}</p>')
+            sys_rows.append(("Failed (system)", _dot("danger") + u.strip()))
+        if missing:
+            sys_rows.append(("Missing units", _dot("warn") + ", ".join(missing)))
+    rb = hb_data.get("reboot", {}) or {}
+    if rb.get("needed"):
+        sys_rows.append(("Reboot", _dot("danger") + f'Needed — kernel {rb.get("kernel","?")}'.strip()))
+    else:
+        sys_rows.append(("Reboot", _dot("ok") + "Not needed"))
+    append_group("System health", sys_rows)
 
-    # ── LLM ──
-    fb = hb_data.get("llm_stack", {}).get("falling_back", False)
-    lines.append(f'<p style="margin:0; color:#{"f57f17" if fb else "2e7d32"}; font-size:13px;">'
-                 f'LLM: {"CLOUD FALLBACK" if fb else "local"}</p>')
-
-    # ── Backup ──
-    bt = hb_data.get("backup", {}).get("last_run", "")
-    if bt:
-        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">Backup: {bt}</p>')
-
-    # ── k3s ──
-    nodes = hb_data.get("k3s_nodes", [])
-    if nodes:
-        for n in nodes:
-            if "NAME" in n and "STATUS" in n:
-                continue  # skip header row
-            parts = n.split()
-            if len(parts) >= 2:
-                lines.append(f'<p style="margin:0; color:#555; font-size:13px;">k3s: {parts[0]} {parts[1]}</p>')
-                break
-
-    # ── Disk + Journal ──
-    parts_line = []
-    disk = hb_data.get("disk", {})
+    # ── Resources ──
+    res_rows = []
+    mem = hb_data.get("memory", {}) or {}
+    mem_avail = mem.get("available", "")
+    if mem_avail:
+        pressure = ""
+        mp = mem.get("pressure", "")
+        m = re.search(r"some avg10=([\d.]+).*full avg10=([\d.]+)", mp) if mp else None
+        if m:
+            pressure = f' · pressure {m.group(1)}/{m.group(2)}'
+        res_rows.append(("Memory", f'{mem_avail} available{pressure}'))
+    disk_parts = []
+    disk = hb_data.get("disk", {}) or {}
     if disk.get("df_root"):
         parts = disk["df_root"].splitlines()[-1].split()
         if len(parts) >= 5:
-            parts_line.append(f'Disk: {parts[4]} used ({parts[2]}/{parts[1]})')
+            disk_parts.append(f'{parts[4]} used ({parts[2]}/{parts[1]})')
     journal = hb_data.get("journal_disk_usage", "")
     if journal:
-        # "Archived and active journals take up 3.3G in the file system."
         jm = re.search(r"take up (\S+)", journal)
         if jm:
-            parts_line.append(f'journal: {jm.group(1)}')
-    if parts_line:
-        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">{" · ".join(parts_line)}</p>')
-
-    # ── Disk + Journal ──
-    parts_line = []
-    disk = hb_data.get("disk", {})
-
-    # ── Reboot ──
-    rb = hb_data.get("reboot", {})
-    if rb.get("needed"):
-        lines.append(f'<p style="margin:0; color:#c62828; font-size:13px;">Reboot needed (kernel: {rb.get("kernel","?")})</p>')
-    else:
-        lines.append('<p style="margin:0; color:#2e7d32; font-size:13px;">No reboot needed</p>')
-
-    # ── Memory ──
-    mem = hb_data.get("memory", {})
-    mem_avail = mem.get("available", "")
-    mem_pressure = mem.get("pressure", "")
-    if mem_avail:
-        pressure_short = ""
-        if mem_pressure:
-            m = re.search(r"some avg10=([\d.]+).*full avg10=([\d.]+)", mem_pressure)
-            if m:
-                pressure_short = f'pressure: {m.group(1)}/{m.group(2)}'
-        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">Memory: {mem_avail} available{" · " + pressure_short if pressure_short else ""}</p>')
-
-    # ── NVMe SMART ──
-    smart = hb_data.get("smart", {})
+            disk_parts.append(f'journal {jm.group(1)}')
+    if disk_parts:
+        res_rows.append(("Disk · journal", " · ".join(disk_parts)))
+    smart = hb_data.get("smart", {}) or {}
     if smart.get("wear_pct") or smart.get("available_spare"):
-        lines.append(f'<p style="margin:0; color:#2e7d32; font-size:13px;">'
-                     f'NVMe: {smart.get("wear_pct","?")} wear, {smart.get("available_spare","?")} spare, '
-                     f'{smart.get("media_errors","?")} errors</p>')
+        res_rows.append(("NVMe SMART", _dot("ok") +
+                         f'{smart.get("wear_pct","?")} wear · '
+                         f'{smart.get("available_spare","?")} spare · '
+                         f'{smart.get("media_errors","?")} media errors'))
     elif smart.get("status") == "skipped":
-        pass  # smartmontools not installed — silent
+        pass
+    append_group("System resources", res_rows)
 
-    # ── /etc/hosts ──
-    hosts = hb_data.get("hosts", {})
-    for hostname, info in hosts.items():
-        color = "#2e7d32" if info.get("resolves") else "#c62828"
-        ip = info.get("output", "").split()[0] if info.get("output") else "?"
-        lines.append(f'<p style="margin:0; color:{color}; font-size:13px;">{hostname}: {ip}</p>')
-
-    # ── DNS ──
-    dns = hb_data.get("dns", {})
+    # ── Network & services ──
+    net_rows = []
+    nodes = hb_data.get("k3s_nodes", [])
+    for n in nodes:
+        if "NAME" in n and "STATUS" in n:
+            continue
+        parts = n.split()
+        if len(parts) >= 2:
+            net_rows.append(("k3s node",
+                f'{parts[0]} <span style="color:#2e7d32; font-weight:600;">{parts[1]}</span>'))
+            break
+    fb = (hb_data.get("llm_stack", {}) or {}).get("falling_back", False)
+    net_rows.append(("LLM proxy",
+                     _dot("warn") + "Cloud fallback" if fb else _dot("ok") + "Local"))
+    bt = (hb_data.get("backup", {}) or {}).get("last_run", "")
+    if bt:
+        net_rows.append(("Last backup", bt))
+    dns = hb_data.get("dns", {}) or {}
     if dns:
         ok = sum(1 for v in dns.values() if v.get("resolves"))
         total = len(dns)
-        color = "#2e7d32" if ok == total else "#f57f17" if ok > 0 else "#c62828"
-        lines.append(f'<p style="margin:0; color:{color}; font-size:13px;">DNS: {ok}/{total} hostnames resolve</p>')
-
-    # ── docker-user-rules ──
-    dur = hb_data.get("docker_user_rules", {})
+        level = "ok" if ok == total else ("warn" if ok > 0 else "danger")
+        net_rows.append(("DNS", _dot(level) + f'{ok}/{total} hostnames resolve'))
+    hosts = hb_data.get("hosts", {}) or {}
+    for hostname, info in hosts.items():
+        level = "ok" if info.get("resolves") else "danger"
+        ip = info.get("output", "").split()[0] if info.get("output") else "?"
+        net_rows.append((f'/etc/hosts {hostname}', _dot(level) + ip))
+    dur = hb_data.get("docker_user_rules", {}) or {}
     if dur:
-        color = "#2e7d32" if dur.get("has_drop_default") else "#c62828"
-        status = "DROP present" if dur.get("has_drop_default") else "MISSING DROP"
-        lines.append(f'<p style="margin:0; color:{color}; font-size:13px;">docker-user-rules: {status}</p>')
+        if dur.get("has_drop_default"):
+            net_rows.append(("ufw docker-user", _dot("ok") + "DROP present"))
+        else:
+            net_rows.append(("ufw docker-user", _dot("danger") + "MISSING DROP"))
+    append_group("Network & services", net_rows)
 
-    # ── bundle-audit ──
-    ba = hb_data.get("bundle_audit", {})
+    # ── Security ──
+    sec_rows = []
+    tls = hb_data.get("tls_certs", {}) or {}
+    if tls:
+        tls_parts = []
+        for host, expiry in tls.items():
+            dm = re.search(r"notAfter=(.+?\d{4})\s", expiry)
+            date_str = dm.group(1) if dm else expiry[:20]
+            tls_parts.append(
+                f'<code style="font-family:Menlo,Consolas,monospace; font-size:11px; '
+                f'color:#2a2a36;">{host.split(".")[0]} {date_str}</code>')
+        sec_rows.append(("TLS certificates", "  ·  ".join(tls_parts)))
+    ba = hb_data.get("bundle_audit", {}) or {}
     if ba:
         ba_parts = []
         for app, result in ba.items():
-            icon = "✓" if "no vulnerabilities" in str(result) else "⚠"
-            ba_parts.append(f'{app} {icon}')
-        lines.append(f'<p style="margin:0; color:#555; font-size:13px;">bundle-audit: {", ".join(ba_parts)}</p>')
+            level = "ok" if "no vulnerabilities" in str(result) else "warn"
+            ba_parts.append(f"{app} {_dot(level)}")
+        sec_rows.append(("bundle-audit", "  ·  ".join(ba_parts)))
+    append_group("Security", sec_rows)
 
-    # ── TLS ──
-    tls = hb_data.get("tls_certs", {})
-    tls_parts = []
-    for host, expiry in tls.items():
-        # Extract just the date
-        m = re.search(r"notAfter=(.+?\d{4})\s", expiry)
-        date_str = m.group(1) if m else expiry[:20]
-        tls_parts.append(f'{host.split(".")[0]}: {date_str}')
-    if tls_parts:
-        lines.append(f'<p style="margin:0; color:#555; font-size:12px;">TLS: {", ".join(tls_parts)}</p>')
+    # ── Config drift ──
+    sd = hb_data.get("self_drift", {}) or {}
+    drift_rows = []
+    for section, data in sd.items():
+        if isinstance(data, dict):
+            issues = sum(1 for v in data.values()
+                         if v and isinstance(v, list) and len(v) > 0)
+            if issues:
+                drift_rows.append((section.replace("_", " "),
+                    _dot("warn") + f'{issues} drift item{"s" if issues != 1 else ""}'))
+    append_group("Config drift", drift_rows)
 
-    # ── self-drift summary ──
-    sd = hb_data.get("self_drift", {})
-    if sd:
-        drift_items = []
-        for section, data in sd.items():
-            if isinstance(data, dict):
-                issues = sum(1 for v in data.values() if v and (isinstance(v, list) and len(v) > 0))
-                if issues:
-                    drift_items.append(f'{section}: {issues} drift')
-        if drift_items:
-            lines.append(f'<p style="margin:0; color:#f57f17; font-size:12px;">config drift: {", ".join(drift_items)}</p>')
-
-    # ── Sparklines ──
+    # ── 30-day trends ──
     if sparklines:
-        lines.append('<p style="margin:12px 0 4px; color:#1a1a2e; font-size:12px; font-weight:600;">30-day trends</p>')
+        out.append(_sub_header("30-day trends"))
+        trends = ['<table role="presentation" width="100%" cellpadding="0" '
+                  'cellspacing="0" style="font-size:12px; border-collapse:collapse;">']
         for label, values in sparklines:
-            spark = _sparkline(values)
-            latest = values[-1] if values else "?"
-            lines.append(
-                f'<p style="margin:0; color:#555; font-size:12px; font-family:monospace;">'
-                f'{label}: {spark}  {latest}</p>'
+            nums = [float(v) for v in (values or []) if v is not None]
+            latest = _fmt_num(nums[-1] if nums else None)
+            peak = _fmt_num(max(nums) if nums else None)
+            bar = _trend_bar(nums) if nums else '<span style="color:#9aa0b2; font-size:11px;">no data</span>'
+            trends.append(
+                '<tr>'
+                f'<td width="42%" style="padding:4px 0 2px; color:#7b7b8a; vertical-align:middle;">{label}</td>'
+                f'<td align="right" style="padding:4px 10px 2px 0; color:#2a2a36; font-weight:600; vertical-align:middle;">{latest}</td>'
+                f'<td align="right" style="padding:4px 0 2px; color:#9aa0b2; font-size:11px; vertical-align:middle;">peak {peak}</td>'
+                '</tr>'
+                f'<tr><td colspan="3" style="padding:0 0 8px;">{bar}</td></tr>'
             )
+        trends.append('</table>')
+        out.append("".join(trends))
 
-    return "\n".join(lines)
+    return "".join(out)
+
+
+def _mini_bar(pct, color="#37474f"):
+    """Inline 0-100% horizontal bar, email-safe via nested table cells."""
+    try:
+        w = max(0.0, min(100.0, float(pct)))
+    except (TypeError, ValueError):
+        w = 0.0
+    return (
+        '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" '
+        'style="border-collapse:collapse;"><tr>'
+        f'<td width="{w:.0f}%" style="background-color:{color}; height:5px; '
+        f'line-height:5px; font-size:0;">&nbsp;</td>'
+        f'<td width="{100-w:.0f}%" style="background-color:#ececf2; height:5px; '
+        f'line-height:5px; font-size:0;">&nbsp;</td>'
+        '</tr></table>'
+    )
 
 
 def _html_audit(audit_data):
-    """Render audit sections as compact HTML."""
-    sections = audit_data.get("sections", [])
+    """Render audit sections as compact per-section cards."""
+    sections = audit_data.get("sections", []) or []
     if not sections:
-        return '<p style="margin:0; color:#888; font-size:13px;">No audit results.</p>'
-
-    lines = []
+        return '<p style="margin:0; color:#9aa0b2; font-size:13px;">No audit results.</p>'
+    out = []
     for sec in sections:
-        name = sec.get("name", "unknown")
+        name = (sec.get("name", "unknown") or "unknown").replace("_", " ")
         verdict = sec.get("verdict", "UNKNOWN")
         badge = _badge(verdict)
-        confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", [])
-        rejected = sec.get("judge_rejected", [])
+        confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", []) or []
+        rejected = sec.get("judge_rejected", []) or []
         n_confirmed = len(confirmed)
         n_rejected = len(rejected)
-
-        # Section header with counts
         summary = f'{n_confirmed} finding{"s" if n_confirmed != 1 else ""}'
         if n_rejected:
-            summary += f', {n_rejected} rejected'
-        lines.append(f'<p style="margin:0 0 2px; font-size:13px;"><strong>{name}:</strong> {badge} <span style="color:#888; font-size:11px;">({summary})</span></p>')
-
-        # Show first 3 confirmed findings
+            summary += f' · {n_rejected} rejected'
+        out.append(
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            'style="font-size:13px; border-collapse:collapse; margin:0 0 12px;">'
+            f'<tr><td style="padding:3px 0; color:#1a1a2e; font-weight:700;">{name}</td>'
+            f'<td align="right" style="padding:3px 0; white-space:nowrap;">{badge}</td></tr>'
+            f'<tr><td colspan="2" style="padding:0 0 4px; color:#9aa0b2; '
+            f'font-size:11px;">{summary}</td></tr>'
+        )
         for finding in confirmed[:3]:
-            claim = finding.get("claim", finding.get("evidence", ""))
-            lines.append(f'<p style="margin:0 0 2px 16px; color:#555; font-size:12px;">- {claim[:160]}</p>')
+            claim = (finding.get("claim") or finding.get("evidence") or "").strip()
+            out.append(
+                f'<tr><td colspan="2" style="padding:2px 0 2px 14px; color:#3a3a4a; '
+                f'font-size:12px; border-left:2px solid #ececf2;">{claim[:180]}</td></tr>'
+            )
         if n_confirmed > 3:
-            lines.append(f'<p style="margin:0 0 2px 16px; color:#888; font-size:11px;">… and {n_confirmed - 3} more</p>')
-
-        # Show rejected only if few, with short reasons
+            out.append(
+                f'<tr><td colspan="2" style="padding:2px 0 2px 14px; color:#9aa0b2; '
+                f'font-size:11px;">+ {n_confirmed - 3} more</td></tr>'
+            )
         for r in rejected[:2]:
-            claim = r.get("claim", "")
-            reason = r.get("reason", "")
-            lines.append(
-                f'<p style="margin:0 0 2px 16px; color:#888; font-size:12px; text-decoration:line-through;">'
-                f'- {claim[:120]}</p>'
-                f'<p style="margin:0 0 4px 16px; color:#888; font-size:11px;">Judge: {reason[:100]}</p>'
+            claim = (r.get("claim") or "").strip()
+            reason = (r.get("reason") or "").strip()
+            out.append(
+                f'<tr><td colspan="2" style="padding:2px 0 1px 14px; color:#9aa0b2; '
+                f'font-size:12px; text-decoration:line-through; '
+                f'border-left:2px solid #ececf2;">{claim[:140]}</td></tr>'
+                f'<tr><td colspan="2" style="padding:0 0 3px 14px; color:#9aa0b2; '
+                f'font-size:11px;">Judge: {reason[:120]}</td></tr>'
             )
         if n_rejected > 2:
-            lines.append(f'<p style="margin:0 0 2px 16px; color:#888; font-size:11px;">… and {n_rejected - 2} more rejected</p>')
-    return "\n".join(lines)
+            out.append(
+                f'<tr><td colspan="2" style="padding:2px 0 1px 14px; color:#9aa0b2; '
+                f'font-size:11px;">+ {n_rejected - 2} more rejected</td></tr>'
+            )
+        out.append('</table>')
+    return "".join(out)
 
 
 def _html_queue(queue_data):
-    """Render work queue as HTML."""
-    lines = []
-    ideas = queue_data.get("ideas", {})
-    plans = queue_data.get("plans", {})
-    inconsistencies = queue_data.get("inconsistencies", [])
-
-    lines.append(f'<p style="margin:0; color:#555; font-size:13px;">'
-                 f'Ideas outstanding: {ideas.get("total_outstanding", 0)}</p>')
+    """Render work queue as clean grouped rows with status chips."""
+    ideas = queue_data.get("ideas", {}) or {}
+    plans = queue_data.get("plans", {}) or {}
+    inconsistencies = queue_data.get("inconsistencies", []) or []
+    out = []
+    out.append(
+        f'<p style="margin:0 0 6px; font-size:13px;">'
+        f'<strong style="color:#1a1a2e;">Ideas outstanding:</strong> '
+        f'{ideas.get("total_outstanding", 0)}</p>'
+    )
     for idea in ideas.get("outstanding", [])[:10]:
-        lines.append(f'<p style="margin:0 0 2px 12px; color:#888; font-size:12px;">'
-                     f'- {idea["file"]} ({idea["age_days"]}d): {idea["heading"][:80]}</p>')
+        out.append(
+            f'<p style="margin:0 0 2px 14px; color:#3a3a4a; font-size:12px; '
+            f'border-left:2px solid #ececf2; padding-left:8px;">'
+            f'{idea["file"]} <span style="color:#9aa0b2;">({idea["age_days"]}d)</span> '
+            f'— {idea["heading"][:80]}</p>'
+        )
+
+    def _plan_row(chip_text, color, detail):
+        return (
+            f'<p style="margin:0 0 2px 14px; font-size:12px; padding-left:8px; '
+            f'border-left:2px solid {color};">{_chip(chip_text, color)} '
+            f'<span style="color:#3a3a4a;">{detail}</span></p>'
+        )
 
     for plan in plans.get("draft", []):
-        lines.append(f'<p style="margin:0 0 2px 12px; color:#1565c0; font-size:12px;">'
-                     f'DRAFT: {plan["file"]} — {plan["heading"][:80]}</p>')
-
+        out.append(_plan_row("DRAFT", "#1565c0",
+                              f'{plan["file"]} — {plan["heading"][:80]}'))
     for plan in plans.get("approved", []):
-        lines.append(f'<p style="margin:0 0 2px 12px; color:#2e7d32; font-size:12px;">'
-                     f'APPROVED: {plan["file"]} (priority {plan["priority"]})</p>')
-
+        out.append(_plan_row("APPROVED", "#2e7d32",
+                              f'{plan["file"]} (priority {plan["priority"]})'))
     for plan in plans.get("implementing", []):
-        lines.append(f'<p style="margin:0 0 2px 12px; color:#f57f17; font-size:12px;">'
-                     f'IMPLEMENTING: {plan["file"]} ({plan["age_days"]}d)</p>')
-
+        out.append(_plan_row("IMPLEMENTING", "#e65100",
+                              f'{plan["file"]} ({plan["age_days"]}d)'))
     for plan in plans.get("done_this_week", []):
-        lines.append(f'<p style="margin:0 0 2px 12px; color:#888; font-size:12px;">'
-                     f'Done: {plan["file"]}</p>')
+        out.append(_plan_row("DONE", "#9aa0b2", plan["file"]))
 
     if inconsistencies:
-        lines.append('<p style="margin:8px 0 0; color:#c62828; font-size:13px;"><strong>Inconsistencies:</strong></p>')
+        out.append(
+            '<p style="margin:10px 0 2px; color:#1a1a2e; font-size:11px; '
+            'font-weight:700; letter-spacing:0.6px; '
+            'text-transform:uppercase;">Inconsistencies</p>'
+        )
         for inc in inconsistencies:
-            lines.append(f'<p style="margin:0 0 2px 12px; color:#c62828; font-size:12px;">'
-                         f'- {inc["type"]}: {inc["detail"][:200]}</p>')
+            out.append(
+                f'<p style="margin:0 0 2px 14px; color:#c62828; font-size:12px; '
+                f'border-left:2px solid #c62828; padding-left:8px;">'
+                f'{inc["type"]}: {inc["detail"][:200]}</p>'
+            )
 
     candidate = queue_data.get("executor_candidate")
     cap = queue_data.get("executor_monthly_cap", 4)
     used = queue_data.get("executor_monthly_used", 0)
     if candidate:
-        lines.append(f'<p style="margin:8px 0 0; color:#00838f; font-size:13px;">'
-                     f'Next executor candidate: {candidate["file"]} '
-                     f'(monthly {used}/{cap})</p>')
-
-    return "\n".join(lines) if lines else '<p style="margin:0; color:#888; font-size:13px;">Queue empty.</p>'
+        out.append(
+            f'<p style="margin:10px 0 0; color:#00838f; font-size:12px;">'
+            f'<strong>Next executor candidate:</strong> {candidate["file"]} '
+            f'<span style="color:#9aa0b2;">(monthly {used}/{cap})</span></p>'
+        )
+    return "".join(out) if out else \
+        '<p style="margin:0; color:#9aa0b2; font-size:13px;">Queue empty.</p>'
 
 
 def _html_executor(exec_data):
     """Render executor result as HTML."""
     if not exec_data.get("executed"):
         reason = exec_data.get("reason", "no plan")
-        return f'<p style="margin:0; color:#888; font-size:13px;">Idle — {reason}</p>'
-
+        return f'<p style="margin:0; color:#9aa0b2; font-size:13px;">Idle — {reason}</p>'
     status = exec_data.get("status", "unknown")
     plan = exec_data.get("plan", "?")
-    packet = exec_data.get("executor_packet", {})
-    review = exec_data.get("review_packet", {})
-
-    lines = []
-    color = "#2e7d32" if status == "done" else "#c62828"
-    lines.append(f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
-                 f'Plan: {plan} — {status}</p>')
-    lines.append(f'<p style="margin:0 0 4px; color:#555; font-size:13px;">'
-                 f'Summary: {packet.get("summary", "N/A")[:300]}</p>')
-
-    commits = packet.get("commits", [])
-    for c in commits[:5]:
-        lines.append(f'<p style="margin:0 0 2px 12px; color:#555; font-size:12px;">- {c[:120]}</p>')
-
+    packet = exec_data.get("executor_packet", {}) or {}
+    review = exec_data.get("review_packet", {}) or {}
+    status_color = {"done": "#2e7d32", "partial": "#e65100",
+                    "failed": "#c62828"}.get(status, "#9aa0b2")
+    out = [
+        f'<p style="margin:0 0 4px; font-size:13px;">{_chip(status.upper(), status_color)} '
+        f'<strong style="color:#1a1a2e; margin-left:6px;">{plan}</strong></p>',
+        f'<p style="margin:0 0 6px; color:#3a3a4a; font-size:13px;">'
+        f'Summary: {str(packet.get("summary", "N/A"))[:300]}</p>',
+    ]
+    commits = packet.get("commits", []) or []
+    if commits:
+        out.append(
+            '<p style="margin:0 0 2px; color:#9aa0b2; font-size:10px; font-weight:700; '
+            'letter-spacing:0.8px; text-transform:uppercase;">Commits</p>'
+        )
+        for c in commits[:5]:
+            out.append(
+                f'<p style="margin:0 0 2px 14px; color:#3a3a4a; font-size:12px; '
+                f'font-family:Menlo,Consolas,monospace;">{str(c)[:120]}</p>'
+            )
     if review:
-        rev_verdict = review.get("verdict", "?")
-        lines.append(f'<p style="margin:4px 0 0; color:#{"2e7d32" if rev_verdict=="pass" else "#c62828"}; font-size:13px;">'
-                     f'Review: {rev_verdict}</p>')
-
-    return "\n".join(lines)
+        rev = (review.get("verdict") or "?")
+        rc = "#2e7d32" if rev == "pass" else "#c62828"
+        out.append(
+            f'<p style="margin:6px 0 0; font-size:13px;">'
+            f'{_chip("REVIEW " + rev.upper(), rc)}</p>'
+        )
+    return "".join(out)
 
 
 def _html_fixes(fixes_data):
     """Render auto-fix results as HTML."""
-    sections = fixes_data.get("sections", [])
+    sections = fixes_data.get("sections", []) or []
     if not sections:
-        return '<p style="margin:0; color:#888; font-size:13px;">No fixes applied.</p>'
-    lines = []
+        return '<p style="margin:0; color:#9aa0b2; font-size:13px;">No fixes applied.</p>'
+    out = []
     for s in sections:
         status = s.get("status", "?")
         if status == "dry-run":
-            lines.append(f'<p style="margin:0 0 8px; color:#888; font-size:13px;">'
-                         f'<strong>{s["section"]}</strong>: DRY RUN '
-                         f'({s.get("findings_count",0)} findings)</p>')
+            out.append(
+                f'<p style="margin:0 0 8px; font-size:13px;">{_chip("DRY-RUN", "#9aa0b2")} '
+                f'<strong style="color:#1a1a2e; margin-left:6px;">{s["section"]}</strong> '
+                f'<span style="color:#9aa0b2; font-size:12px;">'
+                f'{s.get("findings_count", 0)} findings</span></p>'
+            )
             continue
         if status == "skipped":
-            lines.append(f'<p style="margin:0 0 8px; color:#888; font-size:13px;">'
-                         f'<strong>{s["section"]}</strong>: skipped '
-                         f'({s.get("reason","")})</p>')
+            out.append(
+                f'<p style="margin:0 0 8px; font-size:13px;">{_chip("SKIPPED", "#9aa0b2")} '
+                f'<strong style="color:#1a1a2e; margin-left:6px;">{s["section"]}</strong> '
+                f'<span style="color:#9aa0b2; font-size:12px;">{s.get("reason","")}</span></p>'
+            )
             continue
         jv = s.get("judge_verdict", "?")
-        jv_color = {"pass": "#2e7d32", "partial": "#e65100", "fail": "#c62828"}.get(jv, "#888")
-        fixes = s.get("fixes_applied", [])
-        lines.append(f'<p style="margin:0 0 4px; color:#444; font-size:14px;">'
-                     f'<strong>{s["section"]}</strong>: {len(fixes)} fixes, '
-                     f'judge: <span style="color:{jv_color};">{jv}</span></p>')
+        jv_color = {"pass": "#2e7d32", "partial": "#e65100",
+                    "fail": "#c62828"}.get(jv, "#9aa0b2")
+        fixes = s.get("fixes_applied", []) or []
+        out.append(
+            f'<p style="margin:0 0 4px; font-size:13px;">'
+            f'<strong style="color:#1a1a2e;">{s["section"]}</strong> '
+            f'{len(fixes)} fixes {_chip("JUDGE " + jv.upper(), jv_color)}</p>'
+        )
         for f in fixes:
             st = f.get("status", "?")
-            st_color = {"fixed": "#2e7d32", "deferred": "#e65100", "failed": "#c62828"}.get(st, "#888")
-            lines.append(f'<p style="margin:0 0 2px 16px; color:#555; font-size:12px;">'
-                         f'<span style="color:{st_color};">{st}</span>: '
-                         f'{f.get("finding","")[:120]} '
-                         f'<span style="color:#888;">{f.get("action","")[:80]}</span></p>')
-    return "\n".join(lines)
+            st_color = {"fixed": "#2e7d32", "deferred": "#e65100",
+                        "failed": "#c62828"}.get(st, "#9aa0b2")
+            finding_txt = (f.get("finding", "") or "")[:120]
+            action_txt = (f.get("action", "") or "")[:80]
+            out.append(
+                f'<p style="margin:0 0 2px 14px; font-size:12px; '
+                f'border-left:2px solid {st_color}; padding-left:8px;">'
+                f'{_chip(st.upper(), st_color)} '
+                f'<span style="color:#3a3a4a;">{finding_txt}</span> '
+                f'<span style="color:#9aa0b2;">{action_txt}</span></p>'
+            )
+    return "".join(out)
 
 
 def _html_usage(usage_data):
-    """Render OpenCode Go usage report."""
-    lines = []
-    for acct in usage_data.get("accounts", []):
+    """Render OpenCode Go usage report with mini-bars per utilization metric."""
+    accounts = usage_data.get("accounts", []) or []
+    out = []
+    for acct in accounts:
+        name = acct.get("name", "?")
+        tier = acct.get("tier", "?")
         extra = ""
         if acct.get("payg_balance") is not None:
-            extra = f' \u00b7 PAYG ${acct["payg_balance"]:.2f} remaining'
-        lines.append(f'<p style="margin:0 0 2px 0; color:#555; font-size:13px;">'
-                     f'<strong>{acct.get("name","?")}</strong> ({acct.get("tier","?")}): '
-                     f'rolling={acct.get("rolling_pct",0)}% '
-                     f'weekly={acct.get("weekly_pct",0)}% '
-                     f'monthly={acct.get("monthly_pct",0)}%{extra}</p>')
+            extra = f' · PAYG ${acct["payg_balance"]:.2f} remaining'
+        out.append(
+            f'<p style="margin:0 0 3px; font-size:13px;">'
+            f'<strong style="color:#1a1a2e;">{name}</strong> '
+            f'<span style="color:#9aa0b2; font-size:12px;">({tier}){extra}</span></p>'
+        )
+        rows = (
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            'style="font-size:12px; border-collapse:collapse; margin-bottom:10px;">'
+        )
+        for label, key, color in [
+            ("Rolling 24h", "rolling_pct", "#37474f"),
+            ("Weekly", "weekly_pct", "#1565c0"),
+            ("Monthly", "monthly_pct", "#5b3cc4"),
+        ]:
+            pct = acct.get(key, 0)
+            try:
+                pct = float(pct)
+            except (TypeError, ValueError):
+                pct = 0.0
+            rows += (
+                '<tr>'
+                f'<td width="22%" style="padding:3px 0; color:#7b7b8a; font-size:12px; '
+                f'vertical-align:middle;">{label}</td>'
+                f'<td width="68%" style="padding:3px 0; vertical-align:middle;">'
+                f'{_mini_bar(pct, color)}</td>'
+                f'<td align="right" width="10%" style="padding:3px 0; color:#2a2a36; '
+                f'font-weight:600; vertical-align:middle; white-space:nowrap;">'
+                f'{pct:.0f}%</td>'
+                '</tr>'
+            )
+        rows += '</table>'
+        out.append(rows)
     if usage_data.get("proxy_error"):
-        lines.append(f'<p style="margin:4px 0 0; color:#c62828; font-size:12px;">'
-                     f'Proxy unreachable: {usage_data["proxy_error"]}</p>')
-    if not lines:
-        lines.append('<p style="margin:0; color:#888; font-size:13px;">No usage data.</p>')
-    return "\n".join(lines)
+        out.append(
+            f'<p style="margin:6px 0 0; color:#c62828; font-size:12px;">'
+            f'{_dot("danger")}Proxy unreachable: {usage_data["proxy_error"]}</p>'
+        )
+    if not out:
+        out.append('<p style="margin:0; color:#9aa0b2; font-size:13px;">No usage data.</p>')
+    return "".join(out)
 
 
 def phase_8_render_send(run_dir, setup_data, dry_run=False):
@@ -3118,8 +3325,12 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         tldr_parts.append(f"{n_fixes} fixes applied")
     tldr = " · ".join(tldr_parts) + "."
     if phase_failures:
-        tldr += (f'<br><span style="color:#c62828; font-weight:700;">'
-                 f'⚠ Phase failures: {", ".join(phase_failures)}</span>')
+        tldr += (
+            f'<br><span style="display:inline-block; margin-top:6px; padding:2px 8px; '
+            f'border-radius:6px; background-color:#c628281f; color:#c62828; '
+            f'font-size:12px; font-weight:700;">PHASE FAILURES: '
+            f'{", ".join(phase_failures)}</span>'
+        )
 
     # Troubleshoot section
     troubleshoot_html = ""
