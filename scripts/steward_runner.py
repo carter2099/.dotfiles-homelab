@@ -44,6 +44,7 @@ ENDPOINTS = {
     "delta_neutral": "http://127.0.0.1:43080",
     "pi-web": "http://127.0.0.1:8504",
     "llm-proxy": "http://127.0.0.1:8081/health",
+    "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
 STEWARD_MODEL = "opencode-go/deepseek-v4-pro"
 PROXY_HEALTH = "http://localhost:8082/health"
@@ -713,12 +714,37 @@ def phase_2_validate(run_dir):
 
     # Endpoint curls
     for name, url in ENDPOINTS.items():
-        code = run_capture(["curl", "-so", "/dev/null", "-w", "%{http_code}", url])
-        healthy = code.startswith("2") or code.startswith("3")
-        checks.append({
-            "name": f"endpoint_{name}", "url": url,
-            "http_code": code, "status": "ok" if healthy else "fail",
-        })
+        if name == "searxng":
+            # SearXNG may return 200 with error content; validate JSON results array
+            resp = run_capture(["curl", "-s", "--connect-timeout", "10", url])
+            if resp:
+                try:
+                    data = json.loads(resp)
+                    healthy = isinstance(data.get("results"), list)
+                    checks.append({
+                        "name": f"endpoint_{name}", "url": url,
+                        "http_code": "200", "status": "ok" if healthy else "fail",
+                        "content_valid": healthy,
+                    })
+                except json.JSONDecodeError:
+                    checks.append({
+                        "name": f"endpoint_{name}", "url": url,
+                        "http_code": "??", "status": "fail",
+                        "error": "invalid JSON response",
+                    })
+            else:
+                checks.append({
+                    "name": f"endpoint_{name}", "url": url,
+                    "http_code": "??", "status": "fail",
+                    "error": "empty response",
+                })
+        else:
+            code = run_capture(["curl", "-so", "/dev/null", "-w", "%{http_code}", url])
+            healthy = code.startswith("2") or code.startswith("3")
+            checks.append({
+                "name": f"endpoint_{name}", "url": url,
+                "http_code": code, "status": "ok" if healthy else "fail",
+            })
 
     # LLM proxy X-Fallback header
     fallback = run_capture(["curl", "-sI", "http://127.0.0.1:8081/health"])
@@ -727,6 +753,68 @@ def phase_2_validate(run_dir):
         "name": "llm_fallback", "status": "warning" if fallback_active else "ok",
         "fallback_active": fallback_active,
     })
+
+    # open-webui running image vs compose tag
+    owu_image_check = {"name": "openwebui_image_match", "status": "skipped"}
+    try:
+        running_image = run_capture(
+            ["docker", "inspect", "open-webui", "--format", "{{.Config.Image}}"])
+        if running_image:
+            if OPENWEBUI_COMPOSE.exists():
+                compose_text = OPENWEBUI_COMPOSE.read_text()
+                compose_m = re.search(r"ghcr\.io/open-webui/open-webui:([^\s\"']+)", compose_text)
+                compose_tag = compose_m.group(1) if compose_m else None
+                if compose_tag:
+                    owu_image_check["running_image"] = running_image
+                    owu_image_check["compose_tag"] = compose_tag
+                    if compose_tag in running_image:
+                        owu_image_check["status"] = "ok"
+                    else:
+                        owu_image_check["status"] = "warning"
+                else:
+                    owu_image_check["reason"] = "could not parse compose tag"
+            else:
+                owu_image_check["reason"] = "compose file missing"
+        else:
+            owu_image_check["reason"] = "container not found or not running"
+    except Exception as e:
+        owu_image_check["status"] = "error"
+        owu_image_check["error"] = str(e)
+    checks.append(owu_image_check)
+
+    # CF tunnel connector health
+    cf_check = {"name": "endpoint_tunnel-health", "status": "skipped"}
+    try:
+        cf_token = (HOME / ".config" / "cloudflare" / "api-token").read_text().strip()
+        cf_account_id = (HOME / ".config" / "cloudflare" / "account-id").read_text().strip()
+        cf_tunnel_id = (HOME / ".config" / "cloudflare" / "homelab-tunnel-id").read_text().strip()
+        if cf_token and cf_account_id and cf_tunnel_id:
+            cf_url = (
+                f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}"
+                f"/cfd_tunnel/{cf_tunnel_id}/connections"
+            )
+            cf_req = urllib.request.Request(
+                cf_url, headers={"Authorization": f"Bearer {cf_token}"})
+            with urllib.request.urlopen(cf_req, timeout=15) as cf_resp:
+                cf_data = json.loads(cf_resp.read().decode())
+            connectors = cf_data.get("result", [])
+            healthy = False
+            active_conns = 0
+            for connector in connectors:
+                for conn in connector.get("conns", []):
+                    if not conn.get("is_pending_reconnect", True):
+                        active_conns += 1
+            healthy = active_conns > 0
+            cf_check["status"] = "ok" if healthy else "fail"
+            cf_check["connector_count"] = len(connectors)
+            cf_check["active_connections"] = active_conns
+            cf_check["healthy"] = healthy
+        else:
+            cf_check["reason"] = "missing CF config files"
+    except Exception as e:
+        cf_check["status"] = "error"
+        cf_check["error"] = str(e)
+    checks.append(cf_check)
 
     data = {"checks": checks}
     write_json(run_dir / "02-validation.json", data)
@@ -738,11 +826,11 @@ def phase_2_validate(run_dir):
 
 
 def phase_3_troubleshoot(run_dir, dry_run=False):
-    """Phase 3: spawn omp troubleshooting agent if pi-web is unhealthy after P1 auto-apply.
+    """Phase 3: spawn omp troubleshooting agent if endpoints regressed after P1 auto-apply.
 
-    Instead of deterministic rollback, we spawn a deepseek-v4-pro agent with full system
-    access to diagnose and fix the issue on the new versions. If the agent can't fix it,
-    the failure is reported — we stay on the new versions and let Carter handle it.
+    Loads yesterday's validation to detect regressions (was-ok, now-not-ok).
+    Generalizes prompt with all regressed endpoints; pi-web is highest priority.
+    Preserves old behavior: if no regressions but pi-web is down and P1 mutated, still trigger.
     """
     if dry_run:
         print("[P3] DRY RUN — skipping troubleshooting agent")
@@ -758,83 +846,149 @@ def phase_3_troubleshoot(run_dir, dry_run=False):
     validation = read_json(validation_path)
     applied = read_json(applied_path)
 
-    pi_web_ok = True
-    for c in validation.get("checks", []):
-        if c.get("name") == "endpoint_pi-web" and c.get("status") != "ok":
-            pi_web_ok = False
-
-    if pi_web_ok:
-        print("[P3] skipped — pi-web healthy")
-        write_json(run_dir / "03-troubleshoot.json", {"triggered": False, "reason": "healthy"})
-        return
-
+    # Check for P1 mutations
     auto_steps = [s for s in applied.get("steps", [])
                   if s.get("step", "").startswith("auto_") and s.get("status") == "ok"]
     owu_step = [s for s in applied.get("steps", [])
                 if s.get("step") == "openwebui" and s.get("status") == "bumped"]
-
-    if not auto_steps and not owu_step:
+    mutations = len(auto_steps) + len(owu_step)
+    if not mutations:
         print("[P3] skipped — no packages were actually upgraded")
         write_json(run_dir / "03-troubleshoot.json",
-                   {"triggered": False, "reason": "no_mutations", "validation_failed": True})
+                   {"triggered": False, "reason": "no_mutations"})
         return
 
-    print("[P3] TROUBLESHOOT — pi-web unhealthy after auto-apply, spawning diagnostic agent")
+    # Build today's endpoint status map
+    today_status = {}
+    for c in validation.get("checks", []):
+        if c.get("name", "").startswith("endpoint_"):
+            today_status[c["name"]] = c.get("status", "?")
 
-    # Gather full diagnostic context
+    # Load yesterday's validation for regression detection
+    prev_date = prev_workday(datetime.now())
+    prev_date_str = prev_date.strftime("%Y-%m-%d")
+    prev_validation_path = RUN_DIR_BASE / prev_date_str / "02-validation.json"
+    yesterday_status = {}
+    if prev_validation_path.exists():
+        try:
+            prev_validation = read_json(prev_validation_path)
+            for c in prev_validation.get("checks", []):
+                if c.get("name", "").startswith("endpoint_"):
+                    yesterday_status[c["name"]] = c.get("status", "?")
+        except Exception as e:
+            print(f"[P3] warning — could not read yesterday's validation: {e}")
+
+    # Find regressions: yesterday ok, today not ok
+    regressed = []
+    for name, today_s in sorted(today_status.items()):
+        yesterday_s = yesterday_status.get(name)
+        if yesterday_s == "ok" and today_s != "ok":
+            regressed.append(name)
+
+    pi_web_down = today_status.get("endpoint_pi-web") != "ok"
+
+    # If no regressed but pi-web is down and wasn't yesterday, still trigger
+    if not regressed and pi_web_down:
+        yesterday_pi = yesterday_status.get("endpoint_pi-web")
+        if yesterday_pi != "fail":
+            regressed = ["endpoint_pi-web"]
+
+    # If no regressed and pi-web was already down yesterday, it's long-standing
+    if not regressed:
+        if pi_web_down:
+            print("[P3] skipped — pi-web is down but was also down yesterday (not a new regression)")
+        else:
+            print("[P3] skipped — no endpoint regressions")
+        write_json(run_dir / "03-troubleshoot.json",
+                   {"triggered": False, "reason": "no_regressions",
+                    "today_status": today_status, "yesterday_status": yesterday_status,
+                    "mutations": mutations})
+        return
+
+    regressed_names = [r.replace("endpoint_", "") for r in regressed]
+    print(f"[P3] TROUBLESHOOT — {len(regressed)} endpoint(s) regressed: {regressed_names}")
+
+    # Gather diagnostic context for regressed services
     diag = {
         "applied_steps": applied.get("steps", []),
-        "validation": {c["name"]: c.get("status", "?") for c in validation.get("checks", [])},
+        "validation": today_status,
+        "yesterday_validation": yesterday_status,
+        "regressed": regressed,
         "containers": run_capture(
             ["docker", "ps", "-a", "--format", "{{.Names}} {{.Status}} {{.Image}}"]),
         "docker_journal": run_capture(
             ["sudo", "journalctl", "-u", "docker", "--since", "30 min ago",
              "--no-pager", "-n", "80"]),
-        "pi_web_journal": run_capture(
-            ["journalctl", "--user", "-u", "pi-web", "--since", "30 min ago",
-             "--no-pager", "-n", "50"], env=user_env()),
-        "pi_web_sessiond_journal": run_capture(
-            ["journalctl", "--user", "-u", "pi-web-sessiond", "--since", "30 min ago",
-             "--no-pager", "-n", "50"], env=user_env()),
     }
 
+    # Add journal output for each regressed service
+    for name in regressed_names:
+        safe = name.replace("-", "_")
+        journal_out = run_capture(
+            ["journalctl", "--user", "-u", name, "--since", "30 min ago",
+             "--no-pager", "-n", "50"], env=user_env())
+        if not journal_out:
+            journal_out = run_capture(
+                ["sudo", "journalctl", "-u", name, "--since", "30 min ago",
+                 "--no-pager", "-n", "50"])
+        diag[f"{safe}_journal"] = journal_out
+
+    # Always include pi-web journals if pi-web is down (even if not in regressed)
+    if pi_web_down:
+        diag.setdefault("pi_web_journal", run_capture(
+            ["journalctl", "--user", "-u", "pi-web", "--since", "30 min ago",
+             "--no-pager", "-n", "50"], env=user_env()))
+        diag.setdefault("pi_web_sessiond_journal", run_capture(
+            ["journalctl", "--user", "-u", "pi-web-sessiond", "--since", "30 min ago",
+             "--no-pager", "-n", "50"], env=user_env()))
+
+    # Build diagnostic journal sections for the prompt
+    journal_sections = ""
+    for key, val in sorted(diag.items()):
+        if key.endswith("_journal") and key not in ("docker_journal",):
+            journal_sections += f"- {key}:\n{val}\n\n"
+
+    regressed_list = "\n".join(f"  - {r}" for r in regressed)
     troubleshoot_prompt = f"""
 You are a homelab troubleshooter. The nightly steward auto-applied updates and now
-pi-web (the always-on remote agent at pi.carter2099.com) is DOWN or unhealthy.
+the following endpoints have REGRESSED (were healthy yesterday, unhealthy today):
 
-Your job: diagnose WHY it's down and FIX IT so we stay on the new versions.
+{regressed_list}
+
+pi-web (the always-on remote agent at pi.carter2099.com) is the highest-priority target.
+
+Your job: diagnose WHY these endpoints regressed and FIX them so we stay on the new versions.
 Rolling back is a LAST RESORT — prefer fixing forward.
 
 WHAT CHANGED (P1 applied steps):
 {json.dumps(diag["applied_steps"], indent=2)}
 
-VALIDATION RESULTS:
+VALIDATION TODAY:
 {json.dumps(diag["validation"], indent=2)}
+
+YESTERDAY (was healthy):
+{json.dumps(diag.get("yesterday_validation", {}), indent=2)}
 
 DIAGNOSTICS:
 - Containers:
 {diag["containers"]}
 - Docker journal:
 {diag["docker_journal"]}
-- pi-web journal:
-{diag["pi_web_journal"]}
-- pi-web-sessiond journal:
-{diag["pi_web_sessiond_journal"]}
-
+{journal_sections}
 RULES:
 - You have full system access — use it.
 - Common causes: orphaned docker-proxy holding a port (check ss -tlnp), docker daemon
-  failed to restart after engine upgrade, cloudflared tunnel down, pi-web config mismatch,
-  sessiond crash.
+  failed to restart after engine upgrade, cloudflared tunnel down, config mismatch,
+  process crash.
 - Export XDG_RUNTIME_DIR=/run/user/$(id -u) before any systemctl --user commands.
 - If the fix is restarting a service, do it. If it's killing a docker-proxy, do it.
-- If you genuinely cannot fix it, say so clearly and explain why.
+- If you genuinely cannot fix an endpoint, say so clearly and explain why.
 
 Return a fenced ```json packet:
 {{"status": "fixed"|"partial"|"failed",
  "diagnosis": "root cause in one sentence",
  "actions_taken": ["action 1", "action 2"],
- "pi_web_healthy": true|false,
+ "healthy_endpoints": ["endpoint_name", ...],
  "remaining_issues": ["..."]}}
 """
 
@@ -845,37 +999,217 @@ Return a fenced ```json packet:
         agent_packet = _extract_json(agent_output, "troubleshoot packet")
     except Exception as e:
         agent_packet = {"status": "agent-failed", "diagnosis": str(e),
-                        "actions_taken": [], "pi_web_healthy": False,
+                        "actions_taken": [], "healthy_endpoints": [],
                         "remaining_issues": []}
 
     # Re-validate after agent
     re_validation = phase_2_validate(run_dir)
     write_json(run_dir / "02b-validation.json", re_validation)
 
+    # Check which regressed endpoints are now healthy
+    all_healthy = True
     pi_web_now = True
     for c in re_validation.get("checks", []):
+        if c.get("name") in regressed and c.get("status") != "ok":
+            all_healthy = False
         if c.get("name") == "endpoint_pi-web" and c.get("status") != "ok":
             pi_web_now = False
 
     data = {
         "triggered": True,
+        "regressed": regressed,
         "agent_status": agent_packet.get("status", "unknown"),
         "diagnosis": agent_packet.get("diagnosis", ""),
         "actions_taken": agent_packet.get("actions_taken", []),
+        "healthy_endpoints": agent_packet.get("healthy_endpoints", []),
         "pi_web_healthy": pi_web_now,
         "remaining_issues": agent_packet.get("remaining_issues", []),
         "agent_raw": agent_output[:4000],
-        "re_validation_healthy": pi_web_now,
+        "re_validation_healthy": all_healthy,
     }
-    if not pi_web_now:
+    if not all_healthy:
         data["final_diagnostics"] = {
             "containers": run_capture(
                 ["docker", "ps", "-a", "--format", "{{.Names}} {{.Status}} {{.Image}}"]),
         }
     write_json(run_dir / "03-troubleshoot.json", data)
     print(f"[P3] done -> {run_dir / '03-troubleshoot.json'} "
-          f"(agent: {agent_packet.get('status')}, pi-web: {'healthy' if pi_web_now else 'still down'})")
+          f"(agent: {agent_packet.get('status')}, regressed: {regressed_names})")
     return data
+
+
+# ── P3a: deterministic auto-remediation ──────────────────────────────
+
+
+def phase_3a_remediation(run_dir, dry_run=False):
+    """Phase 3a: deterministic auto-remediation — no LLM.
+
+    Checks:
+    1. Orphaned docker-proxy processes on documented ports
+    2. ufw rules for cni0/flannel.1
+    3. Docker bridge rules for 8081/8082
+    """
+    print("[P3a] deterministic remediation")
+
+    DOCUMENTED_PORTS = {
+        33099: "blog",
+        43080: "delta_neutral",
+        48100: "open-webui",
+        8504: "pi-web",
+        8080: "searxng",
+        8081: "llm-proxy",
+        8082: "opencode-go-proxy",
+    }
+
+    docker_proxy_results = []
+    ufw_results = []
+    bridge_results = []
+
+    # ── 1. Orphaned docker-proxy check ──
+    ss_out = run_capture(["sudo", "ss", "-tlnp", "state", "LISTEN"])
+    for port, container_name in DOCUMENTED_PORTS.items():
+        result = {"port": port, "container": container_name, "action": "skipped"}
+        try:
+            matching_lines = [l for l in ss_out.splitlines()
+                              if re.search(rf":{port}\s", l)]
+            if not matching_lines:
+                result["action"] = "skipped"
+                result["pre_state"] = "no_listener"
+                result["post_state"] = "no_listener"
+                docker_proxy_results.append(result)
+                continue
+
+            for line in matching_lines:
+                result["pre_state"] = line.strip()
+                if "docker-proxy" not in line:
+                    result["action"] = "attention_needed"
+                    result["reason"] = f"port held by non-docker-proxy process"
+                    result["post_state"] = line.strip()
+                    continue
+
+                pid_match = re.search(r"pid=(\d+)", line)
+                pid = int(pid_match.group(1)) if pid_match else None
+                if not pid:
+                    result["action"] = "attention_needed"
+                    result["reason"] = "docker-proxy found but could not extract PID"
+                    result["post_state"] = line.strip()
+                    continue
+
+                container_status = run_capture(
+                    ["docker", "ps", "-a", "--filter", f"name={container_name}",
+                     "--format", "{{.Status}}"])
+                result["container_status"] = container_status or "not_found"
+
+                if "Exited" in (container_status or ""):
+                    if not dry_run:
+                        run_capture(["sudo", "kill", str(pid)])
+                        run_capture(["docker", "rm", container_name])
+                        post_ss = run_capture(["sudo", "ss", "-tlnp", "state", "LISTEN"])
+                        post_lines = [l for l in post_ss.splitlines()
+                                      if re.search(rf":{port}\s", l)]
+                        result["post_state"] = post_lines[0].strip() if post_lines else "port_free"
+                    else:
+                        result["post_state"] = f"would kill pid={pid} and rm {container_name} (dry run)"
+                    result["action"] = "killed"
+                    result["killed_pid"] = pid
+                elif container_status:
+                    result["action"] = "skipped"
+                    result["reason"] = f"container running ({container_status})"
+                    result["post_state"] = line.strip()
+                else:
+                    result["action"] = "attention_needed"
+                    result["reason"] = "docker-proxy found but container not in docker ps"
+                    result["post_state"] = line.strip()
+        except Exception as e:
+            result["action"] = "error"
+            result["error"] = str(e)
+        docker_proxy_results.append(result)
+
+    # ── 2. ufw cni0/flannel.1 rules ──
+    ufw_status = run_capture(["sudo", "ufw", "status", "numbered"])
+    for iface in ["cni0", "flannel.1"]:
+        result = {"rule": iface, "action": "already_present"}
+        try:
+            if iface in ufw_status:
+                result["action"] = "already_present"
+                result["output"] = "rule exists"
+            else:
+                if not dry_run:
+                    ufw_out = run_capture(["sudo", "ufw", "allow", "in", "on", iface])
+                    result["action"] = "added"
+                    result["output"] = ufw_out
+                else:
+                    result["action"] = "would_add"
+                    result["output"] = "dry run"
+        except Exception as e:
+            result["action"] = "error"
+            result["error"] = str(e)
+        ufw_results.append(result)
+
+    # ── 3. Docker bridge rules for 8081/8082 ──
+    bridge_id = run_capture(
+        ["docker", "network", "inspect", "homelab-chat-search", "--format", "{{.Id}}"])
+
+    if not bridge_id:
+        for port in [8082, 8081]:
+            bridge_results.append({
+                "port": port, "bridge": None,
+                "action": "skipped",
+                "reason": "network homelab-chat-search not found",
+            })
+    else:
+        short_id = bridge_id[:12]
+        bridge_iface = f"br-{short_id}"
+
+        # Probe: can open-webui reach host.docker.internal:8082?
+        probe_ok = run_ok(["docker", "exec", "open-webui", "curl", "-s",
+                          "--connect-timeout", "5",
+                          "http://host.docker.internal:8082/health"])
+
+        ufw_status_bridge = run_capture(["sudo", "ufw", "status"])
+
+        for port in [8082, 8081]:
+            result = {"port": port, "bridge": bridge_iface, "action": "already_present"}
+            try:
+                if probe_ok and port == 8082:
+                    result["action"] = "skipped"
+                    result["reason"] = "probe succeeded — bridge rules working"
+                    bridge_results.append(result)
+                    continue
+
+                has_rule = any(
+                    bridge_iface in line and str(port) in line
+                    for line in ufw_status_bridge.splitlines()
+                )
+                if has_rule:
+                    result["action"] = "already_present"
+                else:
+                    if not dry_run:
+                        allow_out = run_capture(
+                            ["sudo", "ufw", "allow", "in", "on", bridge_iface,
+                             "to", "any", "port", str(port), "proto", "tcp"])
+                        result["action"] = "added"
+                        result["output"] = allow_out
+                    else:
+                        result["action"] = "would_add"
+                        result["output"] = "dry run"
+            except Exception as e:
+                result["action"] = "error"
+                result["error"] = str(e)
+            bridge_results.append(result)
+
+    data = {
+        "docker_proxy": docker_proxy_results,
+        "ufw_rules": ufw_results,
+        "bridge_rules": bridge_results,
+    }
+    write_json(run_dir / "03a-remediation.json", data)
+    print(f"[P3a] done -> {run_dir / '03a-remediation.json'}")
+    return data
+
+
+# ── P4: heartbeat ────────────────────────────────────────────────────
+
 def phase_4_heartbeat(run_dir):
     """Phase 4: extended heartbeat block."""
     print("[P4] heartbeat checks")
@@ -903,12 +1237,55 @@ def phase_4_heartbeat(run_dir):
     disk_df = run_capture(["df", "-h", "/"])
     docker_df = run_capture(["docker", "system", "df"])
 
+    # Journal disk usage
+    journal_usage = run_capture(["journalctl", "--disk-usage"])
+
+    # NVMe SMART health
+    smart_data = {}
+    smartctl_path = "/usr/sbin/smartctl"
+    if Path(smartctl_path).exists() and Path("/dev/nvme0n1").exists():
+        out, stderr, rc = run_capture_ok(["sudo", smartctl_path, "-a", "/dev/nvme0n1"], timeout=30)
+        wear_pct = ""
+        spare = ""
+        spare_thresh = ""
+        media_errors = ""
+        error_log = ""
+        for line in out.splitlines():
+            if "Percentage Used:" in line:
+                wear_pct = line.split(":")[-1].strip()
+            elif "Available Spare:" in line:
+                spare = line.split(":")[-1].strip()
+            elif "Available Spare Threshold:" in line:
+                spare_thresh = line.split(":")[-1].strip()
+            elif "Media and Data Integrity Errors:" in line:
+                media_errors = line.split(":")[-1].strip()
+            elif "Error Information Log Entries:" in line:
+                error_log = line.split(":")[-1].strip()
+        smart_data = {
+            "wear_pct": wear_pct, "available_spare": spare,
+            "spare_threshold": spare_thresh, "media_errors": media_errors,
+            "error_log_entries": error_log,
+            "raw_output": out[:2000],
+        }
+    else:
+        smart_data = {"status": "skipped", "reason": "smartctl or /dev/nvme0n1 not found"}
+
     # Reboot required
     reboot_needed = (Path("/var/run/reboot-required")).exists()
     kernel_ver = run_capture(["uname", "-r"])
 
     # Snap refresh
     snap_list = run_capture(["snap", "refresh", "--list"])
+
+    # Memory pressure / OOM risk
+    mem_free = run_capture(["free", "-h"])
+    mem_pressure = run_capture(["cat", "/proc/pressure/memory"]) if Path("/proc/pressure/memory").exists() else ""
+    mem_avail = ""
+    for line in mem_free.splitlines():
+        if "Mem:" in line:
+            parts = line.split()
+            if len(parts) >= 7:
+                mem_avail = parts[6]
 
     # TLS cert expiry for 3 hostnames
     tls_certs = {}
@@ -924,12 +1301,32 @@ def phase_4_heartbeat(run_dir):
         except Exception as e:
             tls_certs[host] = f"error: {e}"
 
+    # DNS resolution of homelab hostnames
+    dns_hostnames = [
+        "blog.carter2099.com", "chat.carter2099.com", "pi.carter2099.com",
+        "freshrss.carter2099.com", "deltaneutral.carter2099.com", "hooks.carter2099.com",
+    ]
+    dns_results = {}
+    for host in dns_hostnames:
+        out = run_capture(["dig", "+short", host], timeout=10)
+        dns_results[host] = {"resolves": bool(out), "records": out.splitlines() if out else []}
+
+    # /etc/hosts gamingrig entry
+    hosts_gamingrig = run_capture(["getent", "hosts", "gamingrig"])
+    hosts_gamingrig_ok = bool(hosts_gamingrig and not hosts_gamingrig.startswith("error"))
+
+    # docker-user-rules iptables verification
+    iptables_docker_user = run_capture(["sudo", "iptables", "-L", "DOCKER-USER", "-n"])
+    iptables_ok = "DROP" in iptables_docker_user and "0.0.0.0/0" in iptables_docker_user
+
     # User-unit inventory vs documented set
     documented_units = {
         "homelab-backup.service", "homelab-backup.timer",
+        "homelab-backup-notify.service",
         "digests-daily.service", "digests-daily.timer",
         "hyperliquid-sdk.service", "hyperliquid-sdk.timer",
         "homelab-steward.service", "homelab-steward.timer",
+        "homelab-steward-resume.service", "homelab-steward-resume.timer",
         "homelab-steward-notify.service",
         "opencode-go-proxy.service",
         "llm-proxy.service",
@@ -951,6 +1348,23 @@ def phase_4_heartbeat(run_dir):
     extra_units = active_units - documented_units
     missing_units = documented_units - active_units
 
+    # System unit inventory
+    documented_system_units = {
+        "cloudflared.service", "docker-user-rules.service", "ssh.service",
+        "ufw.service", "cron.service", "containerd.service", "docker.service",
+        "apparmor.service", "fstrim.timer",
+    }
+    all_system_units = run_capture(["systemctl", "list-units", "--all", "--no-legend"])
+    active_system_units = set()
+    for line in all_system_units.splitlines():
+        parts = line.split()
+        if parts:
+            name = parts[0]
+            if name.endswith(".service") or name.endswith(".timer"):
+                active_system_units.add(name)
+    extra_system_units = active_system_units - documented_system_units
+    missing_system_units = documented_system_units - active_system_units
+
     # Agent-state staleness (>14d flag)
     agent_state_stale = []
     agent_state_dir = HOME / "agent-state"
@@ -962,11 +1376,16 @@ def phase_4_heartbeat(run_dir):
                 if mtime < cutoff:
                     agent_state_stale.append({"file": f.name, "mtime": mtime.isoformat()})
 
-    # DDNS freshness
-    ddns_fresh = "unknown"
-    ddns_marker = HOME / "ddns" / "last-run"
-    if ddns_marker.exists():
-        ddns_fresh = run_capture(["cat", str(ddns_marker)])
+    # bundle-audit
+    bundle_audit = {}
+    for app_name, gemfile_lock in [("blog", HOME / "blog" / "blog" / "Gemfile.lock"),
+                                     ("delta_neutral", HOME / "delta_neutral" / "delta_neutral" / "Gemfile.lock")]:
+        if gemfile_lock.exists():
+            out = run_capture(["bundle-audit", "check", "--gemfile-lock", str(gemfile_lock)],
+                             timeout=120)
+            bundle_audit[app_name] = out if out else "no vulnerabilities found"
+        else:
+            bundle_audit[app_name] = "Gemfile.lock not found"
 
     # Steward self-health: last runs.log entry
     steward_self = {"status": "ok", "last_entry": None, "warning": None}
@@ -987,6 +1406,104 @@ def phase_4_heartbeat(run_dir):
         steward_self["warning"] = "No previous steward runs"
         steward_self["status"] = "first_run"
 
+    # Self-drift detection
+    # Endpoints: compare docker exposed ports to ENDPOINTS
+    docker_ps = run_capture(["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"])
+    exposed_ports = set()
+    for line in docker_ps.splitlines():
+        if "\t" in line:
+            _, ports = line.split("\t", 1)
+            for part in ports.split(", "):
+                if "->" in part:
+                    host_part = part.split("->")[0]
+                    if ":" in host_part:
+                        port_str = host_part.rsplit(":", 1)[-1]
+                        try:
+                            exposed_ports.add(int(port_str))
+                        except ValueError:
+                            pass
+    endpoint_ports = set()
+    for url in ENDPOINTS.values():
+        m = re.search(r":(\d+)", url)
+        if m:
+            endpoint_ports.add(int(m.group(1)))
+    extra_ports_drift = sorted(exposed_ports - endpoint_ports)
+    missing_endpoints_drift = sorted(endpoint_ports - exposed_ports)
+
+    # Unit drift: installed user units vs documented
+    installed_user_units = set()
+    user_unit_files = run_capture(
+        ["systemctl", "--user", "list-unit-files", "--no-legend"],
+        env=env,
+    )
+    for line in user_unit_files.splitlines():
+        parts = line.split()
+        if parts:
+            name = parts[0]
+            if name.endswith(".service") or name.endswith(".timer"):
+                installed_user_units.add(name)
+    extra_installed_units = sorted(installed_user_units - documented_units)
+    stale_documented_units = sorted(documented_units - installed_user_units)
+
+    # AUTO_PKGS drift
+    auto_pkg_installed = set()
+    try:
+        apt_check = run_capture(
+            ["bash", "-c",
+             "apt list --installed 2>/dev/null | grep -E 'docker-ce|docker-ce-cli|containerd|cloudflared'"]
+        )
+        for line in apt_check.splitlines():
+            pkg = line.split("/")[0].strip()
+            if pkg:
+                auto_pkg_installed.add(pkg)
+    except Exception:
+        pass
+    auto_pkg_extra = sorted(auto_pkg_installed - set(AUTO_PKGS))
+    auto_pkg_missing = sorted(set(AUTO_PKGS) - auto_pkg_installed)
+
+    # TLS hostname drift: compare tunnel routes to TLS-checked hostnames
+    tunnel_hostnames = []
+    try:
+        tunnel_list = run_capture(["cloudflared", "tunnel", "list"], timeout=15)
+        for line in tunnel_list.splitlines():
+            parts = line.split()
+            if parts and len(parts) >= 2:
+                tid = parts[0]
+                if tid and tid != "ID":
+                    routes = run_capture(
+                        ["cloudflared", "tunnel", "route", "dns", tid],
+                        timeout=15,
+                    )
+                    for rline in routes.splitlines():
+                        rparts = rline.split()
+                        if rparts and "." in rparts[0]:
+                            tunnel_hostnames.append(rparts[0])
+                    break
+    except Exception:
+        pass
+    tls_checked_hostnames = ["blog.carter2099.com", "chat.carter2099.com", "pi.carter2099.com"]
+    unchecked_tls = sorted(set(tunnel_hostnames) - set(tls_checked_hostnames))
+
+    self_drift = {
+        "endpoints": {
+            "extra_ports": extra_ports_drift,
+            "missing_endpoints": missing_endpoints_drift,
+        },
+        "units": {
+            "extra_installed": extra_installed_units,
+            "stale_documented": stale_documented_units,
+        },
+        "auto_pkgs": {
+            "extra_installed": auto_pkg_extra,
+            "missing_from_list": auto_pkg_missing,
+        },
+        "tls_hostnames": {
+            "tunnel_hostnames": tunnel_hostnames,
+            "checked_hostnames": tls_checked_hostnames,
+            "unchecked": unchecked_tls,
+        },
+    }
+
     data = {
         "failed_units": {
             "user": failed_user.splitlines() if failed_user else [],
@@ -996,18 +1513,35 @@ def phase_4_heartbeat(run_dir):
         "backup": {"last_run": backup_ts},
         "k3s_nodes": nodes.splitlines() if nodes else [],
         "disk": {"df_root": disk_df, "docker_system_df": docker_df},
+        "journal_disk_usage": journal_usage,
+        "smart": smart_data,
         "reboot": {"needed": reboot_needed, "kernel": kernel_ver},
         "snap": {"refresh_list": snap_list if snap_list and "All snaps up to date" not in snap_list else ""},
+        "memory": {"free_output": mem_free, "available": mem_avail, "pressure": mem_pressure},
         "tls_certs": tls_certs,
+        "dns": dns_results,
+        "hosts": {"gamingrig": {"resolves": hosts_gamingrig_ok, "output": hosts_gamingrig}},
+        "docker_user_rules": {
+            "chain_present": bool(iptables_docker_user),
+            "has_drop_default": iptables_ok,
+            "output": iptables_docker_user[:500],
+        },
         "units": {
             "active": sorted(active_units),
             "documented": sorted(documented_units),
             "extra": sorted(extra_units),
             "missing": sorted(missing_units),
+            "system": {
+                "active": sorted(active_system_units),
+                "documented": sorted(documented_system_units),
+                "extra": sorted(extra_system_units),
+                "missing": sorted(missing_system_units),
+            },
         },
         "agent_state_stale": agent_state_stale,
-        "ddns": ddns_fresh,
+        "bundle_audit": bundle_audit,
         "steward_self": steward_self,
+        "self_drift": self_drift,
     }
     write_json(run_dir / "04-heartbeat.json", data)
     print(f"[P4] done -> {run_dir / '04-heartbeat.json'}")
@@ -1552,11 +2086,31 @@ def _audit_collector_5_config_drift():
             run_capture(["git", "-C", str(path), "fetch"], timeout=30)
             deploy_repos[name] = run_capture(["git", "-C", str(path), "status", "-sb"])
 
+    # Parse notes INDEX.md for cross-reference with disk
+    indexed = set()
+    index_path = HOME / "notes" / "INDEX.md"
+    if index_path.exists():
+        for line in index_path.read_text().splitlines():
+            m = re.search(r"\]\(([^)]+\.md)\)", line)
+            if m:
+                indexed.add(m.group(1))
+
+    notes_dir = HOME / "notes"
+    on_disk = set()
+    if notes_dir.exists():
+        for md in notes_dir.rglob("*.md"):
+            if "sessions" in md.parts:
+                continue
+            rel = str(md.relative_to(notes_dir))
+            on_disk.add(rel)
+
     return {
         "k3s_config_diff": k3s_diff,
         "dotfiles_status": dotfiles_status,
         "notes_status": notes_status,
         "deploy_repos": deploy_repos,
+        "notes_in_index_not_on_disk": sorted(list(indexed - on_disk)),
+        "notes_on_disk_not_in_index": sorted(list(on_disk - indexed)),
     }
 
 
@@ -1668,7 +2222,7 @@ AUDIT_SECTIONS = [
             "(loopback-only: pi-web 8504, open-webui 48100, searxng 8080, llm-proxy 8081; ufw-gated: 8082; "
             "LAN: blog 33099, delta 43080), ufw ruleset intact (cni0/flannel.1/docker bridges), unattended-upgrades "
             "active, carter2099.com RDAP expiry (>30d out = ok), CF tunnel ingress vs expected hostnames "
-            "(pi, chat, hooks, opencode.carter2099.com), SSH failed-password volume. Flag anything unexpected."
+            "(pi, chat, hooks, deltaneutral, freshrss, blog, ssh), SSH failed-password volume. Flag anything unexpected."
         ),
     },
     {
@@ -2120,7 +2674,29 @@ def _html_validation(validation_data):
     return "\n".join(lines)
 
 
-def _html_heartbeat(hb_data):
+
+
+def _sparkline(values, width=10):
+    """Return a Unicode sparkline string for a list of numeric values."""
+    if not values or all(v == 0 for v in values):
+        return "no data"
+    mn = min(values)
+    mx = max(values)
+    if mx == mn:
+        return "\u2584" * min(len(values), width)
+    chars = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+    def bucket(v):
+        idx = int((v - mn) / (mx - mn) * (len(chars) - 1))
+        return chars[min(idx, len(chars) - 1)]
+    # If more values than width, sample evenly
+    if len(values) > width:
+        step = len(values) / width
+        sampled = [values[int(i * step)] for i in range(width)]
+    else:
+        sampled = values
+    return "".join(bucket(v) for v in sampled)
+
+def _html_heartbeat(hb_data, sparklines=None):
     """Render heartbeat block as HTML."""
     lines = []
     # Failed units
@@ -2181,6 +2757,17 @@ def _html_heartbeat(hb_data):
     if stale:
         names = [s["file"] for s in stale]
         lines.append(f'<p style="margin:0; color:#f57f17; font-size:13px;">Stale agent-state: {", ".join(names)}</p>')
+
+    # Sparklines (30-day trends from .runs.jsonl)
+    if sparklines:
+        lines.append('<p style="margin:12px 0 4px; color:#1a1a2e; font-size:12px; font-weight:600;">30-day trends</p>')
+        for label, values in sparklines:
+            spark = _sparkline(values)
+            latest = values[-1] if values else "?"
+            lines.append(
+                f'<p style="margin:0; color:#555; font-size:12px; font-family:monospace;">'
+                f'{label}: {spark}  {latest}</p>'
+            )
 
     return "\n".join(lines)
 
@@ -2360,6 +2947,32 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
     audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {"sections": []}
 
+    # Load sparkline data from runs log (last 30 entries)
+    sparklines = []
+    if RUNS_LOG.exists():
+        try:
+            raw_lines = RUNS_LOG.read_text().strip().splitlines()
+            entries = [json.loads(l) for l in raw_lines[-30:] if l.strip()]
+            series = {
+                "duration_s": [],
+                "applied": [],
+                "sections_fired": [],
+                "judge_rejections": [],
+                "usage_accounts": [],
+            }
+            for e in entries:
+                for k in series:
+                    series[k].append(e.get(k, 0))
+            sparklines = [
+                ("duration", series["duration_s"]),
+                ("updates applied", series["applied"]),
+                ("audit sections", series["sections_fired"]),
+                ("judge rej", series["judge_rejections"]),
+                ("OCG accts", series["usage_accounts"]),
+            ]
+        except Exception:
+            pass
+
     # Phase failures anywhere in the pipeline (each artifact records phase_failed)
     phase_failures = []
     for art in sorted(run_dir.glob("0*.json")):
@@ -2446,7 +3059,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         .replace("{{UPDATES}}", _html_updates(applied))
         .replace("{{TROUBLESHOOT}}", troubleshoot_html)
         .replace("{{VALIDATION}}", _html_validation(validation))
-        .replace("{{HEARTBEAT}}", _html_heartbeat(heartbeat))
+        .replace("{{HEARTBEAT}}", _html_heartbeat(heartbeat, sparklines=sparklines))
         .replace("{{AUDIT}}", _html_audit(audit))
         .replace("{{QUEUE}}", _html_queue(queue))
         .replace("{{EXECUTOR}}", _html_executor(executor))
@@ -2593,6 +3206,236 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     print(f"[P9] done -> {run_dir / 'summary.md'}")
 
 
+
+# ── P9b: dotfiles hygiene ────────────────────────────────────────────
+
+
+def phase_9b_dotfiles(run_dir, dry_run=False):
+    """Phase 9b: detect dirty dotfiles, classify, commit via agent, judge review."""
+    print("[P9b] dotfiles hygiene")
+
+    DOTFILES_GIT = str(HOME / ".dotfiles-homelab")
+    ALLOWED_PREFIXES = [
+        str(HOME / ".config"),
+        str(HOME / ".local" / "bin"),
+        str(HOME / ".zshrc"),
+        str(HOME / ".pi" / "agent"),
+        str(HOME / ".omp"),
+        str(HOME / "scripts"),
+        str(HOME / "open-webui"),
+        str(HOME / "searxng"),
+        str(HOME / "k3s"),
+        str(HOME / ".config" / "systemd" / "user"),
+    ]
+    SECRET_PATTERNS = [
+        re.compile(r".*api-token.*"),
+        re.compile(r".*\.env$"),
+        re.compile(r".*master\.key$"),
+        re.compile(r".*auth\.json$"),
+    ]
+    ACTIVE_WINDOW_MINUTES = 15
+
+    gate = {
+        "active_edit": False,
+        "out_of_scope": [],
+        "skipped_secret": [],
+    }
+
+    # ── 1. Run dotfiles status ────────────────────────────────────
+    dotfiles_cmd = [
+        "/usr/bin/git", "--git-dir", DOTFILES_GIT,
+        "--work-tree", str(HOME), "status", "--short",
+    ]
+    status_out = run_capture(dotfiles_cmd)
+
+    if not status_out:
+        print("  clean — no dirty dotfiles")
+        result = {"status": "clean", "gate": gate}
+        write_json(run_dir / "09b-dotfiles.json", result)
+        return
+
+    # ── 2. Parse changed paths ────────────────────────────────────
+    changed = []
+    for line in status_out.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # "XY path" — status codes are 2 chars
+        if len(stripped) >= 3 and stripped[1:3] == "??":
+            path = stripped[3:].strip()
+        elif len(stripped) >= 3 and stripped[2] == " ":
+            path = stripped[3:].strip()
+        else:
+            # Fallback: split on first space-after-status
+            parts = stripped.split(None, 1)
+            path = parts[1] if len(parts) > 1 else stripped
+        path = path.strip().strip('"').strip("'")
+        if path:
+            changed.append(path)
+
+    if not changed:
+        print("  no changed paths parsed")
+        result = {"status": "clean", "gate": gate}
+        write_json(run_dir / "09b-dotfiles.json", result)
+        return
+
+    print(f"  dirty paths: {len(changed)}")
+
+    # ── 3. Active-edit guard ──────────────────────────────────────
+    now = datetime.now()
+    youngest = None
+    for p in changed:
+        full = HOME / p
+        try:
+            mtime = datetime.fromtimestamp(full.stat().st_mtime)
+            age_min = (now - mtime).total_seconds() / 60.0
+            if youngest is None or mtime > youngest:
+                youngest = mtime
+            if age_min < ACTIVE_WINDOW_MINUTES:
+                gate["active_edit"] = True
+        except (FileNotFoundError, OSError):
+            # Path doesn't exist on disk — skip active-edit check for it
+            continue
+
+    if gate["active_edit"]:
+        print(f"  SKIPPED — active edit window ({ACTIVE_WINDOW_MINUTES} min)")
+        result = {
+            "status": "skipped",
+            "reason": "active_edit_window",
+            "youngest_mtime": youngest.isoformat() if youngest else None,
+            "gate": gate,
+        }
+        write_json(run_dir / "09b-dotfiles.json", result)
+        return
+
+    # ── 4. Path-sanity gate ───────────────────────────────────────
+    in_scope = []
+    for p in changed:
+        full = str(HOME / p)
+        allowed = any(full.startswith(prefix + "/") or full == prefix
+                      for prefix in ALLOWED_PREFIXES)
+        if not allowed:
+            gate["out_of_scope"].append(p)
+            print(f"    out_of_scope: {p}")
+        else:
+            in_scope.append(p)
+
+    # ── 5. Secret gate ────────────────────────────────────────────
+    clean_paths = []
+    for p in in_scope:
+        if any(pat.match(p) or pat.match(Path(p).name) for pat in SECRET_PATTERNS):
+            gate["skipped_secret"].append(p)
+            print(f"    skipped_secret: {p}")
+        else:
+            clean_paths.append(p)
+
+    if not clean_paths:
+        print("  no in-scope paths after filtering")
+        result = {
+            "status": "clean",
+            "gate": gate,
+            "filtered_all": True,
+            "reason": "all paths out of scope or secret",
+        }
+        write_json(run_dir / "09b-dotfiles.json", result)
+        return
+
+    print(f"  in-scope: {len(clean_paths)} paths")
+
+    # ── Dry-run bailout ───────────────────────────────────────────
+    if dry_run:
+        print("  DRY RUN — would commit:")
+        for p in clean_paths:
+            print(f"    {p}")
+        result = {
+            "status": "dry_run",
+            "gate": gate,
+            "would_commit": clean_paths,
+        }
+        write_json(run_dir / "09b-dotfiles.json", result)
+        return
+
+    # ── 6. Agent commit ───────────────────────────────────────────
+    skipped_list = gate["out_of_scope"] + gate["skipped_secret"]
+    path_list = "\n".join(f"- {p}" for p in clean_paths)
+    skip_list = "\n".join(f"- {p}" for p in skipped_list) if skipped_list else "(none)"
+
+    agent_prompt = f"""You are committing dirty dotfiles on Carter's homelab. The dirty paths are:
+{path_list}
+
+Rules:
+- Use `dotfiles` (alias: /usr/bin/git --git-dir=$HOME/.dotfiles-homelab
+  --work-tree=$HOME). NEVER bare `dotfiles add -A` or `dotfiles add .` —
+  AGENTS.md rule. Use targeted `dotfiles add <path>` per logical commit.
+- Group changes into one or more logical commits with conventional-style messages
+  ("feat: ...", "fix: ...", "chore: ...", "refactor: ..."). Group by concern.
+- Read each changed file's diff to decide grouping (`dotfiles diff <path>`).
+- Do NOT stage any file in the skip-list: [{', '.join(skipped_list)}].
+- `dotfiles push` exactly once after all commits succeed.
+- Return the fenced JSON:
+  {{"commits": [{{"message": "...", "files": [...]}}], "pushed": true|false,
+   "skipped": [{{"path": "...", "reason": "..."}}]}}"""
+
+    print("  spawning dotfiles commit agent …")
+    agent_raw = _call_omp_p(agent_prompt, timeout=600)
+    try:
+        agent_json = _extract_json(agent_raw, "dotfiles agent")
+    except ValueError as e:
+        print(f"  agent JSON extraction failed: {e}")
+        result = {
+            "status": "agent_failed",
+            "gate": gate,
+            "agent": {"raw_output": agent_raw[:2000], "error": str(e)},
+        }
+        write_json(run_dir / "09b-dotfiles.json", result)
+        return
+
+    commits = agent_json.get("commits", [])
+    pushed = agent_json.get("pushed", False)
+    print(f"  agent: {len(commits)} commits, pushed={pushed}")
+
+    # ── 7. Judge review ──────────────────────────────────────────
+    log_cmd = [
+        "/usr/bin/git", "--git-dir", DOTFILES_GIT,
+        "--work-tree", str(HOME), "log", "-5", "--oneline",
+    ]
+    dotfiles_log = run_capture(log_cmd)
+
+    judge_prompt = f"""You are reviewing dotfiles commits made by another agent on Carter's homelab.
+The agent reported these commits: {json.dumps(agent_json, indent=2)}
+Actual dotfiles log (last 5): {dotfiles_log}
+
+Verify:
+(a) push succeeded (check dotfiles log shows the commits)
+(b) no secret-bearing file was committed (check file list against: api-token, *.env, master.key, auth.json)
+(c) every dirty in-scope path is either committed or in the skipped list with a real reason
+
+Return fenced JSON:
+{{"verdict": "confirmed"|"rejected", "issues": ["..."], "confirmed_commits": [...]}}"""
+
+    print("  spawning judge review …")
+    judge_raw = _call_omp_p(judge_prompt, timeout=300)
+    try:
+        judge_json = _extract_json(judge_raw, "dotfiles judge")
+    except ValueError as e:
+        print(f"  judge JSON extraction failed: {e}")
+        judge_json = {"verdict": "judge_parse_error", "issues": [str(e)],
+                       "raw_output": judge_raw[:2000]}
+
+    verdict = judge_json.get("verdict", "unknown")
+    issues = judge_json.get("issues", [])
+    print(f"  judge: {verdict}" + (f" ({len(issues)} issues)" if issues else ""))
+
+    # ── 8. Output ────────────────────────────────────────────────
+    result = {
+        "status": "committed" if (commits and pushed) else "agent_partial",
+        "gate": gate,
+        "agent": {"commits": commits, "pushed": pushed, "raw_output": agent_raw[:3000]},
+        "judge": {"verdict": verdict, "issues": issues},
+    }
+    write_json(run_dir / "09b-dotfiles.json", result)
+    print(f"[P9b] done -> {run_dir / '09b-dotfiles.json'}")
+
 # ── main ──────────────────────────────────────────────────────────────
 
 
@@ -2646,6 +3489,17 @@ def main():
         print(f"[P3] FAILED: {e}")
         write_json(run_dir / "03-troubleshoot.json",
                    {"triggered": False, "phase_failed": True, "error": str(e)})
+
+    # P3a: deterministic auto-remediation
+    try:
+        if should_run("03a-remediation.json"):
+            phase_3a_remediation(run_dir, dry_run=args.dry_run)
+        else:
+            print("[P3a] skipped (resume)")
+    except Exception as e:
+        print(f"[P3a] FAILED: {e}")
+        write_json(run_dir / "03a-remediation.json",
+                   {"phase_failed": True, "error": str(e)})
 
     # Check for reboot-required (kernel update from P1 apt upgrade)
     if _reboot_if_needed(run_dir, "P3", dry_run=args.dry_run):
@@ -2716,6 +3570,14 @@ def main():
         phase_9_archive(run_dir, setup, elapsed)
     except Exception as e:
         print(f"[P9] FAILED: {e}")
+
+    # P9b: dotfiles hygiene
+    try:
+        phase_9b_dotfiles(run_dir, dry_run=args.dry_run)
+    except Exception as e:
+        print(f"[P9b] FAILED: {e}")
+        write_json(run_dir / "09b-dotfiles.json",
+                   {"status": "phase_failed", "error": str(e)})
 
     # Restart dependabot-webhook (stopped in P0)
     dep = setup.get("dependabot", {})
