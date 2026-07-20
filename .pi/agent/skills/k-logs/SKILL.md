@@ -1,6 +1,6 @@
 ---
 name: k-logs
-description: Tail logs for a k3s-hosted service (traefik, grafana, prometheus, freshrss, uptime-kuma, node-exporter). Thin wrapper around kubectl logs that handles namespace + label lookup so you don't have to remember them on mobile.
+description: Tail logs for a k3s-hosted service (traefik, grafana, prometheus, freshrss, node-exporter). Thin wrapper around kubectl logs that handles namespace + label lookup so you don't have to remember them on mobile.
 ---
 
 # k-logs
@@ -9,7 +9,7 @@ Tail logs from a k3s service. Saves typing `kubectl logs -n <ns> -l app=<x> --ta
 
 ## Required input
 
-- **service** (string): one of the third-party k3s services. Common: `traefik`, `grafana`, `prometheus`, `freshrss`, `uptime-kuma`, `node-exporter`.
+- **service** (string): one of the third-party k3s services. Common: `traefik`, `grafana`, `prometheus`, `freshrss`, `node-exporter`.
 - **lines** (int, optional): how many lines to tail. Default 100. Cap at 500 for mobile readability.
 
 ## Steps

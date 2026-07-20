@@ -489,12 +489,11 @@ def _p1_docker_assert():
 
 
 def _p1_k3s_rollouts():
-    """Rollout restart freshrss + uptime-kuma."""
+    """Rollout restart freshrss."""
     results = []
     env = user_env()
     for name, ns, timeout_s in [
         ("freshrss", "freshrss", 120),
-        ("uptime-kuma", "default", 120),
     ]:
         print(f"  [1e] k3s rollout restart {name}/{ns}")
         try:
@@ -1604,7 +1603,7 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Compare current versions (in evidence) against latest upstream stable: k3s, Go, Node, Ruby (rbenv), "
-            "neovim, pi + @jmfederico/pi-web (npm), docker images (searxng, freshrss, uptime-kuma, traefik, open-webui), "
+            "neovim, pi + @jmfederico/pi-web (npm), docker images (searxng, freshrss, traefik, open-webui), "
             "llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
             "Report per component: current / latest / status (current | behind | behind-major). "
             "Checking upstream (GitHub releases, npm registry, go.dev) is allowed; mutations are not."

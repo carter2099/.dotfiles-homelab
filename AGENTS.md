@@ -25,7 +25,7 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static secondary IPs `192.168.4.92` (blog, delta_neutral) and `192.168.4.102` (tbitt, stickies — both not live) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
+Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static secondary IPs `192.168.4.92` (k3s node IP; blog + delta_neutral ingress) and `192.168.4.102` (tbitt/stickies ingress — reserved, not live) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
 
 ## Hardware
 
@@ -55,7 +55,7 @@ This is the home directory, managed as a bare git repo for dotfiles:
 - `ddns/` - Cloudflare DDNS updater for WireGuard endpoint
 - `build/` - Source builds (neovim)
 - `dev/` - Scratch space for cloning GitHub repos, running tests, and doing development work
-- `scripts/` - Digest + update orchestrators (`digest_runner.py`, `update_runner.py`, `run_all_digests.sh`, `send_digest.py`)
+- `scripts/` - Digest + steward orchestrators (`digest_runner.py`, `steward_runner.py`, `run_all_digests.sh`, `send_digest.py`)
 - `notes/` - Agent-maintained markdown knowledge vault (standalone git repo)
 - `digests/` - Daily digest archives (`<topic>/YYYY-MM-DD/`)
 - `agent-state/` - Cross-reboot task persistence (`pending.md`)
@@ -164,7 +164,7 @@ k delete pod <name>  # k3s auto-recreates
 
 **Architecture pattern:** Two deployment models coexist:
 - **Self-developed webapps** (blog, hub, tbitt, stickies, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92, tbitt/stickies at 192.168.4.102). Note: hub and stickies are not currently live; tbitt is deprecated.
-- **Third-party services** (freshrss, uptime-kuma, traefik) run natively as k3s Deployments/DaemonSets. Manifests for grafana, prometheus, and node-exporter exist in `k3s/` but are **not currently deployed** (no pods/deployments) — ignore unless re-deploying.
+- **Third-party services** (freshrss, traefik) run natively as k3s Deployments/DaemonSets. (uptime-kuma was removed 2026-07-20 — the steward replaces it.) Manifests for grafana, prometheus, and node-exporter exist in `k3s/` but are **not currently deployed** (no pods/deployments) — ignore unless re-deploying.
 
 Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.). Live state: `k get nodes` / `k3s --version`.
 
@@ -207,9 +207,9 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 ### Dependabot Webhook (Go)
 - Always-on systemd user service (`dependabot-webhook.service`) listening on `localhost:9099`
 - Receives GitHub `pull_request` webhooks via Cloudflare tunnel at `hooks.carter2099.com/webhook`
-- Verifies HMAC-SHA256 signature, then spawns a sandboxed **Pi agent (Qwen 3.7 Max)** to handle bundler bumps
+- Verifies HMAC-SHA256 signature, then spawns a sandboxed **Pi agent (DeepSeek v4 Pro)** to handle bundler bumps
 - Agent runs with a narrow permission sandbox (`pi-sandbox.ts` + `--tools` flag) — default-deny bash floor + git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified via 4-test battery (allow, block, tool restriction, dry run).
-- 90-second coalesce window so a burst of PRs is handled in one agent run
+- 5-minute coalesce window so a burst of PRs is handled in one agent run
 - Source: `~/dev/dependabot-webhook/`; config (with webhook secret): `~/.config/dependabot-webhook/env`
 - Logs: `journalctl --user -u dependabot-webhook -f`
 - Release: `cd ~/dev/dependabot-webhook && bash release.sh`
@@ -222,7 +222,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 ### Open WebUI (Homelab Chat)
 - ChatGPT/Claude-style self-hosted chat UI at `https://chat.carter2099.com`. Not an agent — a general chat front-end.
 - Docker Compose in `~/open-webui/` (pinned tag — the nightly update runner bumps it; see the compose file), bound **`127.0.0.1:48100`** (loopback-only).
-- **Backend = the OpenCode Go endpoint** (`OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1`) so chat usage rides the **flat-sub session-cap billing**, NOT `zen/v1` pay-as-you-go. The 18 Go models populate automatically; a few (e.g. `qwen3.7-max`) 401 as "not supported for format oa-compat" and are opencode-native-only — just pick another. (Same account key, the base URL picks product/billing.)
+- **Backend = the OpenCode Go endpoint** (compose sets `OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1`, but the webui.db override below is what actually takes effect) so chat usage rides the **flat-sub session-cap billing**, NOT `zen/v1` pay-as-you-go. The 18 Go models populate automatically; a few (e.g. `qwen3.7-max`) 401 as "not supported for format oa-compat" and are opencode-native-only — just pick another. (Same account key, the base URL picks product/billing.)
 - Secrets (`OPENAI_API_KEY` = the Go key, `WEBUI_SECRET_KEY`) in gitignored `~/open-webui/.env` (600). Compose + `up.sh` are tracked; `.env` is not.
 - **Routing: direct-tunnel pattern** (like pi-web/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
 - **Auth: two layers.** CF Access (edge SSO, manually configured in Zero Trust) + Open WebUI's own login (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`).
@@ -241,6 +241,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Account-owned API token at `~/.config/cloudflare/api-token` (gitignored, 600 perms)
 - Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone). **No Zero Trust / Access scope** — so Access apps/policies (the SSO gate in front of tunneled hostnames) must be configured **manually in the Zero Trust dashboard**; the API token returns 403 on `/access/apps` (verified). To automate Access too, add "Access: Apps and Policies: Edit" (Account) to the token.
 - Supporting IDs in `~/.config/cloudflare/`: `account-id`, `zone-id`, `homelab-tunnel-id`
+- **Tunnel ingress inventory** (live, pruned 2026-07-20): `hooks`, `chat`, `pi`, `deltaneutral`, `freshrss`, `blog`, `ssh` + catch-all 404. Stale entries (grafana, prometheus, uptime, apex, railsapi) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally.
 - Env vars (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_HOMELAB_TUNNEL_ID`) exported from `.zshrc`
 
 ## Email Digests
@@ -447,6 +448,6 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`local-llm-gaming-rig.md`](notes/homelab/local-llm-gaming-rig.md) — llm-proxy / llama-swap topology, models, env vars, troubleshooting
 - [`email-digests.md`](notes/homelab/email-digests.md) — 9-phase digest workflow, stories-in-flight, audit/debug
 - [`homelab-steward.md`](notes/homelab/homelab-steward.md) — steward phases, work queue, executor, budget guard, debugging
-- [`homelab-backup.md`](notes/homelab/homelab-backup.md) — 22-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
+- [`homelab-backup.md`](notes/homelab/homelab-backup.md) — 23-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 
 Grep the vault (`rg -l "term" ~/notes/`) before starting work on a known topic; the `~/notes/INDEX.md` lists all formal notes.
