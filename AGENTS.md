@@ -427,7 +427,7 @@ The gaming rig runs **llama-swap** over llama.cpp's `llama-server.exe`, serving 
 
 Quick reference (verified 2026-07-21):
 - **Client endpoint:** `http://localhost:8081/v1` (homelab proxy) · **Backend (don't hit directly):** `http://192.168.4.103:8080/v1`
-- **Models:** `curl http://localhost:8081/v1/models` → 4 GGUF models: `qwen-3.6-35b-q5` (general reasoning), `ornith-1.0-35b-q5` (agentic coding), `qwen-3.5-4b-q8` (fast+reasoning), `agents-a1-4b-q8` (agentic tasks). All served via llama-swap. Model files on `C:\llm\`.
+- **Models:** `curl http://localhost:8081/v1/models` → 6 GGUF models: `qwen-3.6-35b-q5` (general reasoning), `ornith-1.0-35b-q5` (agentic coding), `ornith-1.0-9b-q6` (Ornith 1.0 9B reasoning), `qwythos-9b-v2-q6` (Qwythos v2 reasoning), `qwen-3.5-4b-q8` (fast+reasoning), `agents-a1-4b-q8` (agentic tasks). All served via llama-swap. Model files on `C:\llm\`.
 - **Service:** `llm-proxy.service` · binary `~/.local/bin/llm-proxy` · source `~/dev/llm-proxy/` · config `~/.config/llm-proxy/env`
 - **Logs/restart/deploy:** `journalctl --user -u llm-proxy -f` · `systemctl --user restart llm-proxy` · `cd ~/dev/llm-proxy && bash release.sh`
 - **Cloud fallback:** requests that can't reach the rig proxy to OpenCode Go (`deepseek-v4-flash`); `X-Fallback: true` response header signals it. Proxy waits up to `STARTUP_GRACE` (45s) for WoL wake before falling back.
