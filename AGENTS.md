@@ -241,7 +241,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Account-owned API token at `~/.config/cloudflare/api-token` (gitignored, 600 perms)
 - Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone). **No Zero Trust / Access scope** — so Access apps/policies (the SSO gate in front of tunneled hostnames) must be configured **manually in the Zero Trust dashboard**; the API token returns 403 on `/access/apps` (verified). To automate Access too, add "Access: Apps and Policies: Edit" (Account) to the token.
 - Supporting IDs in `~/.config/cloudflare/`: `account-id`, `zone-id`, `homelab-tunnel-id`
-- **Tunnel ingress inventory** (live, pruned 2026-07-20): `hooks`, `chat`, `pi`, `deltaneutral`, `freshrss`, `blog`, `ssh` + catch-all 404. Stale entries (grafana, prometheus, uptime, apex, railsapi) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally.
+- **Tunnel ingress inventory** (live, pruned 2026-07-20): `hooks`, `chat`, `pi`, `paseo`, `deltaneutral`, `freshrss`, `blog`, `ssh` + catch-all 404. Stale entries (grafana, prometheus, uptime, apex, railsapi) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally.
 - Env vars (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_HOMELAB_TUNNEL_ID`) exported from `.zshrc`
 
 ## Email Digests
@@ -256,7 +256,7 @@ All five digests run sequentially via a single systemd timer to avoid conflicts 
 |---|---|---|
 | `homelab-backup` | 03:00 | 11:00 PM (prev. day) |
 | `homelab-backup-restore-drill` | 12:00 (1st of month) | 8:00 AM (1st of month) |
-| `homelab-steward` | 05:00 | 1:00 AM |
+| `homelab-steward` | 21:00 (summer) / 22:00 (winter) | 5:00 PM |
 | `homelab-steward-resume` | on-boot (2 min delay) | — |
 | `digests-daily` | 08:00 | 4:00 AM |
 `digests-daily.service` runs `~/scripts/run_all_digests.sh`, which calls `digest_runner.py` per topic in order: **ai-tech → agentic-platform → ai-hardware → gaming → world**. Total runtime ~3–3.5 hours, done by ~7:30 AM ET. The old per-topic timers and `run_<topic>_digest.sh` scripts are **disabled/unused**.
@@ -287,7 +287,7 @@ bash ~/scripts/run_all_digests.sh                     # run all topics
 
 ## Homelab Steward
 
-Nightly maintenance at **1:00 AM ET** (05:00 UTC) via `homelab-steward.timer`. The steward is a 9-phase deterministic Python orchestrator (`~/scripts/steward_runner.py`) replacing both `update-check` and `agents-md-audit`. All LLM agents run as native `omp -p` subprocesses (no `pi` dependency), currently on `opencode-go/deepseek-v4-pro`. Every agent step is reviewed by an independent judge pass, evidence-grounded. **Full architecture, phase details, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md).** The safety rules below govern any maintainer doing apt/Docker work, not just the nightly run.
+Daily maintenance at **5:00 PM ET** (21:00 UTC summer / 22:00 UTC winter) via `homelab-steward.timer`. The steward is a 9-phase deterministic Python orchestrator (`~/scripts/steward_runner.py`) replacing both `update-check` and `agents-md-audit`. All LLM agents run as native `omp -p` subprocesses (no `pi` dependency), currently on `opencode-go/deepseek-v4-pro`. Every agent step is reviewed by an independent judge pass, evidence-grounded. **Full architecture, phase details, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md)** — read that note when working on the steward.
 
 **Phases (P0–P9):** P0 setup (usage report via proxy health, stop dependabot-webhook to prevent racing, prev-summary delta) · P1 update apply (apt, Docker, cloudflared, k3s, open-webui bump) · P2 validate (docker ps, k3s pods, endpoint curls) · P3 troubleshoot (if pi-web unhealthy after P1: spawn omp diagnostic agent to fix forward) · P4 heartbeat (failed units, LLM stack, backup recency, disk, TLS, ddns) · P5 work queue (ideas/plans scan, consistency checks, pick next plan) · P6 executor (≤1 approved plan/night via native omp agent, post-impl review, monthly cap) · P7 audit (7 nightly sections, collector→delta-gate→worker+judge omp pairs) · P7b auto-fix (per-section omp fix agent for confirmed findings, judge-reviewed) · P8 render+send (structured data → HTML → `send_digest.py`) · P9 archive (summary.md, `.runs.jsonl`, restart dependabot).
 
@@ -338,6 +338,23 @@ journalctl --user -u pi-web-sessiond -n 100 --no-pager   # sessiond logs
 ls -la ~/agent-state/                                    # pending reboot context, etc
 cat ~/.config/pi-web/config.json                         # config
 ```
+
+### Paseo (replaces pi-web)
+
+Paseo is a multi-agent orchestration daemon supporting omp, Claude Code, Codex, Copilot, and Pi agents through a single web UI. It replaces the pi-web service for remote agent access.
+
+- **Deployment:** Docker Compose at `~/paseo/` (image `paseo-local`, built from `Dockerfile` extending `ghcr.io/getpaseo/paseo:latest` with bun + omp). Managed via `up.sh`.
+- **Port:** `127.0.0.1:6767` (loopback-only, same direct-tunnel pattern as pi-web).
+- **Access URL:** `https://paseo.carter2099.com` (CF Access SSO requires manual setup in Zero Trust dashboard — not yet done; currently password-only).
+- **Auth:** `PASEO_PASSWORD` env var (stored in `~/paseo/.env`, 600, gitignored). The web UI prompts for this password on first connection. Also set in Paseo daemon config at `~/paseo/paseo-home/.paseo/config.json`.
+- **Routing:** direct-tunnel pattern — tunnel ingress `paseo.carter2099.com → http://localhost:6767`. DNS: proxied CNAME `paseo` → `<tunnel-id>.cfargotunnel.com`.
+- **Agent CLIs in container:** omp v17.0.6 + bun. omp config mounted at `~/paseo/omp-config/ → /home/paseo/.omp/agent` (models, auth, skills, sessions). Provider configured with `command: ["omp", "--allow-home"]` so omp stays in workspace dir.
+- **Workspace:** `/home/carter` on host mounted at `/workspace` in container. Use the `homelab` workspace in Paseo's project picker (not `paseo` which is the container home).
+- **`extra_hosts`:** `host.docker.internal:host-gateway` so container agents can reach host services (opencode-go-proxy on :8082, llm-proxy on :8081). UFW rules on `br-paseo` allow these.
+- **Manage:** `cd ~/paseo && bash up.sh` (rebuild + restart). Container uses `unless-stopped` restart policy.
+- **Logs:** `docker logs paseo -f` or `docker compose -f ~/paseo/docker-compose.yml logs -f`.
+- **Upgrading Paseo:** `docker pull ghcr.io/getpaseo/paseo:latest && cd ~/paseo && bash up.sh`.
+- **Password:** `grep PASEO_PASSWORD ~/paseo/.env`
 
 ### Reboot protocol
 

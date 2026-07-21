@@ -1,0 +1,164 @@
+{
+  "providers": {
+    "local-llm": {
+      "baseUrl": "http://host.docker.internal:8081/v1",
+      "api": "openai-completions",
+      "apiKey": "none",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "qwen-3.6-35b-q6",
+          "name": "Qwen 3.6 35B Q6 \u2014 General reasoning",
+          "reasoning": true
+        },
+        {
+          "id": "qwen-3.5-4b-q8",
+          "name": "Qwen 3.5 4B Q8 \u2014 Fast + reasoning",
+          "reasoning": true
+        },
+        {
+          "id": "agents-a1-4b-q8",
+          "name": "Agents-A1 4B Q8 \u2014 Agentic tasks",
+          "reasoning": true
+        },
+        {
+          "id": "ornith-1.0-35b-q4",
+          "name": "Ornith 1.0 35B Q4 \u2014 Agentic coding",
+          "reasoning": true
+        }
+      ]
+    },
+    "opencode-go": {
+      "api": "openai-completions",
+      "baseUrl": "http://host.docker.internal:8082/v1",
+      "apiKey": "proxy",
+      "models": [
+        {
+          "id": "glm-5.2",
+          "name": "GLM-5.2",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 1.4,
+            "output": 4.4,
+            "cacheRead": 0.26,
+            "cacheWrite": 0
+          },
+          "contextWindow": 202752,
+          "maxTokens": 32768
+        },
+        {
+          "id": "minimax-m2.5",
+          "name": "MiniMax M2.5",
+          "api": "anthropic-messages",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cacheRead": 0.06,
+            "cacheWrite": 0.375
+          },
+          "contextWindow": 204800,
+          "maxTokens": 131072
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 0.95,
+            "output": 4.0,
+            "cacheRead": 0.19,
+            "cacheWrite": 0
+          },
+          "contextWindow": 262144,
+          "maxTokens": 65536
+        },
+        {
+          "id": "qwen3.5-plus",
+          "name": "Qwen3.5 Plus",
+          "api": "anthropic-messages",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 0.5,
+            "output": 3.0,
+            "cacheRead": 0.05,
+            "cacheWrite": 0.625
+          },
+          "contextWindow": 1000000,
+          "maxTokens": 65536
+        },
+        {
+          "id": "mimo-v2-pro",
+          "name": "MiMo V2 Pro",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 1.74,
+            "output": 3.48,
+            "cacheRead": 0.0145,
+            "cacheWrite": 0
+          },
+          "contextWindow": 1000000,
+          "maxTokens": 128000
+        },
+        {
+          "id": "mimo-v2-omni",
+          "name": "MiMo V2 Omni",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 0.14,
+            "output": 0.28,
+            "cacheRead": 0.0028,
+            "cacheWrite": 0
+          },
+          "contextWindow": 1000000,
+          "maxTokens": 128000
+        },
+        {
+          "id": "hy3-preview",
+          "name": "HY3 Preview",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0.5,
+            "output": 2.0,
+            "cacheRead": 0.05,
+            "cacheWrite": 0
+          },
+          "contextWindow": 262144,
+          "maxTokens": 65536
+        }
+      ]
+    }
+  }
+}

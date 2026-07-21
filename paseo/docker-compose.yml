@@ -1,0 +1,29 @@
+# Paseo daemon + web UI (replaces pi-web)
+# Access via CF tunnel at paseo.carter2099.com -> loopback 6767
+services:
+  paseo:
+    image: paseo-local
+    container_name: paseo
+    restart: unless-stopped
+    networks:
+      - paseo-net
+    ports:
+      - "127.0.0.1:6767:6767"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      PI_CODING_AGENT_DIR: "/home/paseo/.omp/agent"
+      PASEO_HOSTNAMES: "paseo.carter2099.com"
+    volumes:
+      - ./paseo-home:/home/paseo
+      - /home/carter:/workspace
+      - ./omp-config:/home/paseo/.omp/agent
+
+networks:
+  paseo-net:
+    name: paseo-net
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-paseo
