@@ -11,3 +11,9 @@ modelRoles:
   tiny: opencode-go/deepseek-v4-flash:high
   slow: opencode-go/glm-5.2:high
   task: opencode-go/deepseek-v4-pro:high
+extensions: 
+  - /home/carter/dev/pi-omp-coder/extensions/ocusage.ts
+providers:
+  local-llm:
+    baseUrl: http://localhost:8081/v1
+    apiKey: proxy

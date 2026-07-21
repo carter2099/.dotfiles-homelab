@@ -425,9 +425,9 @@ SSH from this homelab can run arbitrary PowerShell commands on the gaming rig.
 
 The gaming rig runs **llama-swap** over llama.cpp's `llama-server.exe`, serving GGUF models from `C:\llm\`. The homelab runs **llm-proxy** (`~/dev/llm-proxy/`), a Go reverse proxy handling WoL wake-on-demand, gaming-aware auto-pause, SSH lifecycle management, and transparent cloud fallback. **Full operational runbook (topology, models, env vars, service management, troubleshooting) lives in [`~/notes/homelab/local-llm-gaming-rig.md`](notes/homelab/local-llm-gaming-rig.md)** — read that note when working on the LLM stack.
 
-Quick reference (verified 2026-07-11):
+Quick reference (verified 2026-07-21):
 - **Client endpoint:** `http://localhost:8081/v1` (homelab proxy) · **Backend (don't hit directly):** `http://192.168.4.103:8080/v1`
-- **Health:** `curl http://localhost:8081/health` · **Models:** `curl http://localhost:8081/v1/models` → `qwen-3.6-35b-q6` (thinking ON, default) / `qwen-3.6-35b-q6-fast` (thinking OFF, fallback). Model files + context config on the rig: `C:\llm\`.
+- **Models:** `curl http://localhost:8081/v1/models` → 4 GGUF models: `qwen-3.6-35b-q5` (general reasoning), `ornith-1.0-35b-q5` (agentic coding), `qwen-3.5-4b-q8` (fast+reasoning), `agents-a1-4b-q8` (agentic tasks). All served via llama-swap. Model files on `C:\llm\`.
 - **Service:** `llm-proxy.service` · binary `~/.local/bin/llm-proxy` · source `~/dev/llm-proxy/` · config `~/.config/llm-proxy/env`
 - **Logs/restart/deploy:** `journalctl --user -u llm-proxy -f` · `systemctl --user restart llm-proxy` · `cd ~/dev/llm-proxy && bash release.sh`
 - **Cloud fallback:** requests that can't reach the rig proxy to OpenCode Go (`deepseek-v4-flash`); `X-Fallback: true` response header signals it. Proxy waits up to `STARTUP_GRACE` (45s) for WoL wake before falling back.

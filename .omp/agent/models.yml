@@ -1,0 +1,5 @@
+providers:
+  opencode-go:
+    baseUrl: http://localhost:8082/v1
+  local-llm:
+    baseUrl: http://localhost:8081/v1

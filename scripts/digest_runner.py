@@ -50,8 +50,8 @@ SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL_REASONING = "qwen-3.6-35b-q6"       # reasoning ON — used for all phases
-MODEL_FAST = "qwen-3.6-35b-q6-fast"        # reasoning OFF — fallback only
+MODEL_REASONING = "qwen-3.6-35b-q5"       # reasoning ON — used for all phases
+MODEL_FAST = "qwen-3.5-4b-q8"              # reasoning ON — fast fallback
 DEFAULT_TIMEOUT = 900                        # generous for slow local model
 RESEARCH_TIMEOUT = 1800                      # 30 min for research pi -p calls
 FETCH_TIMEOUT = 900                          # 15 min per article fetch
@@ -765,6 +765,36 @@ def _extract_json(text: str, label: str = "output") -> Any:
     raise ValueError(f"Could not extract JSON from {label}. Raw text (first 500 chars):\n{text[:500]}")
 
 
+def _refetch_article_date(url: str, title: str) -> str | None:
+    """Re-fetch an article to independently extract its publication date.
+
+    Uses a lightweight pi -p call that only extracts the date from the page
+    (no summary, no analysis). Returns date string (YYYY-MM-DD) or None on failure.
+    """
+    system = (
+        "You are extracting a publication date from a news article. "
+        "Fetch the page, find the visible publication date (article header, "
+        "byline, or metadata), and output ONLY the date. Do not summarize. "
+        "Be quick.\n\n"
+        "Output a JSON object wrapped in ```json fences:\n"
+        '{"date_confirmed": "YYYY-MM-DD"}\n\n'
+        "If no publication date is visible anywhere on the page, use empty string."
+    )
+    prompt = (
+        f"Fetch this article: {url}\n\n"
+        "Extract ONLY the publication date from the page. Output the JSON."
+    )
+    try:
+        raw = _call_pi_p(prompt, model=MODEL_FAST, timeout=600,
+                         append_system=system)
+        result = _extract_json(raw, f"date-refetch:{title[:40]}")
+        dc = (result.get("date_confirmed") or "").strip()
+        return dc if dc else None
+    except Exception:
+        return None
+
+
+
 def _parse_date(date_str: str | None) -> datetime | None:
     """Parse a date string into a UTC-aware datetime. Returns None on failure."""
     if not date_str or not isinstance(date_str, str):
@@ -1149,10 +1179,18 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
 
 
 def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -> list[dict]:
-    """Phase 5: Batched LLM judge of summary accuracy and faithfulness.
+    """Phase 5: Python date validation + batched LLM judge of summary accuracy.
 
-    Splits summaries into batches of BATCH_SIZE (8-10) per LLM call.
-    Python merges results.
+    1. Python validates date_confirmed against calendar thresholds,
+       cross-referencing with source_verdict (set by Phase 3):
+       - date >= yesterday → ok (fresh, as expected)
+       - date 2-5 days old + source_verdict=ongoing → ok (legitimate Pool B)
+       - date 2-5 days old + source_verdict=fresh → drop (Phase 1/2 misclassified)
+       - date >5 days old → auto-drop regardless
+       - date missing → targeted re-fetch for date extraction, then re-check
+    2. Surviving summaries go through batched LLM judge for faithfulness
+       and completeness (date already verified, not re-checked).
+    3. Python merges results.
     """
     output_path = run_dir / "05-summaries-judged.json"
     if output_path.exists():
@@ -1169,23 +1207,116 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     print(f"  [run ] judge_summaries — {len(to_judge)} summaries to evaluate")
     t0 = time.time()
 
-    batches = _batch(to_judge, BATCH_SIZE)
-    print(f"  Batched into {len(batches)} LLM call(s) ({BATCH_SIZE}/batch)")
+    # ── Step 1: Python date validation ──
+    # Uses date_confirmed from Phase 4's actual article fetch — an independent
+    # source from Phase 1's date_published. Cross-references with source_verdict
+    # (set by Phase 3) to avoid penalizing legitimate ongoing articles.
+    # Re-fetches only when date_confirmed is missing.
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    stale_cutoff = today - timedelta(days=5)
+
+    validated: list[dict] = []
+    date_dropped: list[dict] = []
+    need_refetch: list[dict] = []
+
+    for s in to_judge:
+        dc = (s.get("date_confirmed") or "").strip()
+        parsed = _parse_date(dc)
+        source = s.get("source_verdict", "fresh")
+        if parsed is not None:
+            d = parsed.date()
+            if d >= yesterday:
+                validated.append(s)
+            elif d >= stale_cutoff and source == "ongoing":
+                # Legitimate ongoing article — was intentionally included in Pool B
+                validated.append(s)
+            elif d >= stale_cutoff and source == "fresh":
+                # Phase 1/2 tagged as fresh but Phase 4's fetch shows it's 2-5d old
+                age = (today - d).days
+                s["judge_verdict"] = "drop"
+                s["judge_issues"] = [f"date_mismatch: tagged fresh but confirmed {dc} is {age}d old"]
+                date_dropped.append(s)
+            else:
+                age = (today - d).days
+                s["judge_verdict"] = "drop"
+                s["judge_issues"] = [f"date_stale: confirmed {dc} is {age}d old (>5d cutoff)"]
+                date_dropped.append(s)
+        else:
+            need_refetch.append(s)
+
+    # Re-fetch dates for articles where Phase 4 didn't extract one
+    if need_refetch:
+        print(f"  Date validation: {len(need_refetch)} article(s) need date re-fetch")
+        for s in need_refetch:
+            url = s.get("url", "")
+            title = s.get("title", "unknown")
+            label = f"date-refetch:{title[:40]}"
+            print(f"  [run ] {label}")
+            t_refetch = time.time()
+            try:
+                refetched = _refetch_article_date(url, title)
+                elapsed = time.time() - t_refetch
+                source = s.get("source_verdict", "fresh")
+                if refetched:
+                    s["date_confirmed"] = refetched
+                    parsed = _parse_date(refetched)
+                    if parsed:
+                        d = parsed.date()
+                        if d >= yesterday:
+                            validated.append(s)
+                            print(f"  [done] {label} → {refetched} (fresh) ({elapsed:.0f}s)")
+                        elif d >= stale_cutoff and source == "ongoing":
+                            validated.append(s)
+                            print(f"  [done] {label} → {refetched} (ok, ongoing) ({elapsed:.0f}s)")
+                        elif d >= stale_cutoff and source == "fresh":
+                            age = (today - d).days
+                            s["judge_verdict"] = "drop"
+                            s["judge_issues"] = [f"date_mismatch: tagged fresh but confirmed {refetched} is {age}d old"]
+                            date_dropped.append(s)
+                            print(f"  [done] {label} → {refetched} (mismatch, auto-dropped) ({elapsed:.0f}s)")
+                        else:
+                            age = (today - d).days
+                            s["judge_verdict"] = "drop"
+                            s["judge_issues"] = [f"date_stale: confirmed {refetched} is {age}d old (>5d cutoff)"]
+                            date_dropped.append(s)
+                            print(f"  [done] {label} → {refetched} (stale, auto-dropped) ({elapsed:.0f}s)")
+                    else:
+                        validated.append(s)
+                        print(f"  [done] {label} → unparseable, passing to LLM ({elapsed:.0f}s)")
+                else:
+                    validated.append(s)
+                    print(f"  [done] {label} → no date found, passing to LLM ({elapsed:.0f}s)")
+            except Exception as e:
+                elapsed = time.time() - t_refetch
+                print(f"  [FAIL] {label} — {e} ({elapsed:.0f}s), passing to LLM")
+                validated.append(s)
+
+    print(f"  Date validation: {len(validated)} pass, "
+          f"{len(date_dropped)} auto-dropped (stale/mismatch), {len(need_refetch)} refetched")
+
+    # ── Step 2: LLM judge (date pre-validated, no speculative DATE_CHECK) ──
+    if validated:
+        batches = _batch(validated, BATCH_SIZE)
+        print(f"  Batched into {len(batches)} LLM call(s) ({BATCH_SIZE}/batch)")
+    else:
+        batches = []
 
     system = (
         "You are a strict editor verifying AI-written summaries. You receive article "
         "summaries and judge whether each is accurate and faithful to what the article "
         "likely contains.\n\n"
+        "NOTE: Publication dates have ALREADY been independently verified by fetching "
+        "each article and extracting its visible publication date. Do NOT re-check dates.\n\n"
         "For each summary, evaluate:\n"
-        "1. DATE_CHECK: Does the date_confirmed match what you'd expect from a real "
-        "article published today? If date is empty or looks fabricated, flag it.\n"
-        "2. FAITHFULNESS: Does the summary contain plausible facts, or does it read "
+        "1. FAITHFULNESS: Does the summary contain plausible facts, or does it read "
         "like hallucinated/generic filler? Signs of hallucination: vague claims without "
         "specifics, details that seem wrong for the source, overly confident statements "
         "that sound made up.\n"
-        "3. COMPLETENESS: Does the summary capture what the article is actually about? "
+        "2. COMPLETENESS: Does the summary capture what the article is actually about? "
         "A summary that misses the main point is unhelpful.\n"
-        "4. OVERALL: verdict = 'keep' | 'fix' (minor issues, note them) | 'drop' "
+        "3. OVERALL: verdict = 'keep' | 'fix' (minor issues, note them) | 'drop' "
         "(unrecoverable — hallucinated, wrong, or empty)\n\n"
         "Output a JSON array of judgments wrapped in ```json fences, one per summary:\n"
         '  [{"url": "...", "verdict": "keep|fix|drop", "issues": ["issue 1", ...], '
@@ -1217,11 +1348,15 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
             for s in batch:
                 all_judgments.append({"url": s.get("url", ""), "verdict": "keep", "issues": [], "fixed_summary": ""})
 
-    # Apply judgments
+    # ── Step 3: Apply judgments ──
     judged_map = {j.get("url", ""): j for j in all_judgments}
     results = []
     for s in summaries:
         url = s.get("url", "")
+        # Preserve pre-set verdicts from date validation (already dropped)
+        if s.get("judge_verdict"):
+            results.append(s)
+            continue
         j = judged_map.get(url, {})
         verdict = j.get("verdict", "keep")
         if s.get("fetch_success") is False:
@@ -1231,6 +1366,7 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
         s["judge_verdict"] = verdict
         s["judge_issues"] = j.get("issues", [])
         results.append(s)
+
 
     kept = sum(1 for r in results if r.get("judge_verdict") == "keep")
     fixed = sum(1 for r in results if r.get("judge_verdict") == "fix")
