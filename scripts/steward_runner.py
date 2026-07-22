@@ -862,7 +862,7 @@ def phase_3_troubleshoot(run_dir, dry_run=False):
 
     Loads yesterday's validation to detect regressions (was-ok, now-not-ok).
     Generalizes prompt with all regressed endpoints.
-    Preserves old behavior: if no regressions but P1 mutated, still trigger if any endpoint is down.
+    Triggers only when an endpoint that was ok yesterday is now failing.
     """
     if dry_run:
         print("[P3] DRY RUN — skipping troubleshooting agent")
@@ -1019,6 +1019,9 @@ Return a fenced ```json packet:
 
     # Check which regressed endpoints are now healthy
     all_healthy = True
+    for c in re_validation.get("checks", []):
+        if c.get("name") in regressed and c.get("status") != "ok":
+            all_healthy = False
 
     data = {
         "triggered": True,
