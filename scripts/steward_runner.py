@@ -46,6 +46,7 @@ ENDPOINTS = {
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
 STEWARD_MODEL = "opencode-go/deepseek-v4-pro"
+SMALL_MODEL = "opencode-go/deepseek-v4-flash"
 PROXY_HEALTH = "http://localhost:8082/health"
 EXECUTOR_MONTHLY_CAP = 4
 MAX_WORKERS = 3
@@ -3666,7 +3667,7 @@ Rules:
    "skipped": [{{"path": "...", "reason": "..."}}]}}"""
 
     print("  spawning dotfiles commit agent …")
-    agent_raw = _call_omp_p(agent_prompt, timeout=600)
+    agent_raw = _call_omp_p(agent_prompt, model=SMALL_MODEL, timeout=600)
     try:
         agent_json = _extract_json(agent_raw, "dotfiles agent")
     except ValueError as e:
@@ -3703,7 +3704,7 @@ Return fenced JSON:
 {{"verdict": "confirmed"|"rejected", "issues": ["..."], "confirmed_commits": [...]}}"""
 
     print("  spawning judge review …")
-    judge_raw = _call_omp_p(judge_prompt, timeout=300)
+    judge_raw = _call_omp_p(judge_prompt, model=SMALL_MODEL, timeout=300)
     try:
         judge_json = _extract_json(judge_raw, "dotfiles judge")
     except ValueError as e:
