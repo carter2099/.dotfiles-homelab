@@ -2096,6 +2096,9 @@ def _audit_collector_5_config_drift():
     index_path = HOME / "notes" / "INDEX.md"
     if index_path.exists():
         for line in index_path.read_text().splitlines():
+            # Skip format template lines - the literal example "path/to/file.md"
+            if line.strip().startswith("Format:") or "path/to/" in line:
+                continue
             m = re.search(r"\]\(([^)]+\.md)\)", line)
             if m:
                 indexed.add(m.group(1))
@@ -2107,6 +2110,9 @@ def _audit_collector_5_config_drift():
             if "sessions" in md.parts:
                 continue
             rel = str(md.relative_to(notes_dir))
+            # Never flag the index itself or repo boilerplate
+            if rel in ("INDEX.md", "README.md"):
+                continue
             on_disk.add(rel)
 
     return {
@@ -3277,6 +3283,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     n_applied = sum(1 for s in applied.get("steps", []) if s.get("status") in ("ok", "bumped"))
     n_failed_apply = sum(1 for s in applied.get("steps", []) if s.get("status") == "failed")
     n_audit_drift = sum(1 for s in audit.get("sections", []) if s.get("verdict") in ("DRIFT", "ATTENTION"))
+    n_audit_failed = sum(1 for s in audit.get("sections", []) if s.get("verdict", "").endswith("-failed"))
     n_ideas = queue.get("ideas", {}).get("total_outstanding", 0)
     n_plans_approved = len(queue.get("plans", {}).get("approved", []))
     n_fixes = sum(len(s.get("fixes_applied", [])) for s in fixes.get("sections", []))
@@ -3289,6 +3296,8 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         tldr_parts.append(f"{n_failed_apply} failed")
     if n_audit_drift:
         tldr_parts.append(f"{n_audit_drift} audit items need attention")
+    elif n_audit_failed:
+        tldr_parts.append(f"{n_audit_failed} audit sections FAILED")
     else:
         tldr_parts.append("audit clean")
     tldr_parts.append(f"{n_ideas} ideas, {n_plans_approved} plans approved")
