@@ -61,36 +61,91 @@ TEST_MODE: bool = False
 TEST_LABEL: str | None = None
 MODEL_OVERRIDE: str | None = None
 
-# ── Provider detection (cached from pi models.json) ───────────────────────
+# ── Provider detection (cached from omp models.yml) ───────────────────────
 _MODEL_PROVIDER_CACHE: dict[str, dict] = {}
+_OMP_MODELS_YML = Path.home() / ".omp" / "agent" / "models.yml"
+_OMP_CONFIG_YML = Path.home() / ".omp" / "agent" / "config.yml"
+
+
+def _load_providers() -> dict[str, dict]:
+    """Load provider definitions from omp's models.yml + config.yml.
+
+    Returns {provider_name: {baseUrl, models: set[str]}}.
+    """
+    providers: dict[str, dict] = {}
+
+    # models.yml has explicit model lists per provider
+    if _OMP_MODELS_YML.exists() and yaml:
+        raw = yaml.safe_load(_OMP_MODELS_YML.read_text())
+        for pname, pconf in (raw or {}).get("providers", {}).items():
+            models = set()
+            for m in (pconf.get("models") or []):
+                mid = (m.get("id") or "").strip()
+                if mid:
+                    models.add(mid)
+            providers[pname] = {
+                "baseUrl": (pconf.get("baseUrl") or "").rstrip("/"),
+                "models": models,
+            }
+
+    # config.yml may declare additional providers (e.g. local-llm)
+    if _OMP_CONFIG_YML.exists() and yaml:
+        raw = yaml.safe_load(_OMP_CONFIG_YML.read_text())
+        for pname, pconf in (raw or {}).get("providers", {}).items():
+            if pname not in providers:
+                providers[pname] = {
+                    "baseUrl": (pconf.get("baseUrl") or "").rstrip("/"),
+                    "models": set(),
+                }
+
+    # Infer opencode-go provider from modelRoles if not present
+    if _OMP_CONFIG_YML.exists() and yaml:
+        raw = yaml.safe_load(_OMP_CONFIG_YML.read_text())
+        for role, model_spec in (raw or {}).get("modelRoles", {}).items():
+            if "/" in (model_spec or ""):
+                prov = model_spec.split("/")[0]
+                if prov not in providers:
+                    providers[prov] = {
+                        "baseUrl": f"http://localhost:8082/v1",
+                        "models": set(),
+                    }
+
+    return providers
 
 
 def _detect_model_provider(model_id: str) -> dict:
-    """Return {provider, chat_url} for a model by reading pi's models.json.
+    """Return {provider, chat_url} for a model by reading omp's models.yml.
 
-    Result is cached so models.json is only read once per model.
-    Falls back to local-llm on any error.
+    Result is cached so the file is only parsed once.
+    Falls back to local-llm on any error or unknown model.
     """
     if model_id in _MODEL_PROVIDER_CACHE:
         return _MODEL_PROVIDER_CACHE[model_id]
 
-    models_path = Path.home() / ".pi" / "agent" / "models.json"
-    try:
-        config = json.loads(models_path.read_text())
-        for prov_name, prov in config.get("providers", {}).items():
-            for m in prov.get("models", []):
-                if m.get("id") == model_id:
-                    base = prov.get("baseUrl", "").rstrip("/")
-                    info = {
-                        "provider": prov_name,
-                        "chat_url": f"{base}/chat/completions",
-                    }
-                    _MODEL_PROVIDER_CACHE[model_id] = info
-                    return info
-    except Exception:
-        pass
+    providers = _load_providers()
 
-    # Fallback: assume local-llm
+    # Try exact model match in a provider's explicit list
+    for pname, pinfo in providers.items():
+        if model_id in pinfo["models"]:
+            info = {
+                "provider": pname,
+                "chat_url": f"{pinfo['baseUrl']}/chat/completions",
+            }
+            _MODEL_PROVIDER_CACHE[model_id] = info
+            return info
+
+    # Handle qualified name (provider/model)
+    if "/" in model_id:
+        prov, mname = model_id.split("/", 1)
+        if prov in providers:
+            info = {
+                "provider": prov,
+                "chat_url": f"{providers[prov]['baseUrl']}/chat/completions",
+            }
+            _MODEL_PROVIDER_CACHE[model_id] = info
+            return info
+
+    # Fallback: assume local-llm (served by gaming rig via llm-proxy)
     fb = {
         "provider": "local-llm",
         "chat_url": "http://localhost:8081/v1/chat/completions",

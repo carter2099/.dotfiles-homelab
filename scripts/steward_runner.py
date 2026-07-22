@@ -291,7 +291,7 @@ def _extract_json(text, label="output"):
 
 
 def extract_from_ndjson(stdout):
-    """Parse pi --mode json NDJSON output.
+    """Parse omp --mode json NDJSON output (same format as pi's --mode json).
     Returns (accumulated_assistant_text, stats_dict).
     Real shape (verified live 2026-07-20):
       message_update -> {"assistantMessageEvent": {"type": "text_delta", "delta": "..."}}
@@ -1295,7 +1295,7 @@ def phase_4_heartbeat(run_dir):
 
     # TLS cert expiry for 3 hostnames
     tls_certs = {}
-    for host in ["blog.carter2099.com", "chat.carter2099.com", "pi.carter2099.com"]:
+    for host in ["blog.carter2099.com", "chat.carter2099.com"]:
         try:
             tls_out = run_capture(
                 ["bash", "-c",
@@ -1309,7 +1309,7 @@ def phase_4_heartbeat(run_dir):
 
     # DNS resolution of homelab hostnames
     dns_hostnames = [
-        "blog.carter2099.com", "chat.carter2099.com", "pi.carter2099.com",
+        "blog.carter2099.com", "chat.carter2099.com",
         "freshrss.carter2099.com", "deltaneutral.carter2099.com", "hooks.carter2099.com",
     ]
     dns_results = {}
@@ -1486,7 +1486,7 @@ def phase_4_heartbeat(run_dir):
                     break
     except Exception:
         pass
-    tls_checked_hostnames = ["blog.carter2099.com", "chat.carter2099.com", "pi.carter2099.com"]
+    tls_checked_hostnames = ["blog.carter2099.com", "chat.carter2099.com"]
     unchecked_tls = sorted(set(tunnel_hostnames) - set(tls_checked_hostnames))
 
     self_drift = {
@@ -1732,7 +1732,7 @@ def phase_5_work_queue(run_dir):
 
 
 def phase_6_executor(run_dir, setup_data, dry_run=False):
-    """Phase 6: execute one approved plan via pi agent + post-impl review."""
+    """Phase 6: execute one approved plan via omp agent + post-impl review."""
     print("[P6] executor")
     queue_path = run_dir / "05-queue.json"
     if not queue_path.exists():
@@ -3510,7 +3510,6 @@ def phase_9b_dotfiles(run_dir, dry_run=False):
         str(HOME / ".config"),
         str(HOME / ".local" / "bin"),
         str(HOME / ".zshrc"),
-        str(HOME / ".pi" / "agent"),
         str(HOME / ".omp"),
         str(HOME / "scripts"),
         str(HOME / "open-webui"),
