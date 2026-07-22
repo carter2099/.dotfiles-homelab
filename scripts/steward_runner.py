@@ -3355,6 +3355,20 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
             f'font-size:12px; font-weight:700;">PHASE FAILURES: '
             f'{", ".join(phase_failures)}</span>'
         )
+    # Append guard badge
+    guard = setup_data.get("guard", "full")
+    if guard != "full":
+        guard_colors = {
+            "defer_all": "#c62828",
+            "skip": "#c62828",
+            "restrict": "#e65100",
+        }
+        gc = guard_colors.get(guard, "#e65100")
+        tldr += (
+            f'<br><span style="display:inline-block; margin-top:6px; padding:2px 8px; '
+            f'border-radius:6px; background-color:{gc}1f; color:{gc}; '
+            f'font-size:12px; font-weight:700;">BUDGET GUARD: {guard.upper()}</span>'
+        )
 
     # Troubleshoot section
     troubleshoot_html = ""
