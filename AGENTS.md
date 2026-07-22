@@ -1,21 +1,18 @@
 # AGENTS.md
 
-This file provides guidance to AI agents (omp, etc.) when working with code in this repository.
+This file provides guidance to omp agents when working on this homelab.
 
 **Maintenance:** Keep this file up to date. When deploying a new app, adding a service, changing ports/IPs, or making any structural changes to the homelab, update the relevant sections here as part of that work. Deep-dive architecture for some subsystems lives in `~/notes/homelab/` (see "Where the deep dives live" at the bottom) — keep AGENTS.md as the always-loaded operational reference and update the relevant note when those subsystems change.
 
-## Working principles (Endler tenets)
+## Working principles/tenets
 
 Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/best-programmers/). The subset below is the part that applies directly to an LLM assistant and should shape every session.
 
-- **Read the reference.** Prefer official docs, man pages, and the actual source over recall from training data. When something in this repo is in question, read the file. Training-data recall about APIs, flags, or versions is frequently stale — verify.
+- **Read the reference.** Prefer official docs (local or web), man pages, and the actual source over recall from training data. When something in this repo is in question, read the file. Training-data recall about APIs, flags, or versions is frequently stale — verify.
 - **Read the error message.** Parse errors fully before reacting. The message usually names the cause; skimming past it and guessing wastes Carter's time.
 - **Don't guess.** If a fact is load-bearing for the answer or action, verify it with a tool (grep, read, `--help`, a quick script) rather than asserting from memory. This is the single most important one.
 - **Say "I don't know."** Uncertainty is fine and useful; confident bullshit is not. If a recommendation rests on something unverified, say so explicitly rather than smoothing it over.
 - **Never blame the computer.** "Flaky test," "weird cache," "probably a transient issue" are hypotheses, not conclusions. Bugs have causes — keep investigating until the cause is named, even if the fix is a retry.
-- **Break down problems.** For non-trivial work, decompose before diving in. A plan or task list beats a sprawling edit.
-- **Know your tools.** Before using an unfamiliar CLI, systemd unit, k3s resource, or library in this homelab, understand it enough to predict what it'll do. Don't run commands whose effect you can't describe.
-- **Get your hands dirty.** Don't refuse to engage with unfamiliar code, obscure config, or messy state. Read it, trace it, fix it.
 - **Keep it simple.** Prefer the smallest change that solves the problem. This reinforces the existing "no gratuitous abstractions / no speculative features" guidance further down in this file.
 - **Have patience.** Don't rush to a conclusion or a fix. Re-read, re-check, confirm before acting — especially for anything irreversible.
 
@@ -216,7 +213,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Release: `cd ~/dev/dependabot-webhook && bash release.sh`
 
 ### Hyperliquid SDK Maintenance (systemd timer)
-- Runs Mon/Thu at 4:00 AM ET via systemd user timer (`hyperliquid-sdk.service`/`.timer`, `OnCalendar` uses `America/New_York` so it shifts with DST: 08:00 UTC summer / 09:00 UTC winter — the only timer that's ET-locked rather than UTC-locked)
+- Runs Mon/Thu at 4:00 AM ET via systemd user timer (`hyperliquid-sdk.service`/`.timer`, `OnCalendar` uses `America/New_York` so it shifts with DST: 08:00 UTC summer / 09:00 UTC winter — one of two timers that are ET-locked rather than UTC-locked; the other is `homelab-steward` at 5:00 PM ET)
 - Spawns `omp -p --model opencode-go/glm-5.2` executing the `hyperliquid-run` skill
 - Script: `~/scripts/run_hyperliquid_sdk.sh`; timeout: 30 min
 
@@ -242,7 +239,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Account-owned API token at `~/.config/cloudflare/api-token` (gitignored, 600 perms)
 - Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone). **No Zero Trust / Access scope** — so Access apps/policies (the SSO gate in front of tunneled hostnames) must be configured **manually in the Zero Trust dashboard**; the API token returns 403 on `/access/apps` (verified). To automate Access too, add "Access: Apps and Policies: Edit" (Account) to the token.
 - Supporting IDs in `~/.config/cloudflare/`: `account-id`, `zone-id`, `homelab-tunnel-id`
-- **Tunnel ingress inventory** (live, pruned 2026-07-22): `hooks`, `chat`, `deltaneutral`, `freshrss`, `blog`, `ssh` + catch-all 404. Stale entries (grafana, prometheus, uptime, apex, railsapi, pi, paseo) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally.
+- **Tunnel ingress inventory** (live, pruned 2026-07-22): `hooks`, `chat`, `deltaneutral`, `freshrss`, `blog`, `ssh` + catch-all 404 (claimed; the catch-all cannot be verified from the host without CF Zero Trust dashboard access). Stale entries (grafana, prometheus, uptime, apex, railsapi, pi, paseo) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally.
 - Env vars (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_HOMELAB_TUNNEL_ID`) exported from `.zshrc`
 
 ## Email Digests
