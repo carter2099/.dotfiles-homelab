@@ -2183,7 +2183,7 @@ AUDIT_SECTIONS = [
         "guidance": (
             "Truth-check /home/carter/AGENTS.md against the live host. READ the file first. "
             "Verify (1) pointer targets still resolve (paths, commands it cites) and (2) structural/"
-            "semantic facts: IP roles (.100 DHCP/default, .92 k3s+blog/delta_neutral, .102 tbitt/stickies), "
+            "semantic facts: IP roles (.100 DHCP/default, .92 k3s+blog/delta_neutral), "
             "enp3s0f0 as primary + wlp6s0 down, flannel-iface=enp3s0f0, the two-pattern k3s deployment model, "
             "service+timer names and schedules, ufw cni0/flannel.1 rules, sole docker daemon at /var/lib/docker, "
             "documented ports. Do NOT re-add intentionally-removed version pins. "

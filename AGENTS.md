@@ -22,7 +22,7 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static secondary IPs `192.168.4.92` (k3s node IP; blog + delta_neutral ingress) and `192.168.4.102` (tbitt/stickies ingress — reserved, not live) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
+Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static secondary IPs `192.168.4.92` (k3s node IP; blog + delta_neutral ingress) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
 
 ## Hardware
 
@@ -36,15 +36,12 @@ Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PR
 
 **Notes:**
 - The wired NIC `enp3s0f0` (Realtek) is the **primary uplink**; WiFi (`wlp6s0`) is down by default.
-- **Network config:** `/etc/netplan/50-cloud-init.yaml` (systemd-networkd). `enp3s0f0` carries `.100` (DHCP, default-route source), `.92` (k3s node IP + blog/delta_neutral ingress), `.102` (tbitt/stickies ingress — not live). Run `ip -4 addr show enp3s0f0` for live state.
+- **Network config:** `/etc/netplan/50-cloud-init.yaml` (systemd-networkd). `enp3s0f0` carries `.100` (DHCP, default-route source) and `.92` (k3s node IP + blog/delta_neutral ingress). Run `ip -4 addr show enp3s0f0` for live state.
 
 ## Repository Structure
 
 This is the home directory, managed as a bare git repo for dotfiles:
 - `blog/` - Rails 8 blog app (blog.carter2099.com). Deploy wrapper at `~/blog/`; app nested at `~/blog/blog/`.
-- `hub/` - React + Rails API landing page/portfolio, **not live** (carter2099.com)
-- `tbitt/` - React + Express memecoin tracker, **deprecated** (tbitt.carter2099.com)
-- `stickies/` - Sticky notes app, **not live** (stickiesapi.carter2099.com)
 - `delta_neutral/` - Rails 8 Hyperliquid rebalancer (deltaneutral.carter2099.com). Deploy wrapper at `~/delta_neutral/`; app nested at `~/delta_neutral/delta_neutral/`.
 - `homelab-backup/` - Go backup service source (daily R2 backups of blog content, DBs, FreshRSS). Deployed in place at `~/homelab-backup/`; dev clone at `~/dev/homelab-backup/`.
 - `dev/dependabot-webhook/` - Go webhook receiver for automated dependabot PR handling
@@ -62,7 +59,7 @@ This is the home directory, managed as a bare git repo for dotfiles:
 
 ## Dev Workflow (`dev/`)
 
-**Hard rule:** Always develop in `~/dev/<repo>/`. Never edit files in the prod deploy folders (`/home/carter/blog/`, `/home/carter/delta_neutral/`, `/home/carter/hub/`, etc.) — those are deployment artifacts only. If a dev/ clone doesn't exist for a repo, pull a fresh one with `git clone git@github.com:carter2099/<repo>.git ~/dev/<repo>` before making changes.
+**Hard rule:** Always develop in `~/dev/<repo>/`. Never edit files in the prod deploy folders (`/home/carter/blog/`, `/home/carter/delta_neutral/`, etc.) — those are deployment artifacts only. If a dev/ clone doesn't exist for a repo, pull a fresh one with `git clone git@github.com:carter2099/<repo>.git ~/dev/<repo>` before making changes.
 
 The `dev/` directory is for cloning GitHub repos (via SSH: `git@github.com:carter2099/<repo>.git`), running their test suites, making changes, and pushing back. It is **not** tracked by the dotfiles bare repo.
 
@@ -109,7 +106,7 @@ All apps follow the same deploy flow:
 
 **Docker daemon:** apt-installed and sole (`docker.service` + `docker.socket`, data root `/var/lib/docker`, boot-enabled). `systemctl status/restart docker`, `journalctl -u docker`, `docker ps`, and `/var/run/docker.sock` all mean the obvious thing — no snap indirection. (The former snap docker was removed 2026-07-10; see `~/plans/done/docker-daemon-split-RUNBOOK.md` for the migration history.) `RAILS_MASTER_KEY` note: `sudo` strips env vars, so pass it through with `sudo env RAILS_MASTER_KEY=$(cat config/master.key) docker compose ...` or use the repo's `up.sh`/`release.sh` which set it inline.
 
-Rails apps (blog, hub) pass `RAILS_MASTER_KEY` from `config/master.key` at startup.
+Rails apps (blog, delta_neutral) pass `RAILS_MASTER_KEY` from `config/master.key` at startup.
 
 ### Commit before deploy
 
@@ -161,7 +158,7 @@ k delete pod <name>  # k3s auto-recreates
 ```
 
 **Architecture pattern:** Two deployment models coexist:
-- **Self-developed webapps** (blog, hub, tbitt, stickies, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92, tbitt/stickies at 192.168.4.102). Note: hub and stickies are not currently live; tbitt is deprecated.
+- **Self-developed webapps** (blog, delta_neutral) run on the host in Docker Compose. K3s uses ExternalService + Endpoints to route Traefik ingress to host IPs (blog/delta_neutral at 192.168.4.92).
 - **Third-party services** (freshrss, traefik) run natively as k3s Deployments/DaemonSets. (uptime-kuma was removed 2026-07-20 — the steward replaces it.) Manifests for grafana, prometheus, and node-exporter exist in `k3s/` but are **not currently deployed** (no pods/deployments) — ignore unless re-deploying.
 
 Each service in `k3s/` has its own directory with granular YAML manifests (deployment, service, ingress, etc.). Live state: `k get nodes` / `k3s --version`.
@@ -176,16 +173,6 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Deploy dir `~/blog/` wraps `release.sh`/`up.sh`; the app is nested at **`~/blog/blog/`** (own `AGENTS.md` + `CLAUDE.md`). Content in `app/posts/` + `app/reviews/` (git-ignored).
 - Rails 8 + SQLite (Propshaft/Importmap/Turbo). Port 3099 internal / 33099 exposed; live container name via `docker ps` (compose v2 appends a `-1` suffix).
 - Obsidian vault image syntax (`![[file.jpg]]`) auto-converted.
-
-### Hub (React + Rails API) - Not live
-- Code on disk, not running. Previously planned for carter2099.com. React 19 + Vite client + Rails 8 API server + Hyperliquid SDK — read the source if re-deploying.
-
-### Tbitt (React + Express) - Deprecated
-- React 18 + Express + PostgreSQL. Deprecated Aug 2025 (Jupiter API discontinued).
-
-### Stickies - Not live
-- Previously a sticky notes app at stickiesapi.carter2099.com
-- Code remains on disk but the service is not running
 
 ### Delta Neutral (Rails 8 + SQLite)
 - Deploy dir `~/delta_neutral/` wraps `release.sh`/`up.sh`; the app is nested at **`~/delta_neutral/delta_neutral/`** (own `AGENTS.md` + `CLAUDE.md`).
