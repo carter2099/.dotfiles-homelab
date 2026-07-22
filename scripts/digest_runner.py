@@ -1756,6 +1756,14 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
 
+    # Copy curated_copy.json FIRST — not gated by idempotent resume below,
+    # so a partial re-run doesn't silently drop the curated snapshot.
+    curated_src = run_dir / "06-curated.json"
+    if curated_src.exists():
+        shutil.copy(curated_src, run_dir / "curated_copy.json")
+    else:
+        print(f"  [WARN] 06-curated.json missing — curated_copy.json not written")
+
     # Idempotent resume (prod only — test runs always send)
     if not TEST_MODE:
         archive_path = digest_dir / f"{today_str}.html"
@@ -1807,9 +1815,6 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     sif_path.write_text(json.dumps(stories_in_flight, indent=2))
     print(f"  [done] stories-in-flight updated")
 
-    curated_src = run_dir / "06-curated.json"
-    if curated_src.exists():
-        shutil.copy(curated_src, run_dir / "curated_copy.json")
 
 
 def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
@@ -2164,6 +2169,8 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             curated_src = run_dir / "06-curated.json"
             if curated_src.exists():
                 shutil.copy(curated_src, run_dir / "curated_copy.json")
+            else:
+                print(f"  [WARN] 06-curated.json missing — curated_copy.json not written")
         else:
             phase_8_send_archive(topic, html, stories_in_flight, run_dir, digest_dir)
         _phase_done("Phase 8: Send & Archive", t8)
@@ -2182,6 +2189,15 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     print(f"\n{'='*60}")
     print(f"  Digest complete in {overall_elapsed:.0f}s ({overall_elapsed/60:.1f} min)")
     print(f"{'='*60}\n")
+
+    # ── .runs.log duration tracking ──────────────────────────────────────
+    if not TEST_MODE:
+        model = MODEL_OVERRIDE if MODEL_OVERRIDE else MODEL_REASONING
+        runs_log = digest_dir / ".runs.log"
+        now_utc = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        entry = f"{now_utc} {category} duration={overall_elapsed:.0f}s model={model}\n"
+        with open(runs_log, "a") as f:
+            f.write(entry)
 
     # ── Test report ──────────────────────────────────────────────────────
     if TEST_MODE:
