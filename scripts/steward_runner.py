@@ -1239,8 +1239,7 @@ def _compute_budget_guard(usage):
     if max_rolling >= GUARD_ROLLING_DEFER:
         return "defer_all"
     if max_weekly >= GUARD_SKIP or max_monthly >= GUARD_SKIP:
-        # If max_weekly is >= 90 but rolling is fine, defer P7b fix agents
-        # (P7 audit workers still run since delta-gate already avoids most)
+        # Skip P7 LLM workers (collectors still run) and P7b fix agents; executor deferred
         return "skip"
     if max_weekly >= GUARD_RESTRICT:
         return "restrict"
