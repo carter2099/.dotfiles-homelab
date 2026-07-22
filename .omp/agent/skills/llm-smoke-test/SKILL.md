@@ -10,7 +10,7 @@ Comprehensive smoke test for the local Qwen Q6 model served via llama-swap on th
 ## Architecture
 
 ```
-Open WebUI / pi → llm-proxy:8081 (homelab) → llama-swap:8080 (gaming rig) → llama-server:5800+
+Open WebUI / omp → llm-proxy:8081 (homelab) → llama-swap:8080 (gaming rig) → llama-server:5800+
 ```
 
 Two model variants are registered in llama-swap config (`C:\llm\config.yaml` on gaming rig):
@@ -54,16 +54,16 @@ Runs `~/benchmarks/context-window/context_20_000.md` (default, ~20K tokens of in
 Larger benchmarks available: `context_50_000.md`, `context_100_000.md`, `context_200_000.md`. Pass as 3rd argument.
 
 ### Test 4 (Manual) — Tool-Calling Eagerness
-Run through pi to test if the model proactively uses web_search:
+Run through omp to test if the model proactively uses web_search:
 
 ```bash
 # No-thinking (recommended — more accurate with search results)
 echo "What's the latest on the US team in the world cup?" | \
-  pi -p --provider local-llm --model qwen-3.6-35b-q6-fast
+  omp -p --provider local-llm --model qwen-3.6-35b-q6-fast --api-key none
 
 # Thinking (more verbose, may hallucinate details)
 echo "What's the latest on the US team in the world cup?" | \
-  pi -p --provider local-llm --model qwen-3.6-35b-q6
+  omp -p --provider local-llm --model qwen-3.6-35b-q6 --api-key none
 ```
 
 The test prompt should be a **current events question with no explicit search instruction** — the model must decide to search on its own. The user supplies the test case and correctness criteria interactively.
@@ -94,7 +94,7 @@ Context may be lazily allocated — memory grows as context fills.
 
 2. **No-thinking model is 96% more token-efficient** for simple Q&A (8 tokens vs 191). Use for chat, facts, context recall, and tool use.
 
-3. **Qwen is eager enough with tool calls.** Both variants proactively use web_search without explicit prompting. No tuning needed — behavior is comparable to DeepSeek. If more aggressiveness is desired, use a system prompt ("Always search before answering factual questions") or the `tool_choice` API parameter (`{"type": "any"}` forces a tool call on every message — overkill for normal chat). llama.cpp supports `tool_choice` but pi doesn't expose it directly in config.
+3. **Qwen is eager enough with tool calls.** Both variants proactively use web_search without explicit prompting. No tuning needed — behavior is comparable to DeepSeek. If more aggressiveness is desired, use a system prompt ("Always search before answering factual questions") or the `tool_choice` API parameter (`{"type": "any"}` forces a tool call on every message — overkill for normal chat). llama.cpp supports `tool_choice` but omp doesn't expose it directly in config.
 
 4. **System prompts can't reduce reasoning verbosity.** Tested "be brief" prompts — they made it worse (model reasons about being brief). The only control is binary: thinking on or off.
 

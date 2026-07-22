@@ -5,7 +5,7 @@ description: Create a new scheduled agent that runs on a systemd timer — recur
 
 # Create Scheduled Agent
 
-Create a scheduled agent that runs `pi -p` on a systemd user timer. One skill handles every recurring task — maintenance, monitoring, checks, reports, whatever. The plumbing is always the same; only the prompt and schedule differ.
+Create a scheduled agent that runs `omp -p` on a systemd user timer. One skill handles every recurring task — maintenance, monitoring, checks, reports, whatever. The plumbing is always the same; only the prompt and schedule differ.
 
 ## Required input
 
@@ -17,7 +17,7 @@ Gather these from the user. Ask for anything missing:
   - Weekdays at 9am ET → `Mon..Fri *-*-* 13:00:00`
   - Weekly Monday 8am ET → `Mon *-*-* 12:00:00`
   - Every 6 hours → `*-*-* 00,06,12,18:00:00`
-- **model** (string, default: `opencode-go/deepseek-v4-flash`): the `--model` flag for `pi -p`. Change this to switch providers/models.
+- **model** (string, default: `opencode-go/deepseek-v4-flash`): the `--model` flag for `omp -p`. Change this to switch providers/models.
 - **what it does** (string): natural language description of the agent's task. This becomes the prompt.
 - **output** (choice, default: none): 
   - `none` — agent runs silently, logs to `.runs.log`
@@ -30,7 +30,7 @@ Gather these from the user. Ask for anything missing:
 All scheduled agents follow the same three-file pattern:
 
 ```
-~/scripts/run_<name>.sh              # bash wrapper with embedded pi -p prompt
+~/scripts/run_<name>.sh              # bash wrapper with embedded omp -p prompt
 ~/.config/systemd/user/<name>.service # oneshot service unit
 ~/.config/systemd/user/<name>.timer   # calendar timer
 ```
@@ -45,8 +45,8 @@ Plus an optional log directory if the agent writes output:
 ### 1. Validate infrastructure
 
 Confirm these exist:
-- `pi` on PATH
-- `~/.pi/agent/auth.json` (API keys)
+- `omp` on PATH
+- `--api-key proxy` (auth handled by opencode-go-proxy on localhost:8082)
 - If output is `email`: `~/scripts/send_digest.py` and `~/scripts/.smtp_config`
 
 ### 2. Create the run script
@@ -64,7 +64,7 @@ START_TS="$(date +%s)"
 
 PROMPT='<the prompt — what the agent should do>'
 
-pi -p --model <model> "$PROMPT"
+omp -p --model <model> --api-key proxy --allow-home --session-dir ~/.omp/agent/sessions-automated "$PROMPT"
 END_TS="$(date +%s)"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) <name> duration=$((END_TS - START_TS))s model=<model-short-name>" >> "$HOME/digests/<name>/.runs.log"
 ```
@@ -173,4 +173,4 @@ dotfiles commit -m "scheduled agent: remove <name>" && dotfiles push
 - All scheduled agents run as the `carter` user via systemd user timers (`loginctl enable-linger` is already enabled — timers survive logout/reboot).
 - `TimeoutStartSec` prevents a stuck agent from blocking the timer indefinitely.
 - The `.runs.log` pattern gives you a trail of when agents ran and how long they took.
-- Agents use the same `pi -p` pattern as the existing digest agents and update-check agent — consistent, debuggable, provider-agnostic.
+- Agents use the same `omp -p` pattern as the existing digest agents and update-check agent — consistent, debuggable, provider-agnostic.

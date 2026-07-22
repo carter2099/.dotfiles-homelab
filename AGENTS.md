@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to AI agents (pi, Claude, etc.) when working with code in this repository.
+This file provides guidance to AI agents (omp, etc.) when working with code in this repository.
 
 **Maintenance:** Keep this file up to date. When deploying a new app, adding a service, changing ports/IPs, or making any structural changes to the homelab, update the relevant sections here as part of that work. Deep-dive architecture for some subsystems lives in `~/notes/homelab/` (see "Where the deep dives live" at the bottom) — keep AGENTS.md as the always-loaded operational reference and update the relevant note when those subsystems change.
 
@@ -83,7 +83,7 @@ Note: `.ruby-version` in cloned repos may request a Ruby not installed locally. 
 
 ## Skills
 
-Always use the `/create-skill` skill when creating a new user-level skill. Writing a skill file directly (under `~/.pi/agent/skills/*/SKILL.md`) skips the `dotfiles add` + commit + push step, leaving the skill untracked and at risk of being lost if homelab storage is wiped. The skill bakes in the VCS step.
+Always use the `/create-skill` skill when creating a new user-level skill. Writing a skill file directly (under `~/.omp/agent/skills/*/SKILL.md`) skips the `dotfiles add` + commit + push step, leaving the skill untracked and at risk of being lost if homelab storage is wiped. The skill bakes in the VCS step.
 
 ## Dotfiles Management
 
@@ -102,7 +102,7 @@ Alias defined in `.zshrc`: `dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles-ho
 ```bash
 dotfiles add .zshrc                                 # single file
 dotfiles add .config/systemd/user/homelab-backup.*  # glob pattern for related files
-dotfiles add -A .pi/                                # OK when scoped to a directory path
+dotfiles add -A .omp/agent/skills/                   # OK when scoped to a directory path
 ```
 
 ## App Deployment Pattern
@@ -199,7 +199,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ### Homelab Backup (Go)
 - Go service at `~/homelab-backup/`; daily 03:00 UTC via systemd user timer `homelab-backup.{service,.timer}`. Dest: Cloudflare R2 bucket `homelab-backup`; local archives in `~/backups/`. Source: `~/dev/homelab-backup/`.
-- 23 targets in `~/homelab-backup/config.yaml`: app content + DBs, FreshRSS, Open WebUI (db only), k3s/backup config, **secrets** (rails master.keys, open-webui/.env, cloudflare/dependabot/llm-proxy/pi-web/searxng envs, smtp config — **unencrypted in R2 by design**), host `/etc` (netplan/k3s/ufw via `ExecStartPre=pre-collect.sh` + sudo), and a package manifest. R2 creds via `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` (`~/homelab-backup/.env`, not in the bucket).
+- 23 targets in `~/homelab-backup/config.yaml`: app content + DBs, FreshRSS, Open WebUI (db only), k3s/backup config, **secrets** (rails master.keys, open-webui/.env, cloudflare/dependabot/llm-proxy/searxng envs, smtp config — **unencrypted in R2 by design**), host `/etc` (netplan/k3s/ufw via `ExecStartPre=pre-collect.sh` + sudo), and a package manifest. R2 creds via `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` (`~/homelab-backup/.env`, not in the bucket).
 - `OnFailure=homelab-backup-notify.service` **emails Carter the journal tail on failure** (failure-only; SMTP via `~/scripts/send_digest.py`).
 - Subcommands: `run [--local-only]`, `list` (R2 objects — no aws CLI on host), `verify <archive>` (integrity_check every DB), `latest <dest>` (newest R2 download). Restore playbook: `~/homelab-backup/RESTORE.md`.
 - **Monthly restore drill:** `homelab-backup-restore-drill.timer` (1st, 12:00 UTC) downloads the newest R2 backup, runs `verify`, emails PASS/FAIL.
@@ -208,8 +208,8 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 ### Dependabot Webhook (Go)
 - Always-on systemd user service (`dependabot-webhook.service`) listening on `localhost:9099`
 - Receives GitHub `pull_request` webhooks via Cloudflare tunnel at `hooks.carter2099.com/webhook`
-- Verifies HMAC-SHA256 signature, then spawns a sandboxed **Pi agent (DeepSeek v4 Pro)** to handle bundler bumps
-- Agent runs with a narrow permission sandbox (`pi-sandbox.ts` + `--tools` flag) — default-deny bash floor + git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified via 4-test battery (allow, block, tool restriction, dry run).
+- Verifies HMAC-SHA256 signature, then spawns a sandboxed **omp agent (DeepSeek v4 Pro)** to handle bundler bumps
+- Agent runs with a narrow permission sandbox (`omp-sandbox.ts` + `--tools` flag) — default-deny bash floor + git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified via 4-test battery (allow, block, tool restriction, dry run).
 - 5-minute coalesce window so a burst of PRs is handled in one agent run
 - Source: `~/dev/dependabot-webhook/`; config (with webhook secret): `~/.config/dependabot-webhook/env`
 - Logs: `journalctl --user -u dependabot-webhook -f`
@@ -217,32 +217,32 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 
 ### Hyperliquid SDK Maintenance (systemd timer)
 - Runs Mon/Thu at 4:00 AM ET via systemd user timer (`hyperliquid-sdk.service`/`.timer`, `OnCalendar` uses `America/New_York` so it shifts with DST: 08:00 UTC summer / 09:00 UTC winter — the only timer that's ET-locked rather than UTC-locked)
-- Spawns `pi -p --model opencode-go/glm-5.2` executing the `hyperliquid-run` skill
+- Spawns `omp -p --model opencode-go/glm-5.2` executing the `hyperliquid-run` skill
 - Script: `~/scripts/run_hyperliquid_sdk.sh`; timeout: 30 min
 
 ### Open WebUI (Homelab Chat)
-- ChatGPT/Claude-style self-hosted chat UI at `https://chat.carter2099.com`. Not an agent — a general chat front-end.
+- ChatGPT-style self-hosted chat UI at `https://chat.carter2099.com`. Not an agent — a general chat front-end.
 - Docker Compose in `~/open-webui/` (pinned tag — the nightly update runner bumps it; see the compose file), bound **`127.0.0.1:48100`** (loopback-only).
 - **Backend = the OpenCode Go endpoint** (compose sets `OPENAI_API_BASE_URL=https://opencode.ai/zen/go/v1`, but the webui.db override below is what actually takes effect) so chat usage rides the **flat-sub session-cap billing**, NOT `zen/v1` pay-as-you-go. The 18 Go models populate automatically; a few (e.g. `qwen3.7-max`) 401 as "not supported for format oa-compat" and are opencode-native-only — just pick another. (Same account key, the base URL picks product/billing.)
 - Secrets (`OPENAI_API_KEY` = the Go key, `WEBUI_SECRET_KEY`) in gitignored `~/open-webui/.env` (600). Compose + `up.sh` are tracked; `.env` is not.
-- **Routing: direct-tunnel pattern** (like pi-web/dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
+- **Routing: direct-tunnel pattern** (like dependabot, NOT Traefik) — tunnel ingress `chat.carter2099.com → http://localhost:48100`; proxied CNAME `chat` → `<tunnel-id>.cfargotunnel.com`. Loopback bind = off the LAN, only reachable via the tunnel.
 - **Auth: two layers.** CF Access (edge SSO, manually configured in Zero Trust) + Open WebUI's own login (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`).
 - Manage: `cd ~/open-webui && bash up.sh` (pull + restart); `docker compose -f ~/open-webui/docker-compose.yml logs -f`.
 - **Web search:** Configured in-app via Admin Settings → Web Search: engine `searxng`, query URL `http://searxng:8080/search` (lives in the webui.db config table, not env). Reaches the SearXNG container over a **shared external Docker network `homelab-chat-search`** declared in both `~/open-webui/docker-compose.yml` and `~/searxng/docker-compose.yml` so the `searxng` hostname resolves. No external API key needed.
 
 ### SearXNG (Self-hosted search backend)
 - **Port:** 8080 (internal) / loopback-only (`127.0.0.1:8080`), **not exposed** to LAN or tunnel.
-- **Purpose:** Metasearch backend for `rpiv-web-tools` `web_search` (pi agent + daily email digests). Replaces Brave Search API to eliminate per-query billing. Aggregates Google/Bing/DDG/etc.; JSON API at `GET /search?q=…&format=json`.
+- **Purpose:** Metasearch backend for `rpiv-web-tools` `web_search` (omp agent + daily email digests). Replaces Brave Search API to eliminate per-query billing. Aggregates Google/Bing/DDG/etc.; JSON API at `GET /search?q=…&format=json`.
 - **Docker Compose:** `~/searxng/` (`searxng/searxng:latest`). Single container, no Valkey (limiter disabled). `restart: unless-stopped` survives reboots. Attached to `homelab-chat-search` external network so Open WebUI can resolve `searxng`.
 - **Config source-of-truth:** `~/searxng/settings.yml` (tracked). Runtime copy with the real `secret_key` lives in gitignored `~/searxng/core-config/` (generated by `up.sh`).
 - **Manage:** `cd ~/searxng && bash up.sh` (pull + restart). Logs: `docker compose -f ~/searxng/docker-compose.yml logs -f`.
-- **pi provider config:** `~/.config/rpiv-web-tools/config.json` → `"provider": "searxng"`, `"baseUrls": {"searxng": "http://localhost:8080"}`. Brave key retained as one-line rollback (`"provider": "brave"`).
+- **omp provider config:** `~/.config/rpiv-web-tools/config.json` → `"provider": "searxng"`, `"baseUrls": {"searxng": "http://localhost:8080"}`. Brave key retained as one-line rollback (`"provider": "brave"`).
 
 ### Cloudflare API Access
 - Account-owned API token at `~/.config/cloudflare/api-token` (gitignored, 600 perms)
 - Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone). **No Zero Trust / Access scope** — so Access apps/policies (the SSO gate in front of tunneled hostnames) must be configured **manually in the Zero Trust dashboard**; the API token returns 403 on `/access/apps` (verified). To automate Access too, add "Access: Apps and Policies: Edit" (Account) to the token.
 - Supporting IDs in `~/.config/cloudflare/`: `account-id`, `zone-id`, `homelab-tunnel-id`
-- **Tunnel ingress inventory** (live, pruned 2026-07-20): `hooks`, `chat`, `pi`, `paseo`, `deltaneutral`, `freshrss`, `blog`, `ssh` + catch-all 404. Stale entries (grafana, prometheus, uptime, apex, railsapi) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally.
+- **Tunnel ingress inventory** (live, pruned 2026-07-22): `hooks`, `chat`, `deltaneutral`, `freshrss`, `blog`, `ssh` + catch-all 404. Stale entries (grafana, prometheus, uptime, apex, railsapi, pi, paseo) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally.
 - Env vars (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_HOMELAB_TUNNEL_ID`) exported from `.zshrc`
 
 ## Email Digests
@@ -288,9 +288,9 @@ bash ~/scripts/run_all_digests.sh                     # run all topics
 
 ## Homelab Steward
 
-Daily maintenance at **5:00 PM ET** (21:00 UTC summer / 22:00 UTC winter) via `homelab-steward.timer`. The steward is a 9-phase deterministic Python orchestrator (`~/scripts/steward_runner.py`) replacing both `update-check` and `agents-md-audit`. All LLM agents run as native `omp -p` subprocesses (no `pi` dependency), currently on `opencode-go/deepseek-v4-pro`. Every agent step is reviewed by an independent judge pass, evidence-grounded. **Full architecture, phase details, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md)** — read that note when working on the steward.
+Daily maintenance at **5:00 PM ET** (21:00 UTC summer / 22:00 UTC winter) via `homelab-steward.timer`. The steward is a 9-phase deterministic Python orchestrator (`~/scripts/steward_runner.py`) replacing both `update-check` and `agents-md-audit`. All LLM agents run as native `omp -p` subprocesses, currently on `opencode-go/deepseek-v4-pro`. Every agent step is reviewed by an independent judge pass, evidence-grounded. **Full architecture, phase details, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md)** — read that note when working on the steward.
 
-**Phases (P0–P9):** P0 setup (usage report via proxy health, stop dependabot-webhook to prevent racing, prev-summary delta) · P1 update apply (apt, Docker, cloudflared, k3s, open-webui bump) · P2 validate (docker ps, k3s pods, endpoint curls) · P3 troubleshoot (if pi-web unhealthy after P1: spawn omp diagnostic agent to fix forward) · P4 heartbeat (failed units, LLM stack, backup recency, disk, TLS, ddns) · P5 work queue (ideas/plans scan, consistency checks, pick next plan) · P6 executor (≤1 approved plan/night via native omp agent, post-impl review, monthly cap) · P7 audit (7 nightly sections, collector→delta-gate→worker+judge omp pairs) · P7b auto-fix (per-section omp fix agent for confirmed findings, judge-reviewed) · P8 render+send (structured data → HTML → `send_digest.py`) · P9 archive (summary.md, `.runs.jsonl`, restart dependabot).
+**Phases (P0–P9):** P0 setup (usage report via proxy health, stop dependabot-webhook to prevent racing, prev-summary delta) · P1 update apply (apt, Docker, cloudflared, k3s, open-webui bump) · P2 validate (docker ps, k3s pods, endpoint curls) · P3 troubleshoot (if an endpoint is unhealthy after P1: spawn omp diagnostic agent to fix forward) · P4 heartbeat (failed units, LLM stack, backup recency, disk, TLS, ddns) · P5 work queue (ideas/plans scan, consistency checks, pick next plan) · P6 executor (≤1 approved plan/night via native omp agent, post-impl review, monthly cap) · P7 audit (7 nightly sections, collector→delta-gate→worker+judge omp pairs) · P7b auto-fix (per-section omp fix agent for confirmed findings, judge-reviewed) · P8 render+send (structured data → HTML → `send_digest.py`) · P9 archive (summary.md, `.runs.jsonl`, restart dependabot).
 
 **Restart handling:** If a kernel update (`/var/run/reboot-required`) is detected after P3, the steward writes `~/agent-state/pending.md` with run context and reboots. On boot, `homelab-steward-resume.service` checks `pending.md` and calls `steward_runner.py --resume` to continue from where it left off.
 ### Safety rules
@@ -301,7 +301,7 @@ Daily maintenance at **5:00 PM ET** (21:00 UTC summer / 22:00 UTC winter) via `h
 - After a `docker-*` upgrade, assert the daemon is the expected one before declaring success: `docker info --format '{{.DockerRootDir}}'` must equal `/var/lib/docker` (guards against a second daemon creeping back in).
 - Stop on first auto-apply failure — don't continue to next step
 - After Docker daemon restart, verify containers came back before proceeding
-- P3 troubleshooting agent runs after P1 auto-apply if pi-web is down; it tries to fix forward rather than rolling back. If it can't fix, the failure is reported — Carter must intervene. SMTP is Docker-independent (`send_digest.py` talks to the mail server directly), so the failure email still goes out even if Docker is down.
+- P3 troubleshooting agent runs after P1 auto-apply if an endpoint is unhealthy; it tries to fix forward rather than rolling back. If it can't fix, the failure is reported — Carter must intervene. SMTP is Docker-independent (`send_digest.py` talks to the mail server directly), so the failure email still goes out even if Docker is down.
 
 ```bash
 python3 ~/scripts/steward_runner.py --dry-run      # skip mutations + email, still audit + archive
@@ -310,52 +310,39 @@ systemctl --user status homelab-steward.timer
 ls ~/digests/steward/$(date +%Y-%m-%d)/            # latest run artifacts
 ```
 
+## Agent CLI: omp
+
+The sole agent CLI on this host is **omp** (`@oh-my-pi/pi-coding-agent`, installed via bun). The legacy `pi` agent and pi-web have been removed — all automated and interactive agent sessions use omp.
+
+| | omp |
+|---|---|
+| **Package** | `@oh-my-pi/pi-coding-agent` |
+| **Binary** | `omp` (at `~/.bun/bin/omp`) |
+| **Config dir** | `~/.omp/agent/` |
+| **Skills** | `~/.omp/agent/skills/` (user-level, tracked in dotfiles) |
+| **Extension API** | `@oh-my-pi/pi-coding-agent` ExtensionAPI (same import path as pi) |
+
+### What uses omp
+
+| System | Invocation | Notes |
+|---|---|---|
+| **Steward** (`steward_runner.py`) | `omp -p` | Headless subprocess |
+| **Digests** (`digest_runner.py`) | `omp -p` | Headless with `@file` prompt loading |
+| **Hyperliquid SDK** (`run_hyperliquid_sdk.sh`) | `omp -p` | Headless on systemd timer |
+| **Dependabot webhook** | `omp -p -e omp-sandbox.ts` | Sandboxed via extension |
+| **Interactive sessions** | `omp` | SSH into the homelab; run `omp` directly |
+
+### Auth & models
+
+omp shares the same model providers (opencode-go-proxy, llm-proxy). Provider config lives in `~/.omp/agent/models.yml` (providers + local model definitions) and `~/.omp/agent/config.yml` (model roles, extensions). Auth for opencode-go is `--api-key proxy` (the opencode-go-proxy on localhost:8082 owns the real keys; clients send the placeholder `proxy`).
+
 ## Remote Agent Operations
 
-This homelab runs an **always-on pi-web agent** accessible from any browser at `https://pi.carter2099.com`. It runs `pi-web` (installed via `npm install -g @jmfederico/pi-web`) as two systemd user services with `loginctl enable-linger` so they survive reboots. It is **intentionally full-privilege** (no command denylist, no `NoNewPrivileges`); the trust anchor is **Cloudflare Access**.
+**Remote access is via SSH + omp.** Carter uses Termius (iOS) + SSH to connect to the homelab and runs `omp` interactively. The previous web-based agents (pi-web, Paseo) have been removed.
 
-- **Services:** `pi-web-sessiond.service` (session daemon) + `pi-web.service` (web/API at `127.0.0.1:8504`). **Loopback-only bind on purpose** — the sole ingress is the CF tunnel; it is NOT reachable on the LAN (so there's no path that bypasses Cloudflare Access).
-- **Access URL:** `https://pi.carter2099.com` (browser → CF Access SSO → pi-web UI). The old `opencode.carter2099.com` hostname was removed as it is no longer in DNS or tunnel ingress.
-- **Auth:** Cloudflare Access (identity gate at the CF edge) — unauthenticated requests get a 302 to `carter2099.cloudflareaccess.com` and never reach the host. Policy is managed in the CF Zero Trust dashboard. No secondary password layer.
-- **Routing:** direct-tunnel pattern — tunnel ingress `pi.carter2099.com → http://localhost:8504` (cloudflared runs on the host and reaches loopback). No k3s manifest, no ExternalService/Endpoints, no Traefik hop. DNS: proxied CNAME `pi` → `<tunnel-id>.cfargotunnel.com`.
-- **Config:** `~/.config/pi-web/config.json` (host, port, allowedHosts).
-- **Logs:** `journalctl --user -u pi-web -f` or `pi-web logs`
-- **Restart:** `systemctl --user restart pi-web pi-web-sessiond` or `pi-web restart`
-
-### Debugging from an interactive SSH session
-
-If pi-web is misbehaving or unreachable, an interactive agent SSH'd into the box diagnoses it. **First thing every SSH session should do** before `systemctl --user ...` commands:
-
-```bash
-export XDG_RUNTIME_DIR=/run/user/$(id -u)   # required for systemctl --user to reach the user bus
-```
-
-Standard diagnosis sequence:
-
-```bash
-pi-web status                                            # services running?
-journalctl --user -u pi-web -n 100 --no-pager            # why it failed
-journalctl --user -u pi-web-sessiond -n 100 --no-pager   # sessiond logs
-ls -la ~/agent-state/                                    # pending reboot context, etc
-cat ~/.config/pi-web/config.json                         # config
-```
-
-### Paseo (replaces pi-web)
-
-Paseo is a multi-agent orchestration daemon supporting omp, Claude Code, Codex, Copilot, and Pi agents through a single web UI. It replaces the pi-web service for remote agent access.
-
-- **Deployment:** Docker Compose at `~/paseo/` (image `paseo-local`, built from `Dockerfile` extending `ghcr.io/getpaseo/paseo:latest` with bun + omp). Managed via `up.sh`.
-- **Port:** `127.0.0.1:6767` (loopback-only, same direct-tunnel pattern as pi-web).
-- **Access URL:** `https://paseo.carter2099.com` (CF Access SSO requires manual setup in Zero Trust dashboard — not yet done; currently password-only).
-- **Auth:** `PASEO_PASSWORD` env var (stored in `~/paseo/.env`, 600, gitignored). The web UI prompts for this password on first connection. Also set in Paseo daemon config at `~/paseo/paseo-home/.paseo/config.json`.
-- **Routing:** direct-tunnel pattern — tunnel ingress `paseo.carter2099.com → http://localhost:6767`. DNS: proxied CNAME `paseo` → `<tunnel-id>.cfargotunnel.com`.
-- **Agent CLIs in container:** omp v17.0.6 + bun. omp config mounted at `~/paseo/omp-config/ → /home/paseo/.omp/agent` (models, auth, skills, sessions). Provider configured with `command: ["omp", "--allow-home"]` so omp stays in workspace dir.
-- **Workspace:** `/home/carter` on host mounted at `/workspace` in container. Use the `homelab` workspace in Paseo's project picker (not `paseo` which is the container home).
-- **`extra_hosts`:** `host.docker.internal:host-gateway` so container agents can reach host services (opencode-go-proxy on :8082, llm-proxy on :8081). UFW rules on `br-paseo` allow these.
-- **Manage:** `cd ~/paseo && bash up.sh` (rebuild + restart). Container uses `unless-stopped` restart policy.
-- **Logs:** `docker logs paseo -f` or `docker compose -f ~/paseo/docker-compose.yml logs -f`.
-- **Upgrading Paseo:** `docker pull ghcr.io/getpaseo/paseo:latest && cd ~/paseo && bash up.sh`.
-- **Password:** `grep PASEO_PASSWORD ~/paseo/.env`
+- **SSH access:** `ssh carter@<host>` — key auth (`~/.ssh/id_ed25519`). Also available via CF tunnel at `ssh.carter2099.com` (SSH-over-tunnel through `cloudflared access ssh` / CF Access).
+- **Interactive omp:** once SSH'd in, run `omp` to start an interactive agent session in the current directory. Headless mode: `omp -p "prompt"`.
+- **XDG_RUNTIME_DIR:** before any `systemctl --user ...` commands, set `export XDG_RUNTIME_DIR=/run/user/$(id -u)` (required for systemctl --user to reach the user bus).
 
 ### Reboot protocol
 
@@ -374,6 +361,7 @@ At the start of every interactive session, check `~/agent-state/pending.md`. If 
 4. If mtime is older than 30 min, the file is stale — surface it briefly and delete.
 
 This is the mechanism by which tasks survive reboots. It is the *only* expectation of cross-reboot continuity.
+
 
 ## Persistent Memory (`~/notes/`)
 
@@ -435,10 +423,10 @@ Quick reference (verified 2026-07-21):
 
 ### OpenCode Go Proxy (opencode-go-proxy)
 
-**pi's `opencode-go/*` models route through this, not directly to opencode.ai.** If opencode-go models fail, check this service first.
+**omp's `opencode-go/*` models route through this, not directly to opencode.ai.** If opencode-go models fail, check this service first.
 
-- **What:** An always-on local reverse proxy on `0.0.0.0:8082` that owns **two** OpenCode Go subscriptions and routes each request to the account with more headroom (proactive 60s cookie scrape of `/go`+`/billing` + reactive `cost`-field demote on each 200). Sticky+hysteresis(8pt) among `go_free`, round-robin on PAYG ($25 cap each), 401 self-healing cooldown, cookie-stale email alert. Path-transparent to `https://opencode.ai/zen/go`; injects the real per-account key (clients send a placeholder). Binds `0.0.0.0` (not loopback) so Docker containers (Open WebUI) can reach it via `host.docker.internal:8082`, but **ufw gates 8082 to the docker bridges only** — the LAN still can't reach it (default deny), same posture as the sibling `llm-proxy` on `:8081`. Pi reaches it as `localhost:8082` (loopback, unaffected).
-- **Pi config:** `~/.pi/agent/models.json` → `providers.opencode-go.baseUrl = http://localhost:8082/v1`; `~/.pi/agent/auth.json` → `opencode-go.key = "proxy"` (placeholder; proxy owns both real keys). Built-in opencode-go models are overridden, not redefined. **rollback = revert those two fields.**
+- **What:** An always-on local reverse proxy on `0.0.0.0:8082` that owns **two** OpenCode Go subscriptions and routes each request to the account with more headroom (proactive 60s cookie scrape of `/go`+`/billing` + reactive `cost`-field demote on each 200). Sticky+hysteresis(8pt) among `go_free`, round-robin on PAYG ($25 cap each), 401 self-healing cooldown, cookie-stale email alert. Path-transparent to `https://opencode.ai/zen/go`; injects the real per-account key (clients send a placeholder). Binds `0.0.0.0` (not loopback) so Docker containers (Open WebUI) can reach it via `host.docker.internal:8082`, but **ufw gates 8082 to the docker bridges only** — the LAN still can't reach it (default deny), same posture as the sibling `llm-proxy` on `:8081`. omp reaches it as `localhost:8082` (loopback, unaffected).
+- **Agent config:** `~/.omp/agent/models.yml` → `providers.opencode-go.baseUrl = http://localhost:8082/v1`; omp uses `--api-key proxy` flag (the proxy owns both real API keys; clients send the placeholder `"proxy"`). **rollback = revert those fields.**
 - **Open WebUI config:** Admin Settings → Connections → OpenAI API: Base URL `http://host.docker.internal:8082/v1`, key `proxy`. Stored in the `webui.db` config table (keys `openai.api_base_urls` / `openai.api_keys`, index 0), which **overrides** the compose `OPENAI_API_BASE_URL` env. The container reaches the host via `extra_hosts: host.docker.internal:host-gateway` (already in compose for SearXNG).
 - **ufw (load-bearing for containers):** the container's traffic arrives on its docker-**bridge interface** (`br-<network id>`, e.g. `br-52cf29032cfb` = `homelab-chat-search`), NOT `docker0`, and NOT from `172.23`. Allow rules must match the real bridge: `sudo ufw allow in on br-<id> to any port 8082 proto tcp`. Same rule on `:8081` restores `llm-proxy` for Open WebUI (its local-qwen connection). If Open WebUI hangs on a host service, check `sudo ufw status` for the container's actual bridge before anything else — a `docker compose down/up` or network recreate silently lands containers on a new bridge the rules don't cover (same class as the k3s `cni0`/`flannel.1` rules).
 - **Service:** `opencode-go-proxy.service` (systemd user, enabled) · binary `~/.local/bin/opencode-go-proxy` · source `~/dev/opencode-go-proxy/` (repo `carter2099/opencode-go-proxy`) · config `~/.config/opencode-go-proxy/config.json` (600, gitignored — contains real API keys + auth cookies).

@@ -1,11 +1,11 @@
 ---
 name: email-digest
-description: Create a new scheduled email digest that runs daily via a systemd timer, spawning a headless Pi agent (deepseek-v4-flash) to research the web for news on specified topics and email an HTML summary.
+description: Create a new scheduled email digest that runs daily via a systemd timer, spawning a headless omp agent (deepseek-v4-flash) to research the web for news on specified topics and email an HTML summary.
 ---
 
 # email-digest
 
-Create a scheduled daily email digest powered by a local systemd timer that spawns a headless `pi -p` agent on the OpenCode Go subscription, using `deepseek-v4-flash` by default. Provider-agnostic — the model is a single `--model` flag.
+Create a scheduled daily email digest powered by a local systemd timer that spawns a headless `omp -p` agent on the OpenCode Go subscription, using `deepseek-v4-flash` by default. Provider-agnostic — the model is a single `--model` flag.
 
 ## Required input
 
@@ -13,7 +13,7 @@ Gather these from the user before creating the digest. Ask for anything missing:
 
 - **name** (string): short kebab-case identifier (e.g. `ai-tech-digest`, `crypto-weekly`)
 - **topics** (string): what the digest should cover
-- **sources** (list of URLs): reputable homepages to start research from. Pi has `web_search` for discovery and `web_fetch` for reading pages — good starting sources still help focus coverage. If the user doesn't specify, suggest a few reputable outlets for the topic.
+- **sources** (list of URLs): reputable homepages to start research from. omp has `web_search` for discovery and `web_fetch` for reading pages — good starting sources still help focus coverage. If the user doesn't specify, suggest a few reputable outlets for the topic.
 - **recipients** (list of emails): one or more addresses to send to
 - **time** (string): time of day in the user's local time. Convert to UTC for the systemd timer `OnCalendar` (server is UTC). Currently EDT = UTC-4. Confirm the conversion with the user.
 - **frequency** (string, default: daily): daily, weekdays, weekly, etc.
@@ -24,7 +24,7 @@ Gather these from the user before creating the digest. Ask for anything missing:
 - **SMTP config:** `~/scripts/.smtp_config` — Proton Mail SMTP via `bot@carter2099.com` (un-tracked; also a good place to stash third-party recipient addresses, see Step 5 note)
 - **HTML template:** `~/digests/template.html` — shared layout for all digests (dark header, story blocks, footer)
 - **Digest history:** `~/digests/<name>/` — one `.md` summary file per run, kept for 7 days
-- **Pi binary:** `pi` on PATH (via fnm); auth is an OpenCode Go API key in `~/.pi/agent/auth.json`
+- **omp binary:** `omp` on PATH (via bun); auth via `--api-key proxy` (opencode-go-proxy on localhost:8082)
 
 If `~/scripts/send_digest.py` or `~/scripts/.smtp_config` don't exist, stop and tell the user — they need to be created first.
 
@@ -37,7 +37,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
 ## Steps
 
-1. **Verify infrastructure.** Confirm `~/scripts/send_digest.py`, `~/scripts/.smtp_config`, and `pi` on PATH exist.
+1. **Verify infrastructure.** Confirm `~/scripts/send_digest.py`, `~/scripts/.smtp_config`, and `omp` on PATH exist.
 
 2. **Create the history directory.** `mkdir -p ~/digests/<name>/`
 
@@ -124,7 +124,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
    ```bash
    #!/usr/bin/env bash
-   # Researches and emails the daily [TOPIC] digest via Pi + DeepSeek V4 Flash.
+   # Researches and emails the daily [TOPIC] digest via omp + DeepSeek V4 Flash.
    # Scheduled via systemd timer ([NAME].timer). Provider-agnostic: change
    # the --model id to switch providers/models without touching anything else.
    set -euo pipefail
@@ -136,7 +136,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
    PROMPT='<THE PROMPT FROM STEP 4>'
 
-   pi -p --model opencode-go/deepseek-v4-flash "$PROMPT"
+   omp -p --model opencode-go/deepseek-v4-flash --api-key proxy --allow-home --session-dir ~/.omp/agent/sessions-automated "$PROMPT"
    END_TS="$(date +%s)"
    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [NAME] duration=$((END_TS - START_TS))s model=deepseek-v4-flash" >> "$HOME/digests/[NAME]/.runs.log"
    ```
@@ -151,7 +151,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
    ```ini
    [Unit]
-   Description=Daily [TOPIC] email digest via Pi (deepseek-v4-flash)
+   Description=Daily [TOPIC] email digest via omp (deepseek-v4-flash)
 
    [Service]
    Type=oneshot
@@ -193,7 +193,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
    - Timer status: `systemctl --user status [NAME].timer`
    - Next fire time from `systemctl --user list-timers [NAME].timer`
    - Recipient list
-   - Offer to do a test run: `bash ~/scripts/run_[NAME].sh` — then **verify it actually sent**: check that `~/digests/[NAME]/[DATE].md` was written with URLs, the `.html` was archived, and `.runs.log` has an entry. Pi exits non-zero on failure, but verify artifacts anyway.
+   - Offer to do a test run: `bash ~/scripts/run_[NAME].sh` — then **verify it actually sent**: check that `~/digests/[NAME]/[DATE].md` was written with URLs, the `.html` was archived, and `.runs.log` has an entry. omp exits non-zero on failure, but verify artifacts anyway.
 
 ## Modifying an existing digest
 
@@ -226,13 +226,13 @@ systemctl --user daemon-reload
 
 ## Notes
 
-- Agents run locally on the homelab via `pi -p` (headless) on the OpenCode Go subscription, using `deepseek-v4-flash` by default.
-- **Headless Pi notes:**
-  - Pi's `-p` (print) mode is the direct equivalent of `opencode run` — no stdin tricks needed.
+- Agents run locally on the homelab via `omp -p` (headless) on the OpenCode Go subscription, using `deepseek-v4-flash` by default.
+- **Headless omp notes:**
+  - omp's `-p` (print) mode is the direct equivalent of `opencode run` — no stdin tricks needed.
   - No file-path restrictions — writes outside `/home/carter` are fine.
-  - Pi exits non-zero on errors, but still verify artifacts (summary `.md` with URLs, archived `.html`, `.runs.log` entry).
-  - Pi has both `web_search` (for discovering articles) and `web_fetch` (for reading pages).
-- Auth comes from `~/.pi/agent/auth.json` (OpenCode Go provider).
+  - omp exits non-zero on errors, but still verify artifacts (summary `.md` with URLs, archived `.html`, `.runs.log` entry).
+  - omp has both `web_search` (for discovering articles) and `web_fetch` (for reading pages).
+- Auth is provided via the `--api-key proxy` flag (opencode-go-proxy on localhost:8082 handles the real OpenCode Go API keys).
 - `TimeoutStartSec=600` (10 minutes) prevents a stuck agent from blocking indefinitely.
 - Digest history in `~/digests/<name>/` provides dedup context — the agent reads prior summaries to avoid repeating stories and to track evolving narratives across days.
 - The "Recent & Relevant" section catches stories that are evolving or gaining momentum, not just stories from the last 24 hours — momentum and follow-up coverage are valid reasons to re-include a story.

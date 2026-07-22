@@ -120,5 +120,5 @@ Write a brief session memoir to `~/notes/sessions/YYYY-MM-DD.md` per the Persist
 ## Notes
 
 - This skill is report-only. It never installs, upgrades, or restarts anything.
-- The nightly agent (update-check.timer, 1am ET) is a deterministic Python orchestrator (`update_runner.py`). It auto-applies apt upgrades, Docker engine/plugins, cloudflared, open-webui stable tags, and k3s workload restarts — each with pre-version capture and automatic rollback on pi-web or tunnel failure. It emails a full HTML report daily.
+- The nightly agent (update-check.timer, 1am ET) is a deterministic Python orchestrator (`update_runner.py`). It auto-applies apt upgrades, Docker engine/plugins, cloudflared, open-webui stable tags, and k3s workload restarts — each with pre-version capture and automatic rollback on tunnel failure. It emails a full HTML report daily.
 - Use web_search sparingly — only for items where the user would reasonably care about being behind (open-webui, traefik, Go, neovim, k3s). Skip web_search for routine apt packages.

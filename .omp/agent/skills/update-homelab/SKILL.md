@@ -51,7 +51,7 @@ If a k3s workload has a specific newer tag (not just :latest restart):
 5. If any container failed to restart, start it manually
 
 ### 2d. cloudflared
-⚠️ Restarts the tunnel. Brief interruption to all tunnel-routed services (pi-web, open-webui, blog, delta_neutral, dependabot-webhook).
+⚠️ Restarts the tunnel. Brief interruption to all tunnel-routed services (open-webui, blog, delta_neutral, dependabot-webhook).
 
 1. Confirm with user
 2. `sudo apt install --only-upgrade cloudflared -y`
@@ -88,7 +88,6 @@ docker ps -a --format '{{.Names}} {{.Status}}'
 curl -so /dev/null -w '%{http_code}' http://127.0.0.1:48100 && echo " open-webui"
 curl -so /dev/null -w '%{http_code}' http://127.0.0.1:3099 && echo " blog"
 curl -so /dev/null -w '%{http_code}' http://127.0.0.1:43080 && echo " delta_neutral"
-curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8504 && echo " pi-web"
 curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8082/health && echo " opencode-go-proxy"
 
 # Disk

@@ -15,11 +15,11 @@ Usage:
     python3 ~/scripts/digest_runner.py all
 
 Phases:
-    1. Research        — pi -p web_search (3 angles, sequential)
+    1. Research        — omp -p web_search (3 angles, sequential)
     2. Judge Research  — batched LLM: Python date pre-tag + LLM quality filter
     3. Rank URLs       — Python: Pool A (fresh, capped 12) + Pool B (ongoing, capped 5)
                           + Pool C (stories-in-flight, capped 3, bypasses Phase 4)
-    4. Fetch + Summarize — pi -p web_fetch (fresh first, then ongoing, ≤17 total)
+    4. Fetch + Summarize — omp -p web_fetch (fresh first, then ongoing, ≤17 total)
     5. Judge Summaries — batched LLM: accuracy/fidelity check
     6. Curate          — 6a Python prep → 6b LLM editorial → 6c Python validate
     7. Write HTML      — one LLM call filling template
@@ -53,8 +53,55 @@ LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
 MODEL_REASONING = "qwen-3.6-35b-q5"       # reasoning ON — used for all phases
 MODEL_FAST = "qwen-3.5-4b-q8"              # reasoning ON — fast fallback
 DEFAULT_TIMEOUT = 900                        # generous for slow local model
-RESEARCH_TIMEOUT = 1800                      # 30 min for research pi -p calls
+RESEARCH_TIMEOUT = 1800                      # 30 min for research omp -p calls
 FETCH_TIMEOUT = 900                          # 15 min per article fetch
+
+# ── Test mode ─────────────────────────────────────────────────────────────
+TEST_MODE: bool = False
+TEST_LABEL: str | None = None
+MODEL_OVERRIDE: str | None = None
+
+# ── Provider detection (cached from pi models.json) ───────────────────────
+_MODEL_PROVIDER_CACHE: dict[str, dict] = {}
+
+
+def _detect_model_provider(model_id: str) -> dict:
+    """Return {provider, chat_url} for a model by reading pi's models.json.
+
+    Result is cached so models.json is only read once per model.
+    Falls back to local-llm on any error.
+    """
+    if model_id in _MODEL_PROVIDER_CACHE:
+        return _MODEL_PROVIDER_CACHE[model_id]
+
+    models_path = Path.home() / ".pi" / "agent" / "models.json"
+    try:
+        config = json.loads(models_path.read_text())
+        for prov_name, prov in config.get("providers", {}).items():
+            for m in prov.get("models", []):
+                if m.get("id") == model_id:
+                    base = prov.get("baseUrl", "").rstrip("/")
+                    info = {
+                        "provider": prov_name,
+                        "chat_url": f"{base}/chat/completions",
+                    }
+                    _MODEL_PROVIDER_CACHE[model_id] = info
+                    return info
+    except Exception:
+        pass
+
+    # Fallback: assume local-llm
+    fb = {
+        "provider": "local-llm",
+        "chat_url": "http://localhost:8081/v1/chat/completions",
+    }
+    _MODEL_PROVIDER_CACHE[model_id] = fb
+    return fb
+
+
+def _effective_model(requested: str) -> str:
+    """Return the effective model, respecting --model override."""
+    return MODEL_OVERRIDE if MODEL_OVERRIDE else requested
 
 # ── Concurrency ────────────────────────────────────────────────────────────
 MAX_PARALLEL_RESEARCH = 1   # llama.cpp is single-request; keep sequential
@@ -692,52 +739,70 @@ def _call_llm_proxy(
     temperature: float = 0.3,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
-    """Call the local Qwen model via llm-proxy. Returns response text."""
+    """Call the LLM model via its provider's chat-completions endpoint."""
+    eff_model = _effective_model(model)
+    provider_info = _detect_model_provider(eff_model)
     date_prefix = _date_context()
     payload: dict[str, Any] = {
-        "model": model,
+        "model": eff_model,
         "messages": [
             {"role": "system", "content": f"{date_prefix}\n\n{system}"},
             {"role": "user", "content": user},
         ],
         "temperature": temperature,
     }
-    resp = requests.post(LLM_PROXY_URL, json=payload, timeout=timeout)
+    resp = requests.post(provider_info["chat_url"], json=payload, timeout=timeout)
     resp.raise_for_status()
     body = resp.json()
     return body["choices"][0]["message"]["content"]
 
-
-def _call_pi_p(
+def _call_omp_p(
     prompt: str,
     model: str = MODEL_REASONING,
     timeout: int = RESEARCH_TIMEOUT,
     append_system: str | None = None,
 ) -> str:
-    """Call pi -p (headless) for steps that need web_search/web_fetch tools.
+    """Call omp -p (headless) for steps that need web_search/web_fetch tools.
 
-    Returns the raw stdout. pi -p needs generous timeouts because the
-    local model is slow (sometimes <30 tok/s) and web fetches add latency.
+    Returns the raw stdout. Uses provider/model format so omp routes to the
+    correct provider. Prompt is written to a temp file and passed via @file
+    (omp doesn't reliably extract URLs from stdin; @file works correctly).
     """
-    cmd = ["pi", "-p", "--provider", "local-llm", "--model", model,
-           "--session-dir", str(Path.home() / ".pi/agent/sessions-automated")]
+    import tempfile
+    eff_model = _effective_model(model)
+    provider_info = _detect_model_provider(eff_model)
+    omp_model = f"{provider_info['provider']}/{eff_model}"
     date_prefix = _date_context()
     full_system = f"{date_prefix}\n\n{append_system}" if append_system else date_prefix
-    cmd.extend(["--append-system-prompt", full_system])
 
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env={**os.environ, "HOME": str(Path.home())},
-    )
-    if result.returncode != 0 and not result.stdout.strip():
-        raise RuntimeError(f"pi -p failed (rc={result.returncode}): {result.stderr[:500]}")
-    return result.stdout
+    # Write prompt to temp file — omp's web_fetch needs the URL in a file/arg,
+    # not stdin, to reliably trigger the tool.
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", prefix="omp_digest_", delete=False
+    ) as tf:
+        tf.write(prompt)
+        prompt_file = tf.name
 
-
+    try:
+        cmd = ["omp", "-p", "--model", omp_model,
+               "--session-dir", str(Path.home() / ".omp/agent/sessions-automated"),
+               "--append-system-prompt", full_system,
+               f"@{prompt_file}"]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, "HOME": str(Path.home())},
+        )
+        if result.returncode != 0 and not result.stdout.strip():
+            raise RuntimeError(f"omp -p failed (rc={result.returncode}): {result.stderr[:500]}")
+        return result.stdout
+    finally:
+        try:
+            Path(prompt_file).unlink()
+        except OSError:
+            pass
 def _extract_json(text: str, label: str = "output") -> Any:
     """Extract JSON from LLM output. Tries markdown fences first, then raw JSON."""
     m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
@@ -768,7 +833,7 @@ def _extract_json(text: str, label: str = "output") -> Any:
 def _refetch_article_date(url: str, title: str) -> str | None:
     """Re-fetch an article to independently extract its publication date.
 
-    Uses a lightweight pi -p call that only extracts the date from the page
+    Uses a lightweight omp -p call that only extracts the date from the page
     (no summary, no analysis). Returns date string (YYYY-MM-DD) or None on failure.
     """
     system = (
@@ -785,7 +850,7 @@ def _refetch_article_date(url: str, title: str) -> str | None:
         "Extract ONLY the publication date from the page. Output the JSON."
     )
     try:
-        raw = _call_pi_p(prompt, model=MODEL_FAST, timeout=600,
+        raw = _call_omp_p(prompt, model=MODEL_FAST, timeout=600,
                          append_system=system)
         result = _extract_json(raw, f"date-refetch:{title[:40]}")
         dc = (result.get("date_confirmed") or "").strip()
@@ -821,9 +886,9 @@ def _batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
-    """Phase 1: Parallel research agents via pi -p.
+    """Phase 1: Parallel research agents via omp -p.
 
-    Each research angle gets its own pi -p call. They use web_search and
+    Each research angle gets its own omp -p call. They use web_search and
     web_fetch to find stories. Returns merged list of findings.
     """
     output_path = run_dir / "01-research-raw.json"
@@ -860,7 +925,7 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
         print(f"  [run ] {label}")
         t0 = time.time()
         try:
-            raw = _call_pi_p(angle["prompt"], model=MODEL_REASONING, timeout=RESEARCH_TIMEOUT,
+            raw = _call_omp_p(angle["prompt"], model=MODEL_REASONING, timeout=RESEARCH_TIMEOUT,
                              append_system=system_prompt)
             findings = _extract_json(raw, f"{label} output")
             elapsed = time.time() - t0
@@ -1105,12 +1170,11 @@ def phase_3_rank(
           f"Pool C={len(pool_c)} SIF (bypass Phase 4) → {len(phase_4_queue)} total for fetch")
     return phase_4_queue, pool_c
 
-
 def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
-    """Phase 4: Fetch each article and write detailed summaries.
+    """Phase 4: Fetch each article via omp web_fetch and produce detailed summaries.
 
-    Fresh stories fetch first (already ordered by Phase 3), then ongoing articles.
-    Total bounded by Phase 3 caps: ≤17 articles (12 fresh + 5 ongoing).
+    Each article is fetched by an omp agent that reads the article and
+    returns a structured JSON summary. Sequential to avoid overloading.
     """
     output_path = run_dir / "04-fetch-summaries.json"
     if output_path.exists():
@@ -1147,7 +1211,7 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
             "wrapped in ```json fences."
         )
         try:
-            raw = _call_pi_p(prompt, model=MODEL_REASONING, timeout=FETCH_TIMEOUT,
+            raw = _call_omp_p(prompt, model=MODEL_REASONING, timeout=FETCH_TIMEOUT,
                              append_system=system_prompt)
             result = _extract_json(raw, f"{label} output")
             elapsed = time.time() - t0
@@ -1162,15 +1226,8 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
                     "date_confirmed": "", "author": ""}
 
     results: list[dict] = []
-    # Findings are already ordered fresh-first by Phase 3
-    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_FETCH) as pool:
-        futures = {pool.submit(_fetch_one, f): f for f in findings}
-        for future in as_completed(futures):
-            results.append(future.result())
-
-    # Preserve original order (fresh first, then ongoing)
-    url_order = {f.get("url"): i for i, f in enumerate(findings)}
-    results.sort(key=lambda r: url_order.get(r.get("url"), 999))
+    for finding in findings:
+        results.append(_fetch_one(finding))
 
     output_path.write_text(json.dumps(results, indent=2))
     successful = sum(1 for r in results if r.get("fetch_success", True))
@@ -1635,21 +1692,21 @@ def phase_7_write(topic: dict, fresh: list[dict], ongoing: list[dict],
         print(f"  [FAIL] write_html — {e} ({elapsed:.0f}s)")
         raise
 
-
 def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
                          run_dir: Path, digest_dir: Path) -> None:
     """Phase 8: Send email, archive HTML, write stories-in-flight.
 
-    No LLM call — pure Python.
+    No LLM call — pure Python. In test mode, email is sent with a [TEST]
+    subject prefix and archived to the test run_dir.
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    # Idempotent resume: if today's archive exists, this phase already ran —
-    # don't re-send the email (every other phase skips on existing output).
-    archive_path = digest_dir / f"{today_str}.html"
-    if archive_path.exists():
-        print(f"  [skip] Phase 8 output exists: {archive_path}")
-        return
+    # Idempotent resume (prod only — test runs always send)
+    if not TEST_MODE:
+        archive_path = digest_dir / f"{today_str}.html"
+        if archive_path.exists():
+            print(f"  [skip] Phase 8 output exists: {archive_path}")
+            return
 
     temp_html = digest_dir / ".daily_digest.html"
     temp_html.write_text(html)
@@ -1666,7 +1723,8 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
                         recipients.append(cc)
                     break
 
-    subject = f"{topic['title']} — {today_str}"
+    prefix = "[TEST] " if TEST_MODE else ""
+    subject = f"{prefix}{topic['title']} — {today_str}"
     print(f"  [run ] send_email to {recipients}")
     try:
         subprocess.run(
@@ -1682,6 +1740,11 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     except subprocess.CalledProcessError as e:
         print(f"  [FAIL] send_email — {e.stderr[:300]}")
 
+    # Archive: test mode → run_dir, prod → digest_dir with date
+    if TEST_MODE:
+        archive_path = run_dir / "digest.html"
+    else:
+        archive_path = digest_dir / f"{today_str}.html"
     shutil.copy(temp_html, archive_path)
     print(f"  [done] archived HTML → {archive_path}")
 
@@ -1864,7 +1927,12 @@ def cleanup_old_artifacts(digest_dir: Path, max_age_days: int = 14):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def run_digest(category: str, dry_run: bool = False) -> None:
-    """Run the full digest pipeline for a topic category."""
+    """Run the full digest pipeline for a topic category.
+
+    When TEST_MODE is set (via --test CLI flag), output goes to
+    ~/digests/test/<topic>/<label>/ and email is never sent. The
+    stories-in-flight from prod are copied in so ongoing tracking works.
+    """
     if category not in TOPICS:
         print(f"Unknown topic: {category}")
         print(f"Available: {', '.join(TOPICS)}")
@@ -1872,30 +1940,66 @@ def run_digest(category: str, dry_run: bool = False) -> None:
 
     topic = TOPICS[category]
     today_str = datetime.now().strftime("%Y-%m-%d")
-    digest_dir = DIGESTS_DIR / topic["category"]
-    run_dir = digest_dir / today_str
+
+    if TEST_MODE:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        label = (TEST_LABEL or "test") + "-" + ts
+        digest_dir = DIGESTS_DIR / "test" / topic["category"]
+        run_dir = digest_dir / label
+
+        # Copy stories-in-flight from prod so ongoing tracking works
+        prod_sif = DIGESTS_DIR / topic["category"] / "stories-in-flight.json"
+        if prod_sif.exists():
+            digest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(prod_sif, digest_dir / "stories-in-flight.json")
+            print(f"  [test] Copied stories-in-flight from prod ({prod_sif})")
+    else:
+        digest_dir = DIGESTS_DIR / topic["category"]
+        run_dir = digest_dir / today_str
+
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    model_note = f" [model: {MODEL_OVERRIDE}]" if MODEL_OVERRIDE else ""
     print(f"\n{'='*60}")
-    print(f"  {topic['title']} — {today_str}")
+    print(f"  {topic['title']} — {today_str}{model_note}")
     print(f"  Run dir: {run_dir}")
+    if TEST_MODE:
+        print(f"  *** TEST MODE — output isolated, email enabled ***")
     print(f"{'='*60}\n")
 
     overall_start = time.time()
+    phase_times: dict[str, float] = {}
+
+    def _phase_start(name: str) -> float:
+        t = time.time()
+        print(f"\n── {name} ──")
+        return t
+
+    def _phase_done(name: str, start: float) -> None:
+        elapsed = time.time() - start
+        phase_times[name] = elapsed
+        print(f"  [{elapsed:.0f}s] {name}")
 
     # Phase 0: Setup
-    print("── Phase 0: Setup ──")
+    t0 = _phase_start("Phase 0: Setup")
     stories_in_flight = load_and_prune_stories_in_flight(digest_dir)
     active_stories = [s for s in stories_in_flight.get("stories", [])
                       if s.get("status") == "active"]
     print(f"  Stories in flight: {len(active_stories)} active")
-    cleanup_old_artifacts(digest_dir)
+    if not TEST_MODE:
+        cleanup_old_artifacts(digest_dir)
+    _phase_done("Phase 0: Setup", t0)
 
     try:
         # Phase 1: Research
-        print("\n── Phase 1: Research ──")
+        t1 = _phase_start("Phase 1: Research")
         check_search_health("pre-phase1")
-        findings = phase_1_research(topic, run_dir)
+        phase_1_path = run_dir / "01-research-raw.json"
+        if phase_1_path.exists():
+            print(f"  [skip] Phase 1 output exists: {phase_1_path}")
+            findings = json.loads(phase_1_path.read_text())
+        else:
+            findings = phase_1_research(topic, run_dir)
         health = check_search_health("post-phase1")
         if health.get("recommendation") == "halt":
             print("  *** HALT: Search engine health critical. Stopping digest. ***")
@@ -1904,47 +2008,81 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             sys.exit(2)
         if not findings:
             print("  WARNING: No research findings. Digest will be empty.")
+        _phase_done("Phase 1: Research", t1)
 
-        # Phase 2: Judge Research (batched + date pre-tag)
-        print("\n── Phase 2: Judge Research ──")
-        if findings:
+        # Phase 2: Judge Research
+        t2 = _phase_start("Phase 2: Judge Research")
+        phase_2_path = run_dir / "02-research-judged.json"
+        if phase_2_path.exists():
+            print(f"  [skip] Phase 2 output exists: {phase_2_path}")
+            judged_raw = json.loads(phase_2_path.read_text())
+            fresh_findings = judged_raw.get("fresh", [])
+            ongoing_findings = judged_raw.get("ongoing", [])
+        elif findings:
             fresh_findings, ongoing_findings = phase_2_judge_research(topic, findings, run_dir)
         else:
             fresh_findings, ongoing_findings = [], []
+        _phase_done("Phase 2: Judge Research", t2)
 
-        # Phase 3: Rank URLs (Pools A/B/C with caps)
-        print("\n── Phase 3: Rank URLs ──")
-        if fresh_findings or ongoing_findings:
+        # Phase 3: Rank URLs
+        t3 = _phase_start("Phase 3: Rank URLs")
+        phase_3_path = run_dir / "03-urls-ranked.json"
+        if phase_3_path.exists():
+            print(f"  [skip] Phase 3 output exists: {phase_3_path}")
+            ranked = json.loads(phase_3_path.read_text())
+            phase_4_queue = ranked.get("phase_4_queue", [])
+            sif_candidates = ranked.get("sif_candidates", [])
+        elif fresh_findings or ongoing_findings:
             phase_4_queue, sif_candidates = phase_3_rank(
                 topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir)
         else:
             phase_4_queue, sif_candidates = [], []
+        _phase_done("Phase 3: Rank URLs", t3)
 
-        # Phase 4: Fetch + Summarize (fresh first, then ongoing, ≤17 total)
-        print("\n── Phase 4: Fetch & Summarize ──")
+        # Phase 4: Fetch + Summarize
+        t4 = _phase_start("Phase 4: Fetch & Summarize")
         check_search_health("pre-phase4")
-        if phase_4_queue:
+        phase_4_path = run_dir / "04-fetch-summaries.json"
+        if phase_4_path.exists():
+            print(f"  [skip] Phase 4 output exists: {phase_4_path}")
+            summaries = json.loads(phase_4_path.read_text())
+        elif phase_4_queue:
             summaries = phase_4_fetch(topic, phase_4_queue, run_dir)
         else:
             summaries = []
+        _phase_done("Phase 4: Fetch & Summarize", t4)
 
-        # Phase 5: Judge Summaries (batched)
-        print("\n── Phase 5: Judge Summaries ──")
-        if summaries:
+        # Phase 5: Judge Summaries
+        t5 = _phase_start("Phase 5: Judge Summaries")
+        phase_5_path = run_dir / "05-summaries-judged.json"
+        if phase_5_path.exists():
+            print(f"  [skip] Phase 5 output exists: {phase_5_path}")
+            judged = json.loads(phase_5_path.read_text())
+        elif summaries:
             judged = phase_5_judge_summaries(topic, summaries, run_dir)
         else:
             judged = []
+        _phase_done("Phase 5: Judge Summaries", t5)
 
-        # Phase 6: Curate (6a prep → 6b LLM → 6c validate)
-        print("\n── Phase 6: Curate ──")
-        if judged:
+        # Phase 6: Curate
+        t6 = _phase_start("Phase 6: Curate")
+        phase_6_path = run_dir / "06-curated.json"
+        if phase_6_path.exists():
+            print(f"  [skip] Phase 6 output exists: {phase_6_path}")
+            curated = json.loads(phase_6_path.read_text())
+            fresh = curated.get("fresh", [])
+            ongoing = curated.get("ongoing", [])
+            if "stories_in_flight" in curated:
+                stories_in_flight = curated["stories_in_flight"]
+        elif judged:
             fresh, stories_in_flight, ongoing = phase_6_curate(
                 topic, judged, sif_candidates, stories_in_flight, run_dir)
         else:
             fresh, ongoing = [], []
+        _phase_done("Phase 6: Curate", t6)
 
-        # Phase 7: Write
-        print("\n── Phase 7: Write HTML ──")
+        # Phase 7: Write HTML
+        t7 = _phase_start("Phase 7: Write HTML")
         curated_data = json.loads((run_dir / "06-curated.json").read_text()) \
             if (run_dir / "06-curated.json").exists() else {}
         intro_hook = curated_data.get("intro_hook", "")
@@ -1956,24 +2094,29 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 f'<p>{today_str}</p><p>No stories found today.</p></body></html>'
             )
             (run_dir / "digest.html").write_text(html)
+        _phase_done("Phase 7: Write HTML", t7)
 
         # Phase 8: Send + Archive
-        print("\n── Phase 8: Send & Archive ──")
+        t8 = _phase_start("Phase 8: Send & Archive")
         if dry_run:
             print("  [skip] DRY RUN — skipping email send")
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            archive_path = digest_dir / f"{today_str}.html"
-            shutil.copy(run_dir / "digest.html", archive_path)
+            archive_path = run_dir / "digest.html"
+            (run_dir / "digest.html").write_text(html)
             print(f"  [done] archived HTML → {archive_path}")
             sif_path = digest_dir / "stories-in-flight.json"
             sif_path.write_text(json.dumps(stories_in_flight, indent=2))
             print(f"  [done] stories-in-flight updated")
+            curated_src = run_dir / "06-curated.json"
+            if curated_src.exists():
+                shutil.copy(curated_src, run_dir / "curated_copy.json")
         else:
             phase_8_send_archive(topic, html, stories_in_flight, run_dir, digest_dir)
+        _phase_done("Phase 8: Send & Archive", t8)
 
         # Phase 9: Summary
-        print("\n── Phase 9: Summary ──")
+        t9 = _phase_start("Phase 9: Summary")
         phase_9_summary(topic, fresh, ongoing, run_dir, digest_dir)
+        _phase_done("Phase 9: Summary", t9)
 
     except Exception as e:
         print(f"\n  FATAL: {e}")
@@ -1985,6 +2128,62 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     print(f"  Digest complete in {overall_elapsed:.0f}s ({overall_elapsed/60:.1f} min)")
     print(f"{'='*60}\n")
 
+    # ── Test report ──────────────────────────────────────────────────────
+    if TEST_MODE:
+        _write_test_report(run_dir, topic, category, phase_times,
+                           overall_elapsed, len(findings) if findings else 0,
+                           len(summaries) if 'summaries' in dir() else 0,
+                           len(fresh) if 'fresh' in dir() else 0,
+                           len(ongoing) if 'ongoing' in dir() else 0)
+
+
+def _write_test_report(run_dir: Path, topic: dict, category: str,
+                       phase_times: dict[str, float], total_time: float,
+                       n_findings: int, n_summaries: int,
+                       n_fresh: int, n_ongoing: int) -> None:
+    """Write a test report summarizing timing and quality metrics."""
+    report_path = run_dir / "test-report.md"
+    model = MODEL_OVERRIDE or MODEL_REASONING
+    provider_info = _detect_model_provider(model)
+
+    lines = [
+        f"# Test Report: {topic['title']}",
+        f"",
+        f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"**Model:** `{model}`",
+        f"**Provider:** `{provider_info['provider']}` ({provider_info['chat_url']})",
+        f"**Label:** `{TEST_LABEL or 'N/A'}`",
+        f"",
+        f"## Timing",
+        f"",
+        f"| Phase | Time (s) | Time (min) |",
+        f"|-------|----------|------------|",
+    ]
+    for name, secs in phase_times.items():
+        lines.append(f"| {name} | {secs:.0f} | {secs/60:.1f} |")
+    lines.append(f"| **Total** | **{total_time:.0f}** | **{total_time/60:.1f}** |")
+
+    lines += [
+        f"",
+        f"## Throughput",
+        f"",
+        f"| Metric | Count |",
+        f"|--------|-------|",
+        f"| Phase 1 findings | {n_findings} |",
+        f"| Phase 4 summaries | {n_summaries} |",
+        f"| Final fresh stories | {n_fresh} |",
+        f"| Final ongoing stories | {n_ongoing} |",
+        f"",
+        f"## Artifacts",
+        f"",
+    ]
+    for f in sorted(run_dir.iterdir()):
+        if f.is_file():
+            size_kb = f.stat().st_size / 1024
+            lines.append(f"- `{f.name}` ({size_kb:.1f} KB)")
+
+    report_path.write_text("\n".join(lines) + "\n")
+    print(f"  [test] Report written → {report_path}")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CLI
@@ -1996,7 +2195,23 @@ if __name__ == "__main__":
                         help="Topic to run (or 'all' for every topic)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run pipeline but skip email send (Phase 8)")
+    parser.add_argument("--test", action="store_true",
+                        help="Test mode: isolate output in ~/digests/test/, copy prod SIF, write report")
+    parser.add_argument("--model", type=str, default=None,
+                        help="Override the LLM model (e.g. ornith-1.0-9b-q6, deepseek-v4-flash)")
+    parser.add_argument("--test-label", type=str, default=None,
+                        help="Label for test run directory (default: model name or 'test')")
     args = parser.parse_args()
+
+    # Set module-level globals for test mode
+    if args.test:
+        TEST_MODE = True
+    if args.model:
+        MODEL_OVERRIDE = args.model
+    if args.test_label:
+        TEST_LABEL = args.test_label
+    elif args.model and args.test:
+        TEST_LABEL = args.model
 
     if args.topic == "all":
         for cat in TOPICS:

@@ -42,7 +42,6 @@ ENDPOINTS = {
     "open-webui": "http://127.0.0.1:48100",
     "blog": "http://127.0.0.1:33099",
     "delta_neutral": "http://127.0.0.1:43080",
-    "pi-web": "http://127.0.0.1:8504",
     "llm-proxy": "http://127.0.0.1:8081/health",
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
@@ -862,8 +861,8 @@ def phase_3_troubleshoot(run_dir, dry_run=False):
     """Phase 3: spawn omp troubleshooting agent if endpoints regressed after P1 auto-apply.
 
     Loads yesterday's validation to detect regressions (was-ok, now-not-ok).
-    Generalizes prompt with all regressed endpoints; pi-web is highest priority.
-    Preserves old behavior: if no regressions but pi-web is down and P1 mutated, still trigger.
+    Generalizes prompt with all regressed endpoints.
+    Preserves old behavior: if no regressions but P1 mutated, still trigger if any endpoint is down.
     """
     if dry_run:
         print("[P3] DRY RUN — skipping troubleshooting agent")
@@ -918,20 +917,8 @@ def phase_3_troubleshoot(run_dir, dry_run=False):
         if yesterday_s == "ok" and today_s != "ok":
             regressed.append(name)
 
-    pi_web_down = today_status.get("endpoint_pi-web") != "ok"
-
-    # If no regressed but pi-web is down and wasn't yesterday, still trigger
-    if not regressed and pi_web_down:
-        yesterday_pi = yesterday_status.get("endpoint_pi-web")
-        if yesterday_pi != "fail":
-            regressed = ["endpoint_pi-web"]
-
-    # If no regressed and pi-web was already down yesterday, it's long-standing
     if not regressed:
-        if pi_web_down:
-            print("[P3] skipped — pi-web is down but was also down yesterday (not a new regression)")
-        else:
-            print("[P3] skipped — no endpoint regressions")
+        print("[P3] skipped — no endpoint regressions")
         write_json(run_dir / "03-troubleshoot.json",
                    {"triggered": False, "reason": "no_regressions",
                     "today_status": today_status, "yesterday_status": yesterday_status,
@@ -966,14 +953,6 @@ def phase_3_troubleshoot(run_dir, dry_run=False):
                  "--no-pager", "-n", "50"])
         diag[f"{safe}_journal"] = journal_out
 
-    # Always include pi-web journals if pi-web is down (even if not in regressed)
-    if pi_web_down:
-        diag.setdefault("pi_web_journal", run_capture(
-            ["journalctl", "--user", "-u", "pi-web", "--since", "30 min ago",
-             "--no-pager", "-n", "50"], env=user_env()))
-        diag.setdefault("pi_web_sessiond_journal", run_capture(
-            ["journalctl", "--user", "-u", "pi-web-sessiond", "--since", "30 min ago",
-             "--no-pager", "-n", "50"], env=user_env()))
 
     # Build diagnostic journal sections for the prompt
     journal_sections = ""
@@ -988,7 +967,6 @@ the following endpoints have REGRESSED (were healthy yesterday, unhealthy today)
 
 {regressed_list}
 
-pi-web (the always-on remote agent at pi.carter2099.com) is the highest-priority target.
 
 Your job: diagnose WHY these endpoints regressed and FIX them so we stay on the new versions.
 Rolling back is a LAST RESORT — prefer fixing forward.
@@ -1041,12 +1019,6 @@ Return a fenced ```json packet:
 
     # Check which regressed endpoints are now healthy
     all_healthy = True
-    pi_web_now = True
-    for c in re_validation.get("checks", []):
-        if c.get("name") in regressed and c.get("status") != "ok":
-            all_healthy = False
-        if c.get("name") == "endpoint_pi-web" and c.get("status") != "ok":
-            pi_web_now = False
 
     data = {
         "triggered": True,
@@ -1055,7 +1027,6 @@ Return a fenced ```json packet:
         "diagnosis": agent_packet.get("diagnosis", ""),
         "actions_taken": agent_packet.get("actions_taken", []),
         "healthy_endpoints": agent_packet.get("healthy_endpoints", []),
-        "pi_web_healthy": pi_web_now,
         "remaining_issues": agent_packet.get("remaining_issues", []),
         "agent_raw": agent_output[:4000],
         "re_validation_healthy": all_healthy,
@@ -1088,7 +1059,6 @@ def phase_3a_remediation(run_dir, dry_run=False):
         33099: "blog",
         43080: "delta_neutral",
         48100: "open-webui",
-        8504: "pi-web",
         8080: "searxng",
         8081: "llm-proxy",
         8082: "opencode-go-proxy",
@@ -1363,7 +1333,6 @@ def phase_4_heartbeat(run_dir):
         "homelab-steward-notify.service",
         "opencode-go-proxy.service",
         "llm-proxy.service",
-        "pi-web.service", "pi-web-sessiond.service",
         "dependabot-webhook.service",
         "homelab-backup-restore-drill.service", "homelab-backup-restore-drill.timer",
     }
@@ -1996,7 +1965,7 @@ def _audit_collector_2_versions():
         "node": run_capture(["node", "-v"]),
         "rbenv": run_capture(["rbenv", "versions"]),
         "nvim": run_capture(["nvim", "--version"]),
-        "npm_global": run_capture(["npm", "ls", "-g", "pi", "@jmfederico/pi-web"]),
+        "npm_global": run_capture(["npm", "ls", "-g", "omp"]),
         "docker_images": run_capture(
             ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}"]),
         "llama_cpp": "not-collected — worker verifies read-only via `ssh gamingrig`",
@@ -2226,7 +2195,7 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Compare current versions (in evidence) against latest upstream stable: k3s, Go, Node, Ruby (rbenv), "
-            "neovim, pi + @jmfederico/pi-web (npm), docker images (searxng, freshrss, traefik, open-webui), "
+            "neovim, omp (npm), docker images (searxng, freshrss, traefik, open-webui), "
             "llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
             "Report per component: current / latest / status (current | behind | behind-major). "
             "Checking upstream (GitHub releases, npm registry, go.dev) is allowed; mutations are not."
@@ -2252,10 +2221,10 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Judge the security posture from the evidence: listening sockets vs the documented set "
-            "(loopback-only: pi-web 8504, open-webui 48100, searxng 8080, llm-proxy 8081; ufw-gated: 8082; "
+            "(loopback-only: open-webui 48100, searxng 8080, llm-proxy 8081; ufw-gated: 8082; "
             "LAN: blog 33099, delta 43080), ufw ruleset intact (cni0/flannel.1/docker bridges), unattended-upgrades "
             "active, carter2099.com RDAP expiry (>30d out = ok), CF tunnel ingress vs expected hostnames "
-            "(pi, chat, hooks, deltaneutral, freshrss, blog, ssh), SSH failed-password volume. Flag anything unexpected."
+            "(chat, hooks, deltaneutral, freshrss, blog, ssh), SSH failed-password volume. Flag anything unexpected."
         ),
     },
     {
@@ -2292,7 +2261,7 @@ AUDIT_SECTIONS = [
             "Review the other unattended agents' recent runs from the evidence: hyperliquid-sdk (Mon/Thu timer — "
             "did it fire? outcome? errors?), dependabot-webhook (jobs, failures), and the steward's own prior "
             "executor outcome (if any — did yesterday's executor work hold up?). Also read recent session files in "
-            "~/.pi/agent/sessions-automated if you need outcomes the journal lacks. Flag failed or silently-"
+            "~/.omp/agent/sessions-automated if you need outcomes the journal lacks. Flag failed or silently-"
             "skipped runs."
         ),
     },
@@ -3336,13 +3305,9 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     troubleshoot_html = ""
     if troubleshoot and troubleshoot.get("triggered"):
         ts_status = troubleshoot.get("agent_status", "unknown")
-        pi_web_ok = troubleshoot.get("pi_web_healthy", False)
         diagnosis = troubleshoot.get("diagnosis", "")
         actions = troubleshoot.get("actions_taken", [])
-        if pi_web_ok:
-            badge = '<span style="color:#2e7d32; font-weight:700;">FIXED</span>'
-            color = "#2e7d32"
-        elif ts_status == "fixed":
+        if ts_status == "fixed":
             badge = '<span style="color:#2e7d32; font-weight:700;">FIXED</span>'
             color = "#2e7d32"
         elif ts_status == "partial":

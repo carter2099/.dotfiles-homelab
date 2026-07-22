@@ -1,11 +1,11 @@
 ---
 name: create-skill
-description: Create a new Pi agent skill, commit it to dotfiles, and push. Always use this instead of writing skill files directly.
+description: Create a new omp agent skill, commit it to dotfiles, and push. Always use this instead of writing skill files directly.
 ---
 
 # Create Skill
 
-Create a new skill under `~/.pi/agent/skills/` and immediately commit it to the dotfiles bare repo so it's backed up to GitHub.
+Create a new skill under `~/.omp/agent/skills/` and immediately commit it to the dotfiles bare repo so it's backed up to GitHub.
 
 ## Step 1: Agree on the skill
 
@@ -17,7 +17,7 @@ Before writing anything, confirm with the user:
 ## Step 2: Write the skill file
 
 ```
-~/.pi/agent/skills/<name>/SKILL.md
+~/.omp/agent/skills/<name>/SKILL.md
 ```
 
 Frontmatter fields:
@@ -33,7 +33,7 @@ Body: step-by-step instructions the agent will follow when the skill is invoked.
 ## Step 3: Commit to dotfiles immediately
 
 ```bash
-dotfiles add -A .pi/agent/skills/<name>/
+dotfiles add -A .omp/agent/skills/<name>/
 dotfiles commit -m "skill: add <name>"
 dotfiles push
 ```

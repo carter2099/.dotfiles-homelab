@@ -78,7 +78,6 @@ export CLOUDFLARE_ACCOUNT_ID=$(cat ~/.config/cloudflare/account-id 2>/dev/null |
 export CLOUDFLARE_ZONE_ID=$(cat ~/.config/cloudflare/zone-id 2>/dev/null | tr -d '\n')
 export CLOUDFLARE_HOMELAB_TUNNEL_ID=$(cat ~/.config/cloudflare/homelab-tunnel-id 2>/dev/null | tr -d '\n')
 
-alias pi-dev='node ~/dev/pi/packages/coding-agent/dist/cli.js'
 
 # bun completions
 [ -s "/home/carter/.bun/_bun" ] && source "/home/carter/.bun/_bun"
