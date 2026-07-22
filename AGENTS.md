@@ -60,6 +60,7 @@ This is the home directory, managed as a bare git repo for dotfiles:
 - `digests/` - Daily digest archives (`<topic>/YYYY-MM-DD/`)
 - `agent-state/` - Cross-reboot task persistence (`pending.md`)
 - `backups/` - Local backup archives (written by homelab-backup service)
+- `ideas/` - Random ideas, sparks, and half-baked thoughts (plain markdown)
 - `.dotfiles-homelab/` - Bare git repo tracking dotfiles
 
 ## Dev Workflow (`dev/`)
