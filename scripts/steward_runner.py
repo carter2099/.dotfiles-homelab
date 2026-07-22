@@ -1825,8 +1825,7 @@ LIVE MODE: Commit and push to main. Deploy if deploy:true. Full execution.
 
     extra_args = []
     try:
-        raw_text, stats, packet, raw_ndjson = _call_omp_p_json(
-        )
+        raw_text, stats, packet, raw_ndjson = _call_omp_p_json(full_prompt)
     except Exception as e:
         print(f"  EXECUTOR FAILED: {e}")
         # Restore plan status
