@@ -54,9 +54,6 @@ EXECUTOR_TIMEOUT = 2700
 EXECUTOR_MODE = "execute"
 PENDING_PATH = HOME / "agent-state" / "pending.md"
 DEPENDABOT_UNIT = "dependabot-webhook.service"
-GUARD_ROLLING_DEFER = 90
-GUARD_SKIP = 90
-GUARD_RESTRICT = 70
 
 # ── default template ─────────────────────────────────────────────────
 
@@ -472,8 +469,6 @@ def phase_0_setup(args):
         except Exception as e:
             dep["error"] = str(e)
             print(f"  dependabot: stop failed — {e}")
-    # Compute budget guard
-    guard = _compute_budget_guard(usage)
     data = {
         "date": date_str,
         "run_dir": str(run_dir),
@@ -482,7 +477,6 @@ def phase_0_setup(args):
         "dry_run": args.dry_run,
         "resume": args.resume,
         "usage": usage,
-        "guard": guard,
         "dependabot": dep,
     }
     artifact = run_dir / "00-setup.json"
@@ -498,7 +492,6 @@ def phase_0_setup(args):
                           f"rolling={a['rolling_pct']}%, weekly={a['weekly_pct']}%, "
                           f"monthly={a['monthly_pct']}%{extra}")
     print(f"[P0] setup -> {artifact}")
-    print(f"  guard: {guard}")
     if usage["proxy_error"]:
         print(f"  proxy: UNREACHABLE ({usage['proxy_error']})")
     else:
@@ -1214,47 +1207,6 @@ def phase_3a_remediation(run_dir, dry_run=False):
     write_json(run_dir / "03a-remediation.json", data)
     print(f"[P3a] done -> {run_dir / '03a-remediation.json'}")
     return data
-
-
-# ── Budget guard ─────────────────────────────────────────────────────
-
-
-def _compute_budget_guard(usage):
-    """Compute budget guard level from proxy health usage data.
-
-    Returns one of: 'defer_all', 'skip', 'restrict', 'full'
-    """
-    accounts = usage.get("accounts", [])
-    if not accounts:
-        return "full"
-
-    max_rolling = max(a.get("rolling_pct", 0) or 0 for a in accounts)
-    max_weekly = max(a.get("weekly_pct", 0) or 0 for a in accounts)
-    max_monthly = max(a.get("monthly_pct", 0) or 0 for a in accounts)
-
-    max_rolling = max_rolling if max_rolling is not None else 0
-    max_weekly = max_weekly if max_weekly is not None else 0
-    max_monthly = max_monthly if max_monthly is not None else 0
-
-    if max_rolling >= GUARD_ROLLING_DEFER:
-        return "defer_all"
-    if max_weekly >= GUARD_SKIP or max_monthly >= GUARD_SKIP:
-        # Skip P7 LLM workers (collectors still run) and P7b fix agents; executor deferred
-        return "skip"
-    if max_weekly >= GUARD_RESTRICT:
-        return "restrict"
-    return "full"
-
-
-def _guard_badge(guard_level):
-    chips = {
-        "full": '<span style="color:#2e7d32; font-weight:700;">FULL RUN</span>',
-        "restrict": '<span style="color:#e65100; font-weight:700;">RESTRICTED</span>',
-        "skip": '<span style="color:#c62828; font-weight:700;">SKIP FIX AGENTS</span>',
-        "defer_all": '<span style="color:#c62828; font-weight:700;">DEFERRED</span>',
-    }
-    return chips.get(guard_level, guard_level)
-
 
 
 # ── P4: heartbeat ────────────────────────────────────────────────────
@@ -3354,20 +3306,6 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
             f'font-size:12px; font-weight:700;">PHASE FAILURES: '
             f'{", ".join(phase_failures)}</span>'
         )
-    # Append guard badge
-    guard = setup_data.get("guard", "full")
-    if guard != "full":
-        guard_colors = {
-            "defer_all": "#c62828",
-            "skip": "#c62828",
-            "restrict": "#e65100",
-        }
-        gc = guard_colors.get(guard, "#e65100")
-        tldr += (
-            f'<br><span style="display:inline-block; margin-top:6px; padding:2px 8px; '
-            f'border-radius:6px; background-color:{gc}1f; color:{gc}; '
-            f'font-size:12px; font-weight:700;">BUDGET GUARD: {guard.upper()}</span>'
-        )
 
     # Troubleshoot section
     troubleshoot_html = ""
@@ -3542,7 +3480,6 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
         "executor": executor.get("status") if executor.get("executed") else None,
         "sections_fired": n_sections_fired,
         "judge_rejections": n_judge_rejected,
-        "guard": setup_data.get("guard", "full"),
     }
     with open(RUNS_LOG, "a") as f:
         f.write(json.dumps(runs_entry) + "\n")
@@ -3816,13 +3753,6 @@ def main():
             return True
         return not (run_dir / artifact_name).exists()
 
-    guard = setup.get("guard", "full")
-    guard_skip_agents = guard in ("defer_all", "skip")
-    guard_skip_fix = guard in ("defer_all", "skip", "restrict")
-    print(f"  guard: {guard}"
-          + (f" — audit workers skipped" if guard_skip_agents else "")
-          + (f" — fix agents skipped" if guard_skip_fix else "")
-          + (" — full run" if guard == "full" else ""))
 
     # P1: apply
     try:
@@ -3892,11 +3822,7 @@ def main():
 
     # P6: executor
     try:
-        if guard in ("defer_all", "skip"):
-            print("[P6] skipped (budget guard)")
-            write_json(run_dir / "06-executor.json",
-                       {"executed": False, "reason": f"guarded-{guard}"})
-        elif should_run("06-executor.json"):
+        if should_run("06-executor.json"):
             phase_6_executor(run_dir, setup, dry_run=args.dry_run)
         else:
             print("[P6] skipped (resume)")
@@ -3905,10 +3831,10 @@ def main():
         write_json(run_dir / "06-executor.json",
                    {"executed": False, "phase_failed": True, "error": str(e)})
 
-    # P7: audit (collectors always run; workers skipped when guard_skip_agents)
+    # P7: audit
     try:
         if should_run("07-audit.json"):
-            phase_7_audit(run_dir, setup, dry_run=(args.dry_run or guard_skip_agents))
+            phase_7_audit(run_dir, setup, dry_run=args.dry_run)
         else:
             print("[P7] skipped (resume)")
     except Exception as e:
@@ -3917,12 +3843,7 @@ def main():
                    {"sections": [], "phase_failed": True, "error": str(e)})
     # P7b: auto-fix
     try:
-        if guard in ("defer_all", "skip", "restrict"):
-            print(f"[P7b] skipped (budget guard: {guard})")
-            write_json(run_dir / "07b-fixes.json",
-                       {"sections": [], "status": f"guarded-{guard}"})
-        else:
-            phase_7b_fix(run_dir, dry_run=args.dry_run)
+        phase_7b_fix(run_dir, dry_run=args.dry_run)
     except Exception as e:
         print(f"[P7b] FAILED: {e}")
         write_json(run_dir / "07b-fixes.json",
