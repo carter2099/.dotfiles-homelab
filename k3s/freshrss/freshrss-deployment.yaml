@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: freshrss
-        image: freshrss/freshrss:latest
+        image: freshrss/freshrss:8400
         ports:
         - containerPort: 80
         envFrom:
