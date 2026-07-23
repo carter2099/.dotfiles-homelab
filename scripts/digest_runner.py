@@ -41,6 +41,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
 import requests
 
 # ── Paths ──────────────────────────────────────────────────────────────────
@@ -50,9 +54,9 @@ SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL_REASONING = "qwen-3.6-35b-q5"       # reasoning ON — used for all phases
-MODEL_FAST = "qwen-3.5-4b-q8"              # reasoning ON — fast fallback
-DEFAULT_TIMEOUT = 900                        # generous for slow local model
+MODEL_REASONING = "deepseek-v4-flash"             # used for all LLM phases
+MODEL_FAST = "deepseek-v4-flash"                   # fast fallback (same model, opencode-go is fast)
+DEFAULT_TIMEOUT = 900                        # generous; deepseek is fast but safe margin
 RESEARCH_TIMEOUT = 1800                      # 30 min for research omp -p calls
 FETCH_TIMEOUT = 900                          # 15 min per article fetch
 

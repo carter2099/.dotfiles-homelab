@@ -1,6 +1,11 @@
 providers:
   opencode-go:
     baseUrl: http://localhost:8082/v1
+    models:
+      - id: deepseek-v4-flash
+        name: deepseek-v4-flash
+      - id: deepseek-v4-pro
+        name: deepseek-v4-pro
   local-llm:
     baseUrl: http://localhost:8081/v1
     api: openai-completions
