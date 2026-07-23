@@ -339,16 +339,6 @@ Every headless `omp -p` invocation (steward, digests, hyperliquid SDK, dependabo
 - `advisor.enabled: true` — interactive `/advisor off` does not disable it for scheduled runs
 - `advisor.syncBacklog: off` — advisor never blocks the primary in batch processing
 
-**Model allocation across headless agents:**
-
-| Agent | Model | Reason |
-|---|---|---|
-| Steward phases (P3/P7/P7b/dotfiles) | `opencode-go/deepseek-v4-flash` | Bulk audit/judge work — cheap |
-| Steward P6 executor | `opencode-go/deepseek-v4-pro` | Writes/edits files — needs reasoning |
-| Digests (research, fetch) | per-topic config (flash) | Bulk web research — cheap |
-| Hyperliquid SDK | `opencode-go/glm-5.2` | Heavy reasoning (code generation) |
-| Dependabot webhook | `opencode-go/deepseek-v4-pro` | Automated bundler bumps — needs reliability |
-
 ## Remote Agent Operations
 
 **Remote access is via SSH + omp.** Carter uses Termius (iOS) + SSH to connect to the homelab and runs `omp` interactively. The previous web-based agents (pi-web, Paseo) have been removed.
