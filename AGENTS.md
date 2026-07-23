@@ -285,7 +285,7 @@ bash ~/scripts/run_all_digests.sh                     # run all topics
 
 ## Homelab Steward
 
-Daily maintenance at **5:00 PM ET** (21:00 UTC summer / 22:00 UTC winter) via `homelab-steward.timer`. The steward is a 9-phase deterministic Python orchestrator (`~/scripts/steward_runner.py`) replacing both `update-check` and `agents-md-audit`. All LLM agents run as native `omp -p` subprocesses, currently on `opencode-go/deepseek-v4-pro`. Every agent step is reviewed by an independent judge pass, evidence-grounded. **Full architecture, phase details, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md)** — read that note when working on the steward.
+Daily maintenance at **5:00 PM ET** (21:00 UTC summer / 22:00 UTC winter) via `homelab-steward.timer`. The steward is a 9-phase deterministic Python orchestrator (`~/scripts/steward_runner.py`) replacing both `update-check` and `agents-md-audit`. LLM agents run as native `omp -p` subprocesses. **Model split:** most phases use `STEWARD_MODEL=opencode-go/deepseek-v4-flash`; the P6 plan executor uses `EXECUTOR_MODEL=opencode-go/deepseek-v4-pro`; dotfiles commit/judge use `SMALL_MODEL=opencode-go/deepseek-v4-flash`. Every agent step is reviewed by an independent judge pass, evidence-grounded. **Full architecture, phase details, and debugging live in [`~/notes/homelab/homelab-steward.md`](notes/homelab/homelab-steward.md)** — read that note when working on the steward.
 
 **Phases (P0–P9):** P0 setup (usage report via proxy health, stop dependabot-webhook to prevent racing, prev-summary delta) · P1 update apply (apt, Docker, cloudflared, k3s, open-webui bump) · P2 validate (docker ps, k3s pods, endpoint curls) · P3 troubleshoot (if an endpoint is unhealthy after P1: spawn omp diagnostic agent to fix forward) · P4 heartbeat (failed units, LLM stack, backup recency, disk, TLS, ddns) · P5 work queue (ideas/plans scan, consistency checks, pick next plan) · P6 executor (≤1 approved plan/night via native omp agent, post-impl review, monthly cap) · P7 audit (7 nightly sections, collector→delta-gate→worker+judge omp pairs) · P7b auto-fix (per-section omp fix agent for confirmed findings, judge-reviewed) · P8 render+send (structured data → HTML → `send_digest.py`) · P9 archive (summary.md, `.runs.jsonl`, restart dependabot).
 
@@ -332,6 +332,22 @@ The sole agent CLI on this host is **omp** (`@oh-my-pi/pi-coding-agent`, install
 ### Auth & models
 
 omp shares the same model providers (opencode-go-proxy, llm-proxy). Provider config lives in `~/.omp/agent/models.yml` (providers + local model definitions) and `~/.omp/agent/config.yml` (model roles, extensions). Auth for opencode-go is `--api-key proxy` (the opencode-go-proxy on localhost:8082 owns the real keys; clients send the placeholder `proxy`).
+
+### Headless config overlay (`headless-override.yml`)
+
+Every headless `omp -p` invocation (steward, digests, hyperliquid SDK, dependabot) passes `--config ~/.omp/agent/headless-override.yml`, which deep-merges over the global config. This decouples automated-agent settings from interactive sessions. The overlay currently pins:
+- `advisor.enabled: true` — interactive `/advisor off` does not disable it for scheduled runs
+- `advisor.syncBacklog: off` — advisor never blocks the primary in batch processing
+
+**Model allocation across headless agents:**
+
+| Agent | Model | Reason |
+|---|---|---|
+| Steward phases (P3/P7/P7b/dotfiles) | `opencode-go/deepseek-v4-flash` | Bulk audit/judge work — cheap |
+| Steward P6 executor | `opencode-go/deepseek-v4-pro` | Writes/edits files — needs reasoning |
+| Digests (research, fetch) | per-topic config (flash) | Bulk web research — cheap |
+| Hyperliquid SDK | `opencode-go/glm-5.2` | Heavy reasoning (code generation) |
+| Dependabot webhook | `opencode-go/deepseek-v4-pro` | Automated bundler bumps — needs reliability |
 
 ## Remote Agent Operations
 
