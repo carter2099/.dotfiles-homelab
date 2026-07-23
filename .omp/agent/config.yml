@@ -3,14 +3,14 @@ theme:
   dark: dark-one
 setupVersion: 1
 modelRoles: 
-  default: opencode-go/deepseek-v4-pro:high
+  default: opencode-go/deepseek-v4-flash:high
   plan: opencode-go/glm-5.2:high
   designer: opencode-go/glm-5.2:high
   advisor: opencode-go/deepseek-v4-flash:high
   smol: opencode-go/deepseek-v4-flash:high
   tiny: opencode-go/deepseek-v4-flash:high
   slow: opencode-go/glm-5.2:high
-  task: opencode-go/deepseek-v4-pro:high
+  task: opencode-go/deepseek-v4-flash:high
 advisor: 
   enabled: true
   syncBacklog: 1
