@@ -56,6 +56,21 @@ EXECUTOR_MODE = "execute"
 PENDING_PATH = HOME / "agent-state" / "pending.md"
 DEPENDABOT_UNIT = "dependabot-webhook.service"
 
+
+SECRET_PATTERNS = [
+    re.compile(r".*api-token.*"),
+    re.compile(r".*\.env$"),
+    re.compile(r".*\.env\..*"),
+    re.compile(r".*master\.key$"),
+    re.compile(r".*auth\.json$"),
+    re.compile(r".*\.pem$"),
+    re.compile(r".*id_rsa.*"),
+    re.compile(r".*id_ed25519.*"),
+    re.compile(r".*\.ovpn$"),
+    re.compile(r".*credentials\.json.*"),
+    re.compile(r".*\.htpasswd.*"),
+]
+
 # ── default template ─────────────────────────────────────────────────
 
 DEFAULT_TEMPLATE = """<!DOCTYPE html>
@@ -2019,6 +2034,149 @@ def _audit_collector_3_digest_quality():
     return evidence
 
 
+def _gather_repo_secrets():
+    """Scan repos for uncommitted secret files and recent secret-commits in git history.
+
+    Pure Python, deterministic, no LLM. Returns a dict with:
+      - repos_scanned: int
+      - working_tree_issues: list of dicts
+      - commit_issues: list of dicts
+      - findings_summary: str
+    """
+    issues_wt = []
+    issues_commit = []
+    repos_scanned = 0
+
+    repo_candidates = []
+
+    # ~/dev/*/ directories
+    dev_dir = HOME / "dev"
+    if dev_dir.is_dir():
+        for d in sorted(dev_dir.iterdir()):
+            if d.is_dir():
+                repo_candidates.append(("dev/" + d.name, d, False))
+
+    # Specific repos
+    for name, path, is_bare in [
+        ("homelab-backup", HOME / "homelab-backup", False),
+        ("notes", HOME / "notes", False),
+    ]:
+        if path.is_dir():
+            repo_candidates.append((name, path, is_bare))
+
+    # Dotfiles bare repo
+    dotfiles_git_dir = HOME / ".dotfiles-homelab"
+    if dotfiles_git_dir.is_dir():
+        repo_candidates.append(("dotfiles", dotfiles_git_dir, True))
+
+    for name, path, is_bare in repo_candidates:
+        # Verify git repo
+        if is_bare:
+            git_base = ["--git-dir", str(path)]
+        else:
+            git_base = ["-C", str(path)]
+
+        check = run_capture_ok(["git"] + git_base + ["rev-parse", "--git-dir"])
+        if check[2] != 0:
+            continue
+
+        remotes = run_capture(["git"] + git_base + ["remote", "-v"])
+        if not remotes:
+            continue
+
+        repos_scanned += 1
+
+        # Working tree scan (skip bare repos — P9b handles dotfiles)
+        if not is_bare:
+            status_out = run_capture(["git"] + git_base + ["status", "--short"])
+            if status_out:
+                for line in status_out.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    xy = line[:2]
+                    filepath = line[3:].strip()
+                    for pat in SECRET_PATTERNS:
+                        if pat.match(filepath) or pat.match(Path(filepath).name):
+                            issue_type = "untracked" if xy == "??" else "modified"
+                            issues_wt.append({
+                                "repo": name,
+                                "path": filepath,
+                                "issue": f"{issue_type} secret file",
+                                "status": xy,
+                            })
+                            break
+
+        # Recent commit scan
+        log_cmd = ["git"] + git_base + ["log", "--all", "--since=24 hours ago", "-p", "--", "."]
+        log_out, log_err, log_rc = run_capture_ok(log_cmd)
+        if log_out:
+            current_commit = ""
+            current_date = ""
+            current_file = ""
+            findings = 0
+
+            for line in log_out.splitlines():
+                if line.startswith("commit "):
+                    current_commit = line.split()[1][:8]
+                    current_date = ""
+                    current_file = ""
+                    continue
+                if line.startswith("Date:"):
+                    current_date = line[5:].strip()
+                    continue
+                if line.startswith("diff --git a/"):
+                    parts = line.split(" b/")
+                    current_file = parts[-1] if len(parts) > 1 else ""
+                    continue
+                if line.startswith("---") or line.startswith("+++") or line.startswith("@@"):
+                    continue
+                if line.startswith("index ") or line.startswith("new file ") or line.startswith("deleted file "):
+                    continue
+
+                if not line.startswith("+"):
+                    continue
+                if line.startswith("+++"):
+                    continue
+
+                content = line[1:]
+
+                found_issue = None
+                if re.search(r"AKIA[0-9A-Z]{16}", content):
+                    found_issue = "possible AWS access key in diff"
+                elif re.search(r"ghp_[0-9a-zA-Z]{36}|gho_[0-9a-zA-Z]{36}|ghu_[0-9a-zA-Z]{36}|ghs_[0-9a-zA-Z]{36}|ghr_[0-9a-zA-Z]{36}|github_pat_[0-9a-zA-Z_]{82,}", content):
+                    found_issue = "possible GitHub token in diff"
+                elif re.search(r"-----BEGIN\s?(?:RSA|DSA|EC|OPENSSH|PGP)\s?PRIVATE KEY-----", content):
+                    found_issue = "possible private key in diff"
+                elif re.search(r"hooks\.slack\.com/services/T[a-zA-Z0-9_]{8,}/B[a-zA-Z0-9_]{8,}/[a-zA-Z0-9_]{24,}", content):
+                    found_issue = "possible Slack webhook in diff"
+                elif re.search(r"-----BEGIN CERTIFICATE-----", content):
+                    found_issue = "possible certificate in diff"
+
+                if found_issue and findings < 20:
+                    issues_commit.append({
+                        "repo": name,
+                        "commit": current_commit,
+                        "date": current_date,
+                        "path": current_file,
+                        "issue": found_issue,
+                    })
+                    findings += 1
+
+    total_issues = len(issues_wt) + len(issues_commit)
+    if total_issues == 0:
+        findings_summary = "clean \u2014 no secrets detected"
+    else:
+        repo_count = len({i["repo"] for i in issues_wt + issues_commit})
+        findings_summary = f"{total_issues} issues across {repo_count} repos scanned"
+
+    return {
+        "repos_scanned": repos_scanned,
+        "working_tree_issues": issues_wt,
+        "commit_issues": issues_commit,
+        "findings_summary": findings_summary,
+    }
+
 def _audit_collector_4_security():
     """Collector: security posture evidence."""
     # Read CF token for RDAP/API calls (collector only, never the agent)
@@ -2066,6 +2224,7 @@ def _audit_collector_4_security():
         "ssh_failures": run_capture(
             ["bash", "-c",
              "journalctl -u ssh --since '24 hours ago' 2>/dev/null | grep -c 'Failed password' || echo 0"]),
+        "repo_secrets": _gather_repo_secrets(),
     }
 
 
@@ -2265,7 +2424,7 @@ AUDIT_SECTIONS = [
             "(loopback-only: open-webui 48100, searxng 8080, llm-proxy 8081; ufw-gated: 8082; "
             "LAN: blog 33099, delta 43080), ufw ruleset intact (cni0/flannel.1/docker bridges), unattended-upgrades "
             "active, carter2099.com RDAP expiry (>30d out = ok), CF tunnel ingress vs expected hostnames "
-            "(chat, hooks, deltaneutral, freshrss, blog, ssh), SSH failed-password volume. Flag anything unexpected."
+            "(chat, hooks, deltaneutral, freshrss, blog, ssh), SSH failed-password volume. Flag anything unexpected. For repo_secrets: working_tree_issues means secret-pattern files are uncommitted in a repo \u2014 flag each as ATTENTION; commit_issues means a secret-pattern string appeared in recent diffs \u2014 flag as ATTENTION with the commit SHA. No findings = PASS for this sub-check."
         ),
     },
     {
@@ -3576,12 +3735,6 @@ def phase_9b_dotfiles(run_dir, dry_run=False):
         str(HOME / "k3s"),
         str(HOME / ".config" / "systemd" / "user"),
     ]
-    SECRET_PATTERNS = [
-        re.compile(r".*api-token.*"),
-        re.compile(r".*\.env$"),
-        re.compile(r".*master\.key$"),
-        re.compile(r".*auth\.json$"),
-    ]
     ACTIVE_WINDOW_MINUTES = 15
 
     gate = {
@@ -3756,7 +3909,7 @@ Actual dotfiles log (last 5): {dotfiles_log}
 
 Verify:
 (a) push succeeded (check dotfiles log shows the commits)
-(b) no secret-bearing file was committed (check file list against: api-token, *.env, master.key, auth.json)
+    (b) no secret-bearing file was committed (check file list against: api-token, .env, .env.*, master.key, auth.json, .pem, id_rsa, id_ed25519, .ovpn, credentials.json, .htpasswd)
 (c) every dirty in-scope path is either committed or in the skipped list with a real reason
 
 Return fenced JSON:
