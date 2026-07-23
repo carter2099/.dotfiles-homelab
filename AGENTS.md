@@ -45,6 +45,7 @@ This is the home directory, managed as a bare git repo for dotfiles:
 - `delta_neutral/` - Rails 8 Hyperliquid rebalancer (deltaneutral.carter2099.com). Deploy wrapper at `~/delta_neutral/`; app nested at `~/delta_neutral/delta_neutral/`.
 - `homelab-backup/` - Go backup service source (daily R2 backups of blog content, DBs, FreshRSS). Deployed in place at `~/homelab-backup/`; dev clone at `~/dev/homelab-backup/`.
 - `dev/dependabot-webhook/` - Go webhook receiver for automated dependabot PR handling
+- `dev/prompt-guard/` - Python Prompt-Guard-86M classifier for webhook prompt injection protection
 - `k3s/` - Kubernetes manifests organized by service
 - `ddns/` - Cloudflare DDNS updater for WireGuard endpoint
 - `build/` - Source builds (neovim)
@@ -195,9 +196,20 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Verifies HMAC-SHA256 signature, then spawns a sandboxed **omp agent (DeepSeek v4 Pro)** to handle bundler bumps
 - Agent runs with a narrow permission sandbox (`omp-sandbox.ts` + `--tools` flag) — default-deny bash floor + git/bundle/gh/rake allowlist; sudo/docker/systemctl/curl/wget/rm/release.sh/up.sh denied. Verified via 4-test battery (allow, block, tool restriction, dry run).
 - 5-minute coalesce window so a burst of PRs is handled in one agent run
+- **Prompt injection protection:** PR title+body classified by Prompt-Guard-86M before queuing, and the agent prompt is classified before agent spawn. Both gates use jailbreak-only scoring (Meta's recommended API), fail-open on classifier downtime.
 - Source: `~/dev/dependabot-webhook/`; config (with webhook secret): `~/.config/dependabot-webhook/env`
 - Logs: `journalctl --user -u dependabot-webhook -f`
 - Release: `cd ~/dev/dependabot-webhook && bash release.sh`
+
+### Prompt-Guard Classifier (Python)
+- Always-on systemd user service (`prompt-guard.service`) running Meta's Prompt-Guard-86M on `127.0.0.1:8090`
+- Uses Meta's documented `get_jailbreak_score()` API — only JAILBREAK label is considered flagged (0.4% FPR). The INJECTION label is intentionally hypersensitive for third-party data filtering and is NOT used for the webhook gate.
+- Model: `meta-llama/Prompt-Guard-86M` (86M params, DeBERTa-v2, gated — requires `HF_TOKEN` in `~/dev/prompt-guard/.env`)
+- Source: `~/dev/prompt-guard/` (Python FastAPI, system venv at `~/dev/prompt-guard/venv/`)
+- Config: `~/dev/prompt-guard/.env` (gitignored — contains `HF_TOKEN`, `CLASSIFIER_PORT`, `JAILBREAK_THRESHOLD` defaults to 0.5)
+- Logs: `journalctl --user -u prompt-guard -f`
+- Deploy: `cd ~/dev/prompt-guard && systemctl --user restart prompt-guard` (no release script yet)
+- Dependabot webhook references it via `CLASSIFIER_URL=http://localhost:8090`
 
 ### Hyperliquid SDK Maintenance (systemd timer)
 - Runs Mon/Thu at 4:00 AM ET via systemd user timer (`hyperliquid-sdk.service`/`.timer`, `OnCalendar` uses `America/New_York` so it shifts with DST: 08:00 UTC summer / 09:00 UTC winter — one of two timers that are ET-locked rather than UTC-locked; the other is `homelab-steward` at 5:00 PM ET)

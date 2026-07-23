@@ -1,0 +1,15 @@
+[Unit]
+Description=Prompt-Guard-86M classification service
+Documentation=https://huggingface.co/meta-llama/Prompt-Guard-86M
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/dev/prompt-guard/up.sh
+WorkingDirectory=%h/dev/prompt-guard
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=%h/dev/prompt-guard/.env
+
+[Install]
+WantedBy=default.target
