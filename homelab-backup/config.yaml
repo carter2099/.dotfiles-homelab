@@ -37,6 +37,15 @@ targets:
     type: directory
     source: /home/carter/agent-state
 
+  # OMP agent runtime state (config, session DBs, custom skills)
+  # SQLite session DBs may be in WAL mode at backup time — best-effort copy,
+  # acceptable for non-transactional agent session data.
+  - name: omp-agent-state
+    type: directory
+    source: /home/carter/.omp/agent
+    excludes:
+      - ".omp-web-test-auth-*.db*"
+
   - name: freshrss-db
     type: sqlite-host
     source: /var/lib/rancher/k3s/storage/pvc-a666fb67-3dc4-4aae-9d6f-37631a777005_freshrss_freshrss-data/users/carter2099/db.sqlite
@@ -71,6 +80,16 @@ targets:
   - name: k3s-manifests
     type: directory
     source: /home/carter/k3s
+
+  - name: omp-web-app
+    type: directory
+    source: /home/carter/dev/pi-web
+    excludes:
+      - .git
+      - node_modules
+      - .next
+      - bun.lock
+      - "*.tsbuildinfo"
 
   # ---- Secrets (unencrypted in R2; Carter accepts bucket-access = bigger problem) ----
   # These are gitignored everywhere else; R2 is the DR copy.
@@ -107,10 +126,6 @@ targets:
   - name: secrets-opencode-go-proxy
     type: directory
     source: /home/carter/.config/opencode-go-proxy
-
-  - name: secrets-pi-web
-    type: directory
-    source: /home/carter/.config/pi-web
 
   - name: secrets-searxng
     type: directory
