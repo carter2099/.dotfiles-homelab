@@ -2176,6 +2176,41 @@ def _audit_collector_7_agent_fleet():
         "steward_yesterday_executor": yesterday_exec,
     }
 
+def _audit_collector_8_docs_accuracy():
+    """Collector: docs/ file content + related system state for fact-checking."""
+    docs_dir = HOME / "notes" / "docs"
+    evidence = {"doc_files": {}, "system_state": {}}
+
+    # Doc file hashes (for delta gate — skip if no prior run to compare)
+    if docs_dir.exists():
+        for md_file in sorted(docs_dir.rglob("*.md")):
+            rel = md_file.relative_to(docs_dir)
+            evidence["doc_files"][str(rel)] = {
+                "sha256": hashlib.sha256(md_file.read_bytes()).hexdigest(),
+                "size": md_file.stat().st_size,
+            }
+    else:
+        evidence["doc_files"]["_missing"] = True
+
+    # System state that docs reference
+    evidence["system_state"] = {
+        "docker_ps": run_capture(
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}"]),
+        "listening_ports": run_capture(
+            ["sudo", "ss", "-tlnp", "--no-header"]),
+        "user_services": run_capture(
+            ["systemctl", "--user", "list-units", "--type=service", "--all", "--no-legend"],
+            env=user_env()),
+        "user_timers": run_capture(
+            ["systemctl", "--user", "list-timers", "--all"], env=user_env()),
+        "docker_images": run_capture(
+            ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}"]),
+        "k3s_nodes": run_capture(
+            [K3S, "kubectl", "get", "nodes"], env=user_env()),
+        "ip_addr": run_capture(["ip", "-4", "addr", "show", "enp3s0f0"]),
+    }
+    return evidence
+
 
 AUDIT_SECTIONS = [
     {
@@ -2269,6 +2304,24 @@ AUDIT_SECTIONS = [
             "executor outcome (if any — did yesterday's executor work hold up?). Also read recent session files in "
             "~/.omp/agent/sessions-automated if you need outcomes the journal lacks. Flag failed or silently-"
             "skipped runs."
+        ),
+    },
+    {
+        "name": "docs-accuracy",
+        "collector": _audit_collector_8_docs_accuracy,
+        "artifact": "07-audit-8-docs.json",
+        "timeout": 600,
+        "guidance": (
+            "Truth-check the doc files in ~/notes/docs/ against the live host. "
+            "Read each .md file that has changed (check evidence doc_files sha256 vs prior run) "
+            "and verify factual claims: port numbers, paths, service names, process names, "
+            "URLs, config file locations, IP addresses, command syntax. "
+            "For every DRIFT propose exact OLD_TEXT -> NEW_TEXT edits. "
+            "Prefer UNVERIFIABLE over guessing. "
+            "Files to check: docs/homelab/hardware.md, deployment.md, k3s.md, blog.md, "
+            "delta-neutral.md, dependabot-webhook.md, open-webui.md, omp-web.md, searxng.md, "
+            "cloudflare.md, opencode-go-proxy.md, local-llm-gaming-rig.md, email-digests.md, "
+            "homelab-steward.md, homelab-backup.md."
         ),
     },
 ]
