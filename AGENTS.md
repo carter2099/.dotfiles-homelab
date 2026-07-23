@@ -214,6 +214,19 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Manage: `cd ~/open-webui && bash up.sh` (pull + restart); `docker compose -f ~/open-webui/docker-compose.yml logs -f`.
 - **Web search:** Configured in-app via Admin Settings → Web Search: engine `searxng`, query URL `http://searxng:8080/search` (lives in the webui.db config table, not env). Reaches the SearXNG container over a **shared external Docker network `homelab-chat-search`** declared in both `~/open-webui/docker-compose.yml` and `~/searxng/docker-compose.yml` so the `searxng` hostname resolves. No external API key needed.
 
+
+### OMP Web (Pi Web fork)
+- **What:** Web UI for browsing omp sessions, chatting with the agent in-browser, and managing models/skills.
+- **Fork:** `carter2099/omp-web` (English) — upstream is `best-linux-code/pi-web` (Chinese, an omp-native fork by agegr of the original pi-web).
+- **Deploy dir:** `~/dev/pi-web/` (clone of `carter2099/omp-web` on GitHub).
+- **Service:** `pi-web.service` systemd user service on `127.0.0.1:30141` (loopback-only).
+- **Tunnel ingress:** `omp.carter2099.com → http://localhost:30141`, Cloudflare Access SSO fronted (same pattern as `chat.carter2099.com`).
+- **Build:** `cd ~/dev/pi-web && bun run build` (production build via `bun --bun ./node_modules/next/dist/bin/next build --webpack` — Next.js 16 defaults to Turbopack, so `--webpack` is required).
+- **Dev:** `cd ~/dev/pi-web && bun run dev` (serves on port 30141).
+- **Logs/restart:** `journalctl --user -u pi-web -f` · `systemctl --user restart pi-web`
+- **Reads:** `~/.omp/agent/sessions/` and `~/.omp/agent/models.yml` natively via the `@oh-my-pi/*` SDK.
+- **Upstream sync:** `git remote add upstream git@github.com:best-linux-code/pi-web.git` then `git pull upstream main`.
+
 ### SearXNG (Self-hosted search backend)
 - **Port:** 8080 (internal) / loopback-only (`127.0.0.1:8080`), **not exposed** to LAN or tunnel.
 - **Purpose:** Metasearch backend for `rpiv-web-tools` `web_search` (omp agent + daily email digests). Replaces Brave Search API to eliminate per-query billing. Aggregates Google/Bing/DDG/etc.; JSON API at `GET /search?q=…&format=json`.
@@ -226,7 +239,7 @@ Each service in `k3s/` has its own directory with granular YAML manifests (deplo
 - Account-owned API token at `~/.config/cloudflare/api-token` (gitignored, 600 perms)
 - Scopes: Cloudflare Tunnel:Edit (account), DNS:Edit (carter2099.com zone). **No Zero Trust / Access scope** — so Access apps/policies (the SSO gate in front of tunneled hostnames) must be configured **manually in the Zero Trust dashboard**; the API token returns 403 on `/access/apps` (verified). To automate Access too, add "Access: Apps and Policies: Edit" (Account) to the token.
 - Supporting IDs in `~/.config/cloudflare/`: `account-id`, `zone-id`, `homelab-tunnel-id`
-- **Tunnel ingress inventory** (live, updated 2026-07-22): `hooks`, `chat`, `deltaneutral`, `freshrss`, `blog`, `omp`, `ssh` + catch-all 404 (claimed; the catch-all cannot be verified from the host without CF Zero Trust dashboard access). Stale entries (grafana, prometheus, uptime, apex, railsapi, pi, paseo) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally. `omp.carter2099.com → http://localhost:30141` (pi-web web UI for omp agents, loopback-only, Access SSO fronted).
+- **Tunnel ingress inventory** (live, updated 2026-07-22): `hooks`, `chat`, `deltaneutral`, `freshrss`, `blog`, `omp`, `ssh` + catch-all 404 (claimed; the catch-all cannot be verified from the host without CF Zero Trust dashboard access). Stale entries (grafana, prometheus, uptime, apex, railsapi, pi, paseo) were removed from both the tunnel config and zone DNS. `ssh.carter2099.com → ssh://localhost:22` provides SSH-over-tunnel (via `cloudflared access ssh` / CF Access) — kept and documented intentionally. `omp.carter2099.com → http://localhost:30141` (omp-web, loopback-only, Access SSO fronted).
 - Env vars (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_HOMELAB_TUNNEL_ID`) exported from `.zshrc`
 
 ## Email Digests
