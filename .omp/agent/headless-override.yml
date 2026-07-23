@@ -1,0 +1,8 @@
+# Headless-agent config overlay.
+# Loaded via --config on every scheduled omp -p invocation.
+# Decouples automated-agent config from interactive sessions:
+# interactive toggles advisor via /advisor on/off in config.yml;
+# this overlay ensures headless runs always have advisor enabled.
+advisor:
+  enabled: true
+  syncBacklog: off
