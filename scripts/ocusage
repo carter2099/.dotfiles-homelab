@@ -1,0 +1,45 @@
+#!/bin/bash
+# ocusage — aggregate OpenCode Go usage from the proxy health endpoint
+set -euo pipefail
+
+json=$(curl -sf http://localhost:8082/health) || {
+    echo "Error: could not reach opencode-go-proxy on localhost:8082" >&2
+    exit 1
+}
+
+# Print per-account table
+echo "+-------------------+----------+------+------+------+---------------+"
+echo "| Account           | Tier     |  5h  |  7d  |  30d | PAYG balance  |"
+echo "+-------------------+----------+------+------+------+---------------+"
+
+echo "$json" | jq -r '
+    .accounts[] |
+    [
+        .name,
+        .tier,
+        (.rolling.pct | tostring) + "%",
+        (.weekly.pct | tostring) + "%",
+        (.monthly.pct | tostring) + "%",
+        if .payg.present and .payg.monthly_limit_usd > 0 then
+            "$" + (.payg.balance_usd | tostring | (split(".") | .[0] + "." + (.[1] + "00")[0:2]))
+        else
+            "—"
+        end
+    ] | @tsv' | while IFS=$'\t' read -r name tier rh wh mh payg; do
+    printf "| %-17s | %-8s | %-4s | %-4s | %-4s | %-13s |\n" "$name" "$tier" "$rh" "$wh" "$mh" "$payg"
+done
+
+echo "+-------------------+----------+------+------+------+---------------+"
+
+# Aggregate summary
+echo "$json" | jq -r '
+    "Aggregate: \(.aggregate.active_accounts)/\(.aggregate.total_accounts) active accounts",
+    "Peak usage:  5h \(.aggregate.max_rolling_pct)% | 7d \(.aggregate.max_weekly_pct)% | 30d \(.aggregate.max_monthly_pct)%",
+    if .aggregate.total_payg_balance_usd > 0 then
+        "PAYG:       $" + (.aggregate.total_payg_balance_usd | tostring | (split(".") | .[0] + "." + (.[1] + "00")[0:2])) + " balance, $" + (.aggregate.total_payg_usage_usd | tostring | (split(".") | .[0] + "." + (.[1] + "00")[0:2])) + "/mo used"
+    else
+        "PAYG:       —"
+    end,
+    "Status:     \(.status)",
+    "Upstream:   \(.upstream)"
+' | while IFS= read -r line; do echo "  $line"; done
