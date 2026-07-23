@@ -46,6 +46,7 @@ ENDPOINTS = {
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
 STEWARD_MODEL = "opencode-go/deepseek-v4-flash"
+STEWARD_PATH = "/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SMALL_MODEL = "opencode-go/deepseek-v4-flash"
 EXECUTOR_MODEL = "opencode-go/deepseek-v4-pro"
 PROXY_HEALTH = "http://localhost:8082/health"
@@ -194,8 +195,7 @@ def run_capture_ok(cmd, **kwargs):
 
 
 def user_env():
-    """Return env dict with XDG_RUNTIME_DIR set for systemctl --user."""
-    return {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}
+    return {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}", "PATH": f"{STEWARD_PATH}:{os.environ.get('PATH', '')}"}
 
 
 def write_json(path, data):
@@ -273,7 +273,7 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
         capture_output=True,
         text=True,
         timeout=timeout,
-        env={**os.environ, "HOME": str(HOME)},
+        env={**os.environ, "HOME": str(HOME), "PATH": f"{STEWARD_PATH}:{os.environ.get('PATH', '')}"},
     )
     if result.returncode != 0 and not result.stdout.strip():
         raise RuntimeError(
@@ -2034,6 +2034,11 @@ def _audit_collector_3_digest_quality():
     return evidence
 
 
+# Known scanner files to skip in commit diff scan (avoid self-flagging).
+_SKIP_SCANNER_FILES = {
+    "scripts/steward_runner.py",
+}
+
 def _gather_repo_secrets():
     """Scan repos for uncommitted secret files and recent secret-commits in git history.
 
@@ -2114,6 +2119,7 @@ def _gather_repo_secrets():
             current_commit = ""
             current_date = ""
             current_file = ""
+            skip_file = False  # skip content lines when inside a known scanner file
             findings = 0
 
             for line in log_out.splitlines():
@@ -2121,6 +2127,7 @@ def _gather_repo_secrets():
                     current_commit = line.split()[1][:8]
                     current_date = ""
                     current_file = ""
+                    skip_file = False
                     continue
                 if line.startswith("Date:"):
                     current_date = line[5:].strip()
@@ -2128,6 +2135,10 @@ def _gather_repo_secrets():
                 if line.startswith("diff --git a/"):
                     parts = line.split(" b/")
                     current_file = parts[-1] if len(parts) > 1 else ""
+                    stripped_file = current_file.lstrip("/")
+                    skip_file = stripped_file in _SKIP_SCANNER_FILES
+                    continue
+                if skip_file:
                     continue
                 if line.startswith("---") or line.startswith("+++") or line.startswith("@@"):
                     continue
