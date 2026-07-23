@@ -1,0 +1,14 @@
+[Unit]
+Description=Pi Web UI for omp coding agent
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/pi-web
+ExecStart=%h/.bun/bin/bun %h/dev/pi-web/bin/pi-web.js --hostname 127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
