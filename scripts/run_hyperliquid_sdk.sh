@@ -10,4 +10,4 @@ export PATH="$HOME/.local/bin:$HOME/.rbenv/bin:$HOME/.rbenv/shims:$HOME/.fnm:$PA
 
 PROMPT='Read /home/carter/.omp/agent/skills/hyperliquid-run/SKILL.md using the read tool and follow its instructions exactly. This is an automated scheduled SDK maintenance run.'
 
-omp -p --model opencode-go/glm-5.2 --api-key proxy --allow-home --session-dir ~/.omp/agent/sessions-automated "$PROMPT"
+omp -p --model opencode-go/glm-5.2 --api-key proxy --allow-home --config ~/.omp/agent/headless-override.yml --session-dir ~/.omp/agent/sessions-automated "$PROMPT"

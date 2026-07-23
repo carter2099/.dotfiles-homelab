@@ -841,6 +841,7 @@ def _call_omp_p(
     try:
         cmd = ["omp", "-p", "--model", omp_model,
                "--session-dir", str(Path.home() / ".omp/agent/sessions-automated"),
+               "--config", str(Path.home() / ".omp/agent/headless-override.yml"),
                "--append-system-prompt", full_system,
                f"@{prompt_file}"]
         result = subprocess.run(

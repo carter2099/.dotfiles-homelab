@@ -45,8 +45,9 @@ ENDPOINTS = {
     "llm-proxy": "http://127.0.0.1:8081/health",
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
-STEWARD_MODEL = "opencode-go/deepseek-v4-pro"
+STEWARD_MODEL = "opencode-go/deepseek-v4-flash"
 SMALL_MODEL = "opencode-go/deepseek-v4-flash"
+EXECUTOR_MODEL = "opencode-go/deepseek-v4-pro"
 PROXY_HEALTH = "http://localhost:8082/health"
 EXECUTOR_MONTHLY_CAP = 4
 MAX_WORKERS = 3
@@ -249,6 +250,7 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
         "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
         "--allow-home",
+        "--config", str(HOME / ".omp/agent/headless-override.yml"),
     ]
     cmd.append(prompt)
     result = subprocess.run(
@@ -327,10 +329,11 @@ def extract_from_ndjson(stdout):
 def _call_omp_p_json(prompt, timeout=EXECUTOR_TIMEOUT, extra_args=None):
     """Call omp -p in --mode json. Returns (accumulated_text, stats, packet, raw_stdout)."""
     cmd = [
-        str(HOME / ".bun/bin/omp"), "-p", "--model", STEWARD_MODEL, "--mode", "json",
+        str(HOME / ".bun/bin/omp"), "-p", "--model", EXECUTOR_MODEL, "--mode", "json",
         "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
         "--allow-home",
+        "--config", str(HOME / ".omp/agent/headless-override.yml"),
     ]
     if extra_args:
         cmd.extend(extra_args)
