@@ -259,7 +259,7 @@ def _date_context():
 
 
 def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
-    """Call omp -p (headless text mode). Returns stdout."""
+    """Call omp -p (headless text mode). Returns stdout. Retries on transient API errors."""
     cmd = [
         str(HOME / ".bun/bin/omp"), "-p", "--model", model,
         "--api-key", "proxy",
@@ -268,28 +268,62 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
         "--config", str(HOME / ".omp/agent/headless-override.yml"),
     ]
     cmd.append(prompt)
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env={**os.environ, "HOME": str(HOME), "PATH": f"{STEWARD_PATH}:{os.environ.get('PATH', '')}"},
-    )
-    if result.returncode != 0 and not result.stdout.strip():
+    # Retry transient errors: 401 (stale key / account rotation), 429 (rate limit),
+    # 5xx (server error), and subprocess timeout.
+    max_retries = 3
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**os.environ, "HOME": str(HOME), "PATH": f"{STEWARD_PATH}:{os.environ.get('PATH', '')}"},
+            )
+        except subprocess.TimeoutExpired as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt
+                print(f"  omp -p timeout (attempt {attempt + 1}/{max_retries}), retrying in {delay}s")
+                time.sleep(delay)
+                continue
+            raise RuntimeError(f"omp -p timed out after {max_retries} attempts (timeout={timeout}s)")
+
+        if result.returncode == 0 or result.stdout.strip():
+            return result.stdout
+
+        # Check if this is a recoverable error (401, 429, 5xx)
+        err_text = result.stderr[:500]
+        is_recoverable = any(code in err_text for code in ["401", "429", "500", "502", "503", "504"])
+        if is_recoverable and attempt < max_retries - 1:
+            delay = 2 ** attempt
+            print(f"  omp -p rc={result.returncode} (attempt {attempt + 1}/{max_retries}), retrying in {delay}s")
+            time.sleep(delay)
+            last_error = f"rc={result.returncode}: {err_text}"
+            continue
+
         raise RuntimeError(
-            f"omp -p failed (rc={result.returncode}): {result.stderr[:500]}"
+            f"omp -p failed (rc={result.returncode}): {err_text}"
         )
-    return result.stdout
+
+    raise RuntimeError(
+        f"omp -p failed after {max_retries} attempts: {last_error}"
+    )
 
 
 def _extract_json(text, label="output"):
-    """Extract JSON from LLM output. Tries markdown fences first, then raw JSON."""
-    m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-    if m:
+    """Extract JSON from LLM output. Tries last fenced block first, then raw JSON."""
+    # Find ALL fenced blocks — the agent's final JSON is typically the last one.
+    # omp -p echoes tool outputs (file reads, command results) to stdout before
+    # the assistant response, which may contain extraneous ``` blocks.
+    fences = re.findall(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+    for block in reversed(fences):
         try:
-            return json.loads(m.group(1).strip())
+            return json.loads(block.strip())
         except json.JSONDecodeError:
-            pass
+            continue
+    # Fall back to raw JSON patterns
     for pattern in [r"\{[\s\S]*\}", r"\[[\s\S]*\]"]:
         m = re.search(pattern, text, re.DOTALL)
         if m:

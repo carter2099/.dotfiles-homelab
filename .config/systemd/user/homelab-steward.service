@@ -6,5 +6,6 @@ OnFailure=homelab-steward-notify.service
 
 [Service]
 Type=oneshot
+Environment="PATH=/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/usr/bin/python3 /home/carter/scripts/steward_runner.py
 TimeoutStartSec=7200
