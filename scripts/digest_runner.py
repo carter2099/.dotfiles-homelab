@@ -2002,6 +2002,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     ~/digests/test/<topic>/<label>/ and email is never sent. The
     stories-in-flight from prod are copied in so ongoing tracking works.
     """
+    global MODEL_OVERRIDE
     if category not in TOPICS:
         print(f"Unknown topic: {category}")
         print(f"Available: {', '.join(TOPICS)}")
@@ -2077,7 +2078,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             sys.exit(2)
         if not findings:
             # Retry with fallback model when primary model produces empty results
-            global MODEL_OVERRIDE
+            # fallback is set below — global MODEL_OVERRIDE declared at function top
             fallback = MODEL_REASONING_FALLBACK
             if MODEL_OVERRIDE:
                 fallback = MODEL_REASONING
