@@ -22,11 +22,11 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static secondary IPs `192.168.4.92` (k3s node IP; blog + delta_neutral ingress) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
+Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static IP `192.168.4.92` (k3s node IP; blog + delta_neutral ingress) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
 
 ## Hardware
 
-**ThinkPad L14 Gen 3 (AMD)** — Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe. Wired NIC `enp3s0f0` (primary), secondary IP `192.168.4.92` for k3s ingress. Full specs at [`~/notes/docs/homelab/hardware.md`](notes/docs/homelab/hardware.md).
+**ThinkPad L14 Gen 3 (AMD)** — Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe. Wired NIC `enp3s0f0` (primary), static IP `192.168.4.92` for k3s ingress. Full specs at [`~/notes/docs/homelab/hardware.md`](notes/docs/homelab/hardware.md).
 ## Repository Structure
 
 Home directory managed as a bare git repo for dotfiles. Key dirs:
@@ -35,7 +35,7 @@ Home directory managed as a bare git repo for dotfiles. Key dirs:
 - `k3s/` — Kubernetes manifests
 - `dev/` — Scratch space for cloned repos, tests, development
 - `scripts/` — Digest + steward orchestrators
-- `notes/` — Agent-maintained knowledge vault (`docs/` for maintained ref, `logs/` for session history, `journal/` for research/records)
+- `notes/` — Agent-maintained knowledge vault (`docs/` for maintained ref, `logs/sessions/` for session history, `journal/` for research/records)
 - `digests/` / `backups/` — Automated output archives
 - `ideas/` — Unstructured ideas (not maintained)
 - `.dotfiles-homelab/` — Bare git repo tracking dotfiles
@@ -192,7 +192,7 @@ This is opt-in — only do it when past context would materially help the curren
 
 **After significant sessions**, write a brief session memoir. "Significant" means: architectural decisions, system state changes, or context a future agent would need. Routine checks and quick Q&A don't need one.
 
-Write to `~/notes/sessions/YYYY-MM-DD.md` using this exact format:
+Write to `~/notes/logs/sessions/YYYY-MM-DD.md` using this exact format:
 ```markdown
 # Session: YYYY-MM-DD
 **Topics:** comma-separated list
@@ -210,7 +210,7 @@ Session memoirs are NOT formal notes — don't use `/note-save` or full frontmat
 
 - `~/notes/INDEX.md` — index of all formal reference notes (maintained by `/note-save`)
 - `~/notes/docs/` — maintained reference docs (subsystem architecture and runbooks)
-- `~/notes/logs/` — session memoirs (YYYY-MM-DD.md)
+- `~/notes/logs/sessions/` — session memoirs (YYYY-MM-DD.md)
 - `~/notes/journal/` — research notes and project records (not maintained)
 - The vault is a standalone git repo (not the dotfiles bare repo) — `/note-save` handles commits
 ## Gaming Rig (Windows 11)

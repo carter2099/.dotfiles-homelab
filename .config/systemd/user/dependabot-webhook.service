@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 ExecStart=/home/carter/.local/bin/dependabot-webhook
 EnvironmentFile=/home/carter/.config/dependabot-webhook/env
+Environment=PATH=%h/.bun/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=5s
 
