@@ -55,6 +55,7 @@ SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
 MODEL_REASONING = "qwen-3.6-35b-q5"               # used for all LLM phases (local Qwen via llm-proxy)
+MODEL_REASONING_FALLBACK = "deepseek-v4-flash"     # fallback via opencode-go proxy when local LLM fails
 MODEL_FAST = "qwen-3.5-4b-q8"                     # smaller local model for light tasks
 DEFAULT_TIMEOUT = 900
 RESEARCH_TIMEOUT = 1800
@@ -282,7 +283,7 @@ SIF_CAP = 3         # Pool C: max stories-in-flight passed directly to Phase 6
 
 # ── Stories-in-flight constants ────────────────────────────────────────────
 COOL_AFTER_DAYS = 5     # auto-set status to "cooled" if no updates in 5 days
-PRUNE_AFTER_DAYS = 7    # remove cooled stories entirely after 7 days total
+PRUNE_AFTER_DAYS = 7    # remove stories entirely after 7 days since first_seen
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1909,8 +1910,8 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
     Two rules (Python-side, not LLM-dependent):
     1. AUTO-COOL: Any story with status "active" and last_updated older than
        COOL_AFTER_DAYS → set status to "cooled". Removes from Ongoing pool.
-    2. AUTO-PRUNE: Any story with status "cooled" and last_updated older than
-       PRUNE_AFTER_DAYS → remove from the tracker entirely.
+    2. AUTO-PRUNE: Any story whose first_seen is older than PRUNE_AFTER_DAYS
+       → remove from the tracker entirely (regardless of status).
 
     The Phase 6 curation LLM can still revive stories by updating last_updated
     and setting status back to "active" when new developments appear.
@@ -1939,27 +1940,30 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
             s["first_seen"] = s.get("last_updated", today.isoformat())
 
         last_str = s.get("last_updated", "")
+        first_str = s.get("first_seen", last_str)
         try:
             last_date = datetime.strptime(last_str, "%Y-%m-%d").date()
+            first_date = datetime.strptime(first_str, "%Y-%m-%d").date()
         except (ValueError, TypeError):
             s["status"] = "cooled"
             auto_cooled += 1
             kept.append(s)
             continue
 
-        age_days = (today - last_date).days
+        total_age = (today - first_date).days
+        inactive_age = (today - last_date).days
         status = s.get("status", "active")
 
-        # Rule 1: Auto-cool stale active stories
-        if status == "active" and age_days >= COOL_AFTER_DAYS:
+        # Rule 1: Auto-prune stories older than PRUNE_AFTER_DAYS since first_seen
+        if total_age >= PRUNE_AFTER_DAYS:
+            auto_pruned += 1
+            continue
+
+        # Rule 2: Auto-cool stale active stories
+        if status == "active" and inactive_age >= COOL_AFTER_DAYS:
             s["status"] = "cooled"
             auto_cooled += 1
             kept.append(s)
-            continue
-
-        # Rule 2: Auto-prune old cooled stories
-        if status == "cooled" and age_days >= PRUNE_AFTER_DAYS:
-            auto_pruned += 1
             continue
 
         kept.append(s)
@@ -1967,7 +1971,7 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
     if auto_cooled > 0:
         print(f"  Auto-cooled {auto_cooled} stale stories (> {COOL_AFTER_DAYS}d no updates)")
     if auto_pruned > 0:
-        print(f"  Auto-pruned {auto_pruned} expired stories (> {PRUNE_AFTER_DAYS}d cooled)")
+        print(f"  Auto-pruned {auto_pruned} expired stories (first_seen > {PRUNE_AFTER_DAYS}d old)")
 
     data["stories"] = kept
     return data
@@ -2072,7 +2076,25 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             print(f"  Suspended: {health.get('engines_suspended')}")
             sys.exit(2)
         if not findings:
-            print("  WARNING: No research findings. Digest will be empty.")
+            # Retry with fallback model when primary model produces empty results
+            global MODEL_OVERRIDE
+            fallback = MODEL_REASONING_FALLBACK
+            if MODEL_OVERRIDE:
+                fallback = MODEL_REASONING
+            if not TEST_MODE:
+                print(f"  *** RETRY: No findings. Retrying Phase 1 with fallback: {fallback}")
+                MODEL_OVERRIDE = fallback
+                # Clear Phase 1 output so it re-runs
+                if phase_1_path.exists():
+                    phase_1_path.unlink()
+                # Clear downstream phase files from the aborted run
+                for p in run_dir.glob("0*-*.json"):
+                    p.unlink()
+                findings = phase_1_research(topic, run_dir)
+                if findings:
+                    print(f"  *** RETRY succeeded with fallback model: {fallback}")
+            if not findings:
+                print("  WARNING: No research findings after fallback retry. Digest will be empty.")
         _phase_done("Phase 1: Research", t1)
 
         # Phase 2: Judge Research
