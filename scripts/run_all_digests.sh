@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+# omp binary (bun) is at ~/.bun/bin/ — not in systemd default PATH
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 export HOME="/home/carter"
 LOGFILE="$HOME/digests/.digests.log"
 

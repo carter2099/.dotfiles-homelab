@@ -4,7 +4,7 @@ theme:
 setupVersion: 1
 modelRoles: 
   default: opencode-go/deepseek-v4-flash:high
-  plan: opencode-go/glm-5.2:high
+  plan: opencode-go/deepseek-v4-flash:high
   designer: opencode-go/glm-5.2:high
   advisor: opencode-go/deepseek-v4-flash:high
   smol: opencode-go/deepseek-v4-flash:high

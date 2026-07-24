@@ -8,9 +8,9 @@ json=$(curl -sf http://localhost:8082/health) || {
 }
 
 # Print per-account table
-echo "+-------------------+----------+------+------+------+---------------+"
-echo "| Account           | Tier     |  5h  |  7d  |  30d | PAYG balance  |"
-echo "+-------------------+----------+------+------+------+---------------+"
+echo "+-------------------+----------+------+------+------+---------------+---------+---------+---------+"
+echo "| Account           | Tier     |  5h  |  7d  |  30d | PAYG balance  | R5h     | R7d     | R30d    |"
+echo "+-------------------+----------+------+------+------+---------------+---------+---------+---------+"
 
 echo "$json" | jq -r '
     .accounts[] |
@@ -23,14 +23,16 @@ echo "$json" | jq -r '
         if .payg.present and .payg.monthly_limit_usd > 0 then
             "$" + (.payg.balance_usd | tostring | (split(".") | .[0] + "." + (.[1] + "00")[0:2]))
         else
-            "—"
-        end
-    ] | @tsv' | while IFS=$'\t' read -r name tier rh wh mh payg; do
-    printf "| %-17s | %-8s | %-4s | %-4s | %-4s | %-13s |\n" "$name" "$tier" "$rh" "$wh" "$mh" "$payg"
+            "--"
+        end,
+        .rolling.reset_in,
+        .weekly.reset_in,
+        .monthly.reset_in
+    ] | @tsv' | while IFS=$'\t' read -r name tier rh wh mh payg r5h r7d r30d; do
+    printf "| %-17s | %-8s | %-4s | %-4s | %-4s | %-13s | %-7s | %-7s | %-7s |\n" "$name" "$tier" "$rh" "$wh" "$mh" "$payg" "$r5h" "$r7d" "$r30d"
 done
 
-echo "+-------------------+----------+------+------+------+---------------+"
-
+echo "+-------------------+----------+------+------+------+---------------+---------+---------+---------+"
 # Aggregate summary
 echo "$json" | jq -r '
     "Aggregate: \(.aggregate.active_accounts)/\(.aggregate.total_accounts) active accounts",
