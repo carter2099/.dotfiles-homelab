@@ -75,6 +75,7 @@ targets:
     source: /home/carter/homelab-backup
     excludes:
       - homelab-backup            # the 11MB binary
+      - .git
       - homelab-backup.baseline   # any rollback copy
 
   - name: k3s-manifests
