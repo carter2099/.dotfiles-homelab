@@ -37,7 +37,7 @@ import sys
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,8 +54,8 @@ SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL_REASONING = "qwen-3.6-35b-q5"               # used for all LLM phases (local Qwen via llm-proxy)
-MODEL_REASONING_FALLBACK = "deepseek-v4-flash"     # fallback via opencode-go proxy when local LLM fails
+MODEL_REASONING = "deepseek-v4-flash"               # faster API-based model for primary use
+MODEL_REASONING_FALLBACK = "qwen-3.6-35b-q5"     # local LLM fallback when API is unavailable
 MODEL_FAST = "qwen-3.5-4b-q8"                     # smaller local model for light tasks
 DEFAULT_TIMEOUT = 900
 RESEARCH_TIMEOUT = 1800
@@ -282,8 +282,8 @@ ONGOING_CAP = 5     # Pool B: max ongoing articles passed to Phase 4
 SIF_CAP = 3         # Pool C: max stories-in-flight passed directly to Phase 6
 
 # ── Stories-in-flight constants ────────────────────────────────────────────
-COOL_AFTER_DAYS = 5     # auto-set status to "cooled" if no updates in 5 days
-PRUNE_AFTER_DAYS = 7    # remove stories entirely after 7 days since first_seen
+COOL_AFTER_DAYS = 3     # auto-set status to "cooled" if no updates in 3 days
+PRUNE_AFTER_DAYS = 5    # remove stories entirely after 5 days since first_seen
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -375,7 +375,8 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Category: Model Releases, AI Infrastructure, or Research\n"
                     "- Estimated importance: high / medium / low\n\n"
                     "If a source fails to load, try another. Prioritize stories from today. "
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories you actually fetched and confirmed. "
+                    "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
                 ),
             },
             {
@@ -393,7 +394,8 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Category: Agentic/Agent Platforms, Open Source, or Tools & Developer\n"
                     "- Estimated importance: high / medium / low\n\n"
                     "Prioritize stories from today. Only include stories you actually fetched "
-                    "and confirmed. If a source fails, try another."
+                    "and confirmed. If a source fails, try another. "
+                    "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
                 ),
             },
             {
@@ -411,17 +413,21 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Category: Industry News, Policy, Funding, or Community\n"
                     "- Estimated importance: high / medium / low\n\n"
                     "Prioritize stories from today. Only include stories you actually fetched "
-                    "and confirmed. If a source fails, try another."
+                    "and confirmed. If a source fails, try another. "
+                    "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
                 ),
             },
         ],
         "judgment_rules": (
             "For each finding, evaluate against these rules and assign a verdict.\n\n"
-            "1. SOURCE CHECK: Is this from a known reputable outlet? TechCrunch, The Verge, "
-            "Ars Technica, Wired, ZDNet, VentureBeat, Hacker News, official company blogs, "
-            "GitHub repos with significant activity, academic papers on arxiv. Personal blogs "
-            "are OK if they have substance. Content farms, SEO spam, and low-quality "
-            "aggregators should be dropped with reason 'unreliable_source'.\n"
+            "1. SOURCE CHECK (HARD RULE): buildfastwithai.com is a low-quality aggregator "
+            "that repackages other outlets' reporting without original content. ANY finding "
+            "from buildfastwithai.com or similar aggregators MUST be dropped with reason "
+            "'unreliable_source'. This takes precedence over all other rules. Only accept "
+            "stories from known reputable outlets: TechCrunch, The Verge, Ars Technica, "
+            "Wired, ZDNet, VentureBeat, Hacker News, official company blogs, GitHub repos "
+            "with significant activity, academic papers on arxiv. Personal blogs are OK if "
+            "they have substance.\n"
             "2. RELEVANCE CHECK: Is this about AI, tech, developer tools, or the tech industry? "
             "If it's general business news, politics, or non-tech topics, drop with reason 'not_relevant'.\n"
             "3. DUPLICATE CHECK: Is this the same underlying story as another finding? "
@@ -1567,8 +1573,8 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
         "(e.g. diplomatic spat → military confrontation → escalate to high; resolved "
         "story → cool to low). You may set status to 'cooled' if a story has definitively "
         "resolved (e.g. bill signed, trial verdict, product shipped). Otherwise leave "
-        "status as-is — the system auto-cools stories with no updates after 5 days and "
-        "auto-prunes cooled stories after 10 days total.\n"
+        "status as-is — the system auto-cools stories with no updates after 3 days and "
+        "auto-prunes cooled stories after 5 days total.\n"
         "3. ADD NEW TRACKER ENTRIES: Major announcements, unfolding events, controversies, "
         "multi-day stories should be added to the tracker. Each needs: title, url, first_seen "
         "(today), last_updated (today), latest_dev (1-sentence summary of what's new), "
@@ -1904,38 +1910,20 @@ def _ensure_importance(s: dict) -> dict:
     return s
 
 
-def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
-    """Load the cross-day story tracker and apply deterministic pruning.
+def _prune_and_cool_stories(stories: list[dict], today: date | None = None) -> tuple[list[dict], int, int]:
+    """Apply auto-cool and auto-prune to a list of story dicts.
 
-    Two rules (Python-side, not LLM-dependent):
-    1. AUTO-COOL: Any story with status "active" and last_updated older than
-       COOL_AFTER_DAYS → set status to "cooled". Removes from Ongoing pool.
-    2. AUTO-PRUNE: Any story whose first_seen is older than PRUNE_AFTER_DAYS
-       → remove from the tracker entirely (regardless of status).
-
-    The Phase 6 curation LLM can still revive stories by updating last_updated
-    and setting status back to "active" when new developments appear.
+    Returns (kept_stories, auto_cooled_count, auto_pruned_count).
     """
-    path = digest_dir / "stories-in-flight.json"
-    if not path.exists():
-        return {"stories": []}
-
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return {"stories": []}
-
-    today = datetime.now(timezone.utc).date()
-    stories = data.get("stories", [])
-    kept = []
+    if today is None:
+        today = datetime.now(timezone.utc).date()
+    kept: list[dict] = []
     auto_cooled = 0
     auto_pruned = 0
 
     for s in stories:
-        # Ensure importance field exists (schema migration)
         _ensure_importance(s)
 
-        # Ensure first_seen field exists (schema migration — default to last_updated)
         if "first_seen" not in s:
             s["first_seen"] = s.get("last_updated", today.isoformat())
 
@@ -1967,6 +1955,32 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
             continue
 
         kept.append(s)
+
+    return kept, auto_cooled, auto_pruned
+
+
+def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
+    """Load the cross-day story tracker and apply deterministic pruning.
+
+    Two rules (Python-side, not LLM-dependent):
+    1. AUTO-COOL: Any story with status "active" and last_updated older than
+       COOL_AFTER_DAYS → set status to "cooled". Removes from Ongoing pool.
+    2. AUTO-PRUNE: Any story whose first_seen is older than PRUNE_AFTER_DAYS
+       → remove from the tracker entirely (regardless of status).
+
+    The Phase 6 curation LLM can still revive stories by updating last_updated
+    and setting status back to "active" when new developments appear.
+    """
+    path = digest_dir / "stories-in-flight.json"
+    if not path.exists():
+        return {"stories": []}
+
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return {"stories": []}
+
+    kept, auto_cooled, auto_pruned = _prune_and_cool_stories(data.get("stories", []))
 
     if auto_cooled > 0:
         print(f"  Auto-cooled {auto_cooled} stale stories (> {COOL_AFTER_DAYS}d no updates)")
@@ -2061,113 +2075,169 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     _phase_done("Phase 0: Setup", t0)
 
     try:
-        # Phase 1: Research
-        t1 = _phase_start("Phase 1: Research")
-        check_search_health("pre-phase1")
-        phase_1_path = run_dir / "01-research-raw.json"
-        if phase_1_path.exists():
-            print(f"  [skip] Phase 1 output exists: {phase_1_path}")
-            findings = json.loads(phase_1_path.read_text())
-        else:
-            findings = phase_1_research(topic, run_dir)
-        health = check_search_health("post-phase1")
-        if health.get("recommendation") == "halt":
-            print("  *** HALT: Search engine health critical. Stopping digest. ***")
-            print(f"  Working engines: {health.get('engines_working')}")
-            print(f"  Suspended: {health.get('engines_suspended')}")
-            sys.exit(2)
-        if not findings:
-            # Retry with fallback model when primary model produces empty results
-            # fallback is set below — global MODEL_OVERRIDE declared at function top
-            fallback = MODEL_REASONING_FALLBACK
-            if MODEL_OVERRIDE:
-                fallback = MODEL_REASONING
-            if not TEST_MODE:
-                print(f"  *** RETRY: No findings. Retrying Phase 1 with fallback: {fallback}")
-                MODEL_OVERRIDE = fallback
-                # Clear Phase 1 output so it re-runs
-                if phase_1_path.exists():
-                    phase_1_path.unlink()
-                # Clear downstream phase files from the aborted run
+        # ── Cross-process retry backoff ──
+        retry_state_path = digest_dir / ".retry-state.json"
+        retry_count = 0
+        if not TEST_MODE and retry_state_path.exists():
+            try:
+                state = json.loads(retry_state_path.read_text())
+                retry_count = state.get("retry_count", 0)
+                delay = min(10 * (2 ** retry_count), 600)
+                if retry_count > 0:
+                    print(f"  *** Cross-process backoff: attempt #{retry_count + 1}, "
+                          f"waiting {delay}s")
+                    time.sleep(delay)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # ── Retry loop: try primary model, fall back on stub output ──
+        for _stub_retry in range(2):
+            if _stub_retry > 0:
+                # Stub retry: skip if fallback was already tried via Phase 1 inner retry
+                if MODEL_OVERRIDE:
+                    print(f"  *** Both primary and fallback models already exhausted "
+                          f"(inner retry used {MODEL_OVERRIDE}). No more retries.")
+                    break
+                MODEL_OVERRIDE = MODEL_REASONING_FALLBACK
+                print(f"  *** STUB RETRY: No stories produced. "
+                      f"Retrying with fallback: {MODEL_OVERRIDE}")
                 for p in run_dir.glob("0*-*.json"):
                     p.unlink()
+
+            # Phase 1: Research
+            t1 = _phase_start("Phase 1: Research")
+            check_search_health("pre-phase1")
+            phase_1_path = run_dir / "01-research-raw.json"
+            if phase_1_path.exists():
+                print(f"  [skip] Phase 1 output exists: {phase_1_path}")
+                findings = json.loads(phase_1_path.read_text())
+            else:
                 findings = phase_1_research(topic, run_dir)
-                if findings:
-                    print(f"  *** RETRY succeeded with fallback model: {fallback}")
+            health = check_search_health("post-phase1")
+            if health.get("recommendation") == "halt":
+                print("  *** HALT: Search engine health critical. Stopping digest. ***")
+                print(f"  Working engines: {health.get('engines_working')}")
+                print(f"  Suspended: {health.get('engines_suspended')}")
+                sys.exit(2)
             if not findings:
-                print("  WARNING: No research findings after fallback retry. Digest will be empty.")
-        _phase_done("Phase 1: Research", t1)
+                # Retry with fallback model when primary model produces empty results
+                fallback = MODEL_REASONING_FALLBACK
+                if MODEL_OVERRIDE:
+                    fallback = MODEL_REASONING   # already on override, flip to original
+                if not TEST_MODE:
+                    import time as _time
+                    retry_delay = min(10 * (2 ** (retry_count + 1)), 120)  # exponential backoff
+                    print(f"  *** Backoff: waiting {retry_delay}s before fallback retry")
+                    _time.sleep(retry_delay)
+                    print(f"  *** RETRY: No findings. Retrying Phase 1 with fallback: {fallback}")
+                    MODEL_OVERRIDE = fallback
+                    if phase_1_path.exists():
+                        phase_1_path.unlink()
+                    for p in run_dir.glob("0*-*.json"):
+                        p.unlink()
+                    findings = phase_1_research(topic, run_dir)
+                    if findings:
+                        print(f"  *** RETRY succeeded with fallback model: {fallback}")
+                if not findings:
+                    print("  WARNING: No research findings after fallback retry. Digest will be empty.")
+            _phase_done("Phase 1: Research", t1)
 
-        # Phase 2: Judge Research
-        t2 = _phase_start("Phase 2: Judge Research")
-        phase_2_path = run_dir / "02-research-judged.json"
-        if phase_2_path.exists():
-            print(f"  [skip] Phase 2 output exists: {phase_2_path}")
-            judged_raw = json.loads(phase_2_path.read_text())
-            fresh_findings = judged_raw.get("fresh", [])
-            ongoing_findings = judged_raw.get("ongoing", [])
-        elif findings:
-            fresh_findings, ongoing_findings = phase_2_judge_research(topic, findings, run_dir)
-        else:
-            fresh_findings, ongoing_findings = [], []
-        _phase_done("Phase 2: Judge Research", t2)
+            # Phase 2: Judge Research
+            t2 = _phase_start("Phase 2: Judge Research")
+            phase_2_path = run_dir / "02-research-judged.json"
+            if phase_2_path.exists():
+                print(f"  [skip] Phase 2 output exists: {phase_2_path}")
+                judged_raw = json.loads(phase_2_path.read_text())
+                fresh_findings = judged_raw.get("fresh", [])
+                ongoing_findings = judged_raw.get("ongoing", [])
+            elif findings:
+                fresh_findings, ongoing_findings = phase_2_judge_research(topic, findings, run_dir)
+            else:
+                fresh_findings, ongoing_findings = [], []
+            _phase_done("Phase 2: Judge Research", t2)
 
-        # Phase 3: Rank URLs
-        t3 = _phase_start("Phase 3: Rank URLs")
-        phase_3_path = run_dir / "03-urls-ranked.json"
-        if phase_3_path.exists():
-            print(f"  [skip] Phase 3 output exists: {phase_3_path}")
-            ranked = json.loads(phase_3_path.read_text())
-            phase_4_queue = ranked.get("phase_4_queue", [])
-            sif_candidates = ranked.get("sif_candidates", [])
-        elif fresh_findings or ongoing_findings:
-            phase_4_queue, sif_candidates = phase_3_rank(
-                topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir)
-        else:
-            phase_4_queue, sif_candidates = [], []
-        _phase_done("Phase 3: Rank URLs", t3)
+            # Phase 3: Rank URLs
+            t3 = _phase_start("Phase 3: Rank URLs")
+            phase_3_path = run_dir / "03-urls-ranked.json"
+            if phase_3_path.exists():
+                print(f"  [skip] Phase 3 output exists: {phase_3_path}")
+                ranked = json.loads(phase_3_path.read_text())
+                phase_4_queue = ranked.get("phase_4_queue", [])
+                sif_candidates = ranked.get("sif_candidates", [])
+            elif fresh_findings or ongoing_findings:
+                phase_4_queue, sif_candidates = phase_3_rank(
+                    topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir)
+            else:
+                phase_4_queue, sif_candidates = [], []
+            _phase_done("Phase 3: Rank URLs", t3)
 
-        # Phase 4: Fetch + Summarize
-        t4 = _phase_start("Phase 4: Fetch & Summarize")
-        check_search_health("pre-phase4")
-        phase_4_path = run_dir / "04-fetch-summaries.json"
-        if phase_4_path.exists():
-            print(f"  [skip] Phase 4 output exists: {phase_4_path}")
-            summaries = json.loads(phase_4_path.read_text())
-        elif phase_4_queue:
-            summaries = phase_4_fetch(topic, phase_4_queue, run_dir)
-        else:
-            summaries = []
-        _phase_done("Phase 4: Fetch & Summarize", t4)
+            # Phase 4: Fetch + Summarize
+            t4 = _phase_start("Phase 4: Fetch & Summarize")
+            check_search_health("pre-phase4")
+            phase_4_path = run_dir / "04-fetch-summaries.json"
+            if phase_4_path.exists():
+                print(f"  [skip] Phase 4 output exists: {phase_4_path}")
+                summaries = json.loads(phase_4_path.read_text())
+            elif phase_4_queue:
+                summaries = phase_4_fetch(topic, phase_4_queue, run_dir)
+            else:
+                summaries = []
+            _phase_done("Phase 4: Fetch & Summarize", t4)
 
-        # Phase 5: Judge Summaries
-        t5 = _phase_start("Phase 5: Judge Summaries")
-        phase_5_path = run_dir / "05-summaries-judged.json"
-        if phase_5_path.exists():
-            print(f"  [skip] Phase 5 output exists: {phase_5_path}")
-            judged = json.loads(phase_5_path.read_text())
-        elif summaries:
-            judged = phase_5_judge_summaries(topic, summaries, run_dir)
-        else:
-            judged = []
-        _phase_done("Phase 5: Judge Summaries", t5)
+            # Phase 5: Judge Summaries
+            t5 = _phase_start("Phase 5: Judge Summaries")
+            phase_5_path = run_dir / "05-summaries-judged.json"
+            if phase_5_path.exists():
+                print(f"  [skip] Phase 5 output exists: {phase_5_path}")
+                judged = json.loads(phase_5_path.read_text())
+            elif summaries:
+                judged = phase_5_judge_summaries(topic, summaries, run_dir)
+            else:
+                judged = []
+            _phase_done("Phase 5: Judge Summaries", t5)
 
-        # Phase 6: Curate
-        t6 = _phase_start("Phase 6: Curate")
-        phase_6_path = run_dir / "06-curated.json"
-        if phase_6_path.exists():
-            print(f"  [skip] Phase 6 output exists: {phase_6_path}")
-            curated = json.loads(phase_6_path.read_text())
-            fresh = curated.get("fresh", [])
-            ongoing = curated.get("ongoing", [])
-            if "stories_in_flight" in curated:
-                stories_in_flight = curated["stories_in_flight"]
-        elif judged:
-            fresh, stories_in_flight, ongoing = phase_6_curate(
-                topic, judged, sif_candidates, stories_in_flight, run_dir)
-        else:
-            fresh, ongoing = [], []
-        _phase_done("Phase 6: Curate", t6)
+            # Phase 6: Curate
+            t6 = _phase_start("Phase 6: Curate")
+            phase_6_path = run_dir / "06-curated.json"
+            if phase_6_path.exists():
+                print(f"  [skip] Phase 6 output exists: {phase_6_path}")
+                curated = json.loads(phase_6_path.read_text())
+                fresh = curated.get("fresh", [])
+                ongoing = curated.get("ongoing", [])
+                if "stories_in_flight" in curated:
+                    stories_in_flight = curated["stories_in_flight"]
+                    # Re-apply cooling/pruning to cached data (Phase 0 pruning was lost by cache)
+                    sif_stories = stories_in_flight.get("stories", [])
+                    if sif_stories:
+                        kept, re_cooled, re_pruned = _prune_and_cool_stories(sif_stories)
+                        if re_cooled > 0 or re_pruned > 0:
+                            print(f"  [phase6-cache] Re-cooled {re_cooled} stale, "
+                                  f"re-pruned {re_pruned} expired stories")
+                            stories_in_flight["stories"] = kept
+            elif judged:
+                fresh, stories_in_flight, ongoing = phase_6_curate(
+                    topic, judged, sif_candidates, stories_in_flight, run_dir)
+            else:
+                fresh, ongoing = [], []
+            _phase_done("Phase 6: Curate", t6)
+
+            # Re-apply cooling/pruning to prevent LLM from undoing auto-cooled stories
+            sif_stories = stories_in_flight.get("stories", [])
+            if sif_stories:
+                kept, re_cooled, re_pruned = _prune_and_cool_stories(sif_stories)
+                if re_cooled > 0 or re_pruned > 0:
+                    print(f"  [post-6] Re-cooled {re_cooled} stale, re-pruned {re_pruned} expired stories")
+                    stories_in_flight["stories"] = kept
+
+            # Stub detection: if no fresh stories, retry with fallback model
+            if _stub_retry == 0 and not fresh and not TEST_MODE:
+                if not MODEL_OVERRIDE:
+                    print(f"  *** Stub detected: 0 fresh stories after Phase 6 with primary model. "
+                          f"Retrying with fallback.")
+                    continue
+                else:
+                    print(f"  *** Stub detected but already on fallback model "
+                          f"({MODEL_OVERRIDE}) — no more retries.")
+            break
 
         # Phase 7: Write HTML
         t7 = _phase_start("Phase 7: Write HTML")
@@ -2209,6 +2279,16 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         _phase_done("Phase 9: Summary", t9)
 
     except Exception as e:
+        # Save retry state for cross-process exponential backoff
+        if not TEST_MODE:
+            try:
+                state = json.loads(retry_state_path.read_text()) \
+                    if retry_state_path.exists() else {}
+                state["retry_count"] = state.get("retry_count", 0) + 1
+                state["last_failure"] = datetime.utcnow().isoformat()
+                retry_state_path.write_text(json.dumps(state))
+            except Exception:
+                pass
         print(f"\n  FATAL: {e}")
         traceback.print_exc()
         sys.exit(1)
@@ -2234,6 +2314,16 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                            len(summaries) if 'summaries' in dir() else 0,
                            len(fresh) if 'fresh' in dir() else 0,
                            len(ongoing) if 'ongoing' in dir() else 0)
+
+    # ── Clean up cross-process retry state ──
+    if not TEST_MODE:
+        try:
+            retry_state_path = digest_dir / ".retry-state.json"
+            if retry_state_path.exists():
+                retry_state_path.unlink()
+                print(f"  [done] Cleared retry state (successful run)")
+        except Exception:
+            pass
 
 
 def _write_test_report(run_dir: Path, topic: dict, category: str,
