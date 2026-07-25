@@ -116,7 +116,7 @@ Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) 
 All five run sequentially at 08:00 UTC via `digests-daily.timer`. Key files: `~/scripts/digest_runner.py`, `~/scripts/run_all_digests.sh`, `~/scripts/send_digest.py`.
 ## Homelab Steward
 
-Daily maintenance at 5:00 PM ET via `homelab-steward.timer`. 9-phase Python orchestrator (`~/scripts/steward_runner.py`). Full architecture at [`~/notes/docs/homelab/homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
+Daily maintenance at 5:00 PM ET via `homelab-steward.timer`. Multi-phase Python orchestrator (Phases P0–P9 with sub-phases) (`~/scripts/steward_runner.py`). Full architecture at [`~/notes/docs/homelab/homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
 
 **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, stop on first failure.
 ## Agent CLI: omp
