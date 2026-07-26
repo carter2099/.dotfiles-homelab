@@ -95,7 +95,7 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 
 `k` is aliased to `kubectl`. Full reference at [`~/notes/docs/homelab/k3s.md`](notes/docs/homelab/k3s.md).
 
-**Key:** flannel-iface must match `enp3s0f0` (wired, not WiFi). Pod↔host traffic needs `ufw allow in on cni0` + `flannel.1` — if ClusterIPs fail after a reboot/ufw reload, check these first.
+**Key:** No explicit `--flannel-iface` config (flannel auto-detects via default route interface `enp3s0f0`). Pod↔host traffic needs `ufw allow in on cni0` + `flannel.1` — if ClusterIPs fail after a reboot/ufw reload, check these first.
 ## App Details
 
 Each app has a reference doc in `~/notes/docs/homelab/`:
@@ -138,7 +138,7 @@ The sole agent CLI on this host is **omp** (`@oh-my-pi/pi-coding-agent`, install
 | **Steward** (`steward_runner.py`) | `omp -p` | Headless subprocess |
 | **Digests** (`digest_runner.py`) | `omp -p` | Headless with `@file` prompt loading |
 | **Hyperliquid SDK** (`run_hyperliquid_sdk.sh`) | `omp -p` | Headless on systemd timer |
-| **Dependabot webhook** | `omp -p -e omp-sandbox.ts` | Sandboxed via extension |
+| **Dependabot webhook** | Go binary (`dependabot-webhook`) | Sandbox via `OMP_SANDBOX_EXT` env var in service unit, pointed at `~/.config/dependabot-webhook/omp-sandbox.ts` |
 | **Interactive sessions** | `omp` | SSH into the homelab; run `omp` directly |
 
 ### Auth & models
