@@ -282,8 +282,8 @@ ONGOING_CAP = 5     # Pool B: max ongoing articles passed to Phase 4
 SIF_CAP = 3         # Pool C: max stories-in-flight passed directly to Phase 6
 
 # ── Stories-in-flight constants ────────────────────────────────────────────
-COOL_AFTER_DAYS = 3     # auto-set status to "cooled" if no updates in 3 days
-PRUNE_AFTER_DAYS = 5    # remove stories entirely after 5 days since first_seen
+COOL_AFTER_DAYS = 5     # auto-set status to "cooled" if no updates in 5 days
+PRUNE_AFTER_DAYS = 7    # remove stories entirely after 7 days since first_seen
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1025,14 +1025,18 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
     return findings
 
 
-def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> tuple[list[dict], list[dict]]:
+def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
+                           stories_in_flight: dict | None = None) -> tuple[list[dict], list[dict]]:
     """Phase 2: Python date pre-tagging + batched LLM judge.
 
     1. Python parses date_published → tags each finding as fresh, ongoing, or too_old.
        too_old findings are dropped without touching the LLM.
-    2. Findings are split into batches of BATCH_SIZE.
-    3. Each batch gets one LLM call with the topic's judgment rules + importance rubric.
-    4. Python merges batch results, handling cross-batch duplicates.
+    2. If stories_in_flight is provided, active SIF entries are included in the
+       judgment prompt so the LLM can reject findings that cover the same topic
+       as an already-tracked story (cross-run dedup).
+    3. Findings are split into batches of BATCH_SIZE.
+    4. Each batch gets one LLM call with the topic's judgment rules + importance rubric.
+    5. Python merges batch results, handling cross-batch duplicates.
 
     Returns (fresh_findings, ongoing_findings).
     """
@@ -1046,10 +1050,6 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
     t0 = time.time()
 
     # ── Step 1: Python date pre-tagging ──
-    # Use calendar-date comparison (not exact hours) because most article
-    # dates are date-only strings with no time component. A story dated
-    # "yesterday" could have been published at 23:59 — treating it as fresh
-    # is more conservative than assuming 00:00 and calling it ongoing.
     now = datetime.now(timezone.utc)
     today = now.date()
     yesterday = today - timedelta(days=1)
@@ -1063,7 +1063,6 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         if pub_date is None:
             too_old_count += 1
             continue
-
         pub_calendar_date = pub_date.date()
         if pub_calendar_date >= yesterday:
             f["date_tag"] = "fresh"
@@ -1083,6 +1082,27 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         output = {"fresh": [], "ongoing": [], "rejected": []}
         output_path.write_text(json.dumps(output, indent=2))
         return [], []
+
+    # Build SIF context string for cross-run dedup
+    sif_context = ""
+    if stories_in_flight:
+        active_sif = [s for s in stories_in_flight.get("stories", [])
+                      if s.get("status") == "active"]
+        if active_sif:
+            sif_lines = []
+            for s in active_sif:
+                title = s.get("title", "?")[:80]
+                sif_lines.append(f'  - "{title}"')
+            sif_context = (
+                "## Stories Already in Flight (do NOT re-add these topics)\n"
+                "The following stories are already being tracked from previous days. "
+                "If a finding covers the SAME TOPIC as any of these (even with a "
+                "different URL or from a different source), mark it as rejected "
+                "with reason 'already_tracked_in_sif'. The same underlying story "
+                "should not appear as a fresh finding — ongoing updates go through "
+                "the stories-in-flight tracker, not via new fresh entries.\n\n"
+                + "\n".join(sif_lines) + "\n\n"
+            )
 
     # ── Step 2: Batch LLM calls ──
     rubric = _importance_rubric_text(topic)
@@ -1108,6 +1128,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
     for batch_idx, batch in enumerate(batches):
         batch_json = json.dumps(batch, indent=2)
         user = (
+            f"{sif_context}"
             f"## Rules\n\n{topic['judgment_rules']}\n\n"
             f"## Importance Rubric\n\n{rubric}\n\n"
             f"## Findings to evaluate (batch {batch_idx + 1}/{len(batches)})\n\n"
@@ -2138,7 +2159,12 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                     if findings:
                         print(f"  *** RETRY succeeded with fallback model: {fallback}")
                 if not findings:
-                    print("  WARNING: No research findings after fallback retry. Digest will be empty.")
+                    h = check_search_health("post-fallback-retry")
+                    print(f"  WARNING: No research findings after fallback retry. "
+                          f"Search health: {h.get('results', '?')} results, "
+                          f"{h.get('engines_working', '?')} working, "
+                          f"{len(h.get('engines_suspended', []))} suspended. "
+                          f"Digest will be empty.")
             _phase_done("Phase 1: Research", t1)
 
             # Phase 2: Judge Research
@@ -2150,7 +2176,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 fresh_findings = judged_raw.get("fresh", [])
                 ongoing_findings = judged_raw.get("ongoing", [])
             elif findings:
-                fresh_findings, ongoing_findings = phase_2_judge_research(topic, findings, run_dir)
+                fresh_findings, ongoing_findings = phase_2_judge_research(topic, findings, run_dir, stories_in_flight)
             else:
                 fresh_findings, ongoing_findings = [], []
             _phase_done("Phase 2: Judge Research", t2)

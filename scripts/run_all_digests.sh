@@ -12,6 +12,27 @@ export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 export HOME="/home/carter"
 LOGFILE="$HOME/digests/.digests.log"
 
+# ── Signal trap: log cleanly on termination ──
+_cleanup() {
+    local rc=$?
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) SCRIPT TERMINATED (exit=$rc) — incomplete run" | tee -a "$LOGFILE" 2>/dev/null || true
+    exit $rc
+}
+trap _cleanup TERM INT HUP
+
+# ── Incomplete-run detection ──
+# Check if the previous run was interrupted (no "ALL DONE" at end of log)
+if [ -f "$LOGFILE" ]; then
+    LAST_LINE=$(tail -1 "$LOGFILE" 2>/dev/null || true)
+    if [ -n "$LAST_LINE" ] && echo "$LAST_LINE" | grep -qv "ALL DONE"; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run incomplete (last: $LAST_LINE)"
+        # If world was the last started topic and never finished, flag it
+        if echo "$LAST_LINE" | grep -q "START world"; then
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING world-digest was interrupted — topics before it completed"
+        fi
+    fi
+fi
+
 TOPICS=("ai-tech" "agentic-platform" "ai-hardware" "gaming" "world")
 
 for topic in "${TOPICS[@]}"; do
