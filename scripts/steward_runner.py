@@ -2360,7 +2360,7 @@ def _audit_collector_7_agent_fleet():
     )
     dependabot_errors = run_capture(
         ["journalctl", "--user", "-u", "dependabot-webhook",
-         "--since", "7 days ago", "-p", "err", "--no-pager"],
+         "--since", "7 days ago", "--no-pager"],
         env=env,
     )
     # Steward's own yesterday executor outcome
