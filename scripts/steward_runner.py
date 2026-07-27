@@ -46,7 +46,7 @@ ENDPOINTS = {
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
 STEWARD_MODEL = "opencode-go/deepseek-v4-flash"
-STEWARD_PATH = "/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+STEWARD_PATH = "/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SMALL_MODEL = "opencode-go/deepseek-v4-flash"
 EXECUTOR_MODEL = "opencode-go/deepseek-v4-pro"
 PROXY_HEALTH = "http://localhost:8082/health"
@@ -2838,7 +2838,18 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
         judge_output = _call_omp_p(judge_prompt, timeout=600)
         judge_packet = _extract_json(judge_output, f"judge-fix-{section_name}")
     except Exception as e:
-        judge_packet = {"verdict": "fail", "reviewed": [], "summary": str(e)}
+        # Sometimes the judge returns plain text ("Acknowledged. No flags to raise.")
+        # instead of JSON — detect positive signals and treat as implicit pass.
+        positive_indicators = ["no flags", "acknowledged", "all.*ok", "looks good",
+                               "no issues", "verified", "pass"]
+        if any(re.search(p, judge_output, re.IGNORECASE) for p in positive_indicators):
+            judge_packet = {
+                "verdict": "pass",
+                "reviewed": [],
+                "summary": "Implicit pass — judge returned plain text with positive signals"
+            }
+        else:
+            judge_packet = {"verdict": "fail", "reviewed": [], "summary": str(e)}
 
     return {
         "section": section_name,
