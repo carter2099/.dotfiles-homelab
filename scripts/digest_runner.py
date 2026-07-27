@@ -1968,8 +1968,10 @@ def _prune_and_cool_stories(stories: list[dict], today: date | None = None) -> t
             auto_pruned += 1
             continue
 
-        # Rule 2: Auto-cool stale active stories
-        if status == "active" and inactive_age >= COOL_AFTER_DAYS:
+        # Rule 2: Auto-cool stale active stories — based on inactivity OR total age
+        # Using total_age prevents LLM curator from keeping stories active forever
+        # by updating last_updated daily (which resets inactive_age to 0).
+        if status == "active" and (inactive_age >= COOL_AFTER_DAYS or total_age >= COOL_AFTER_DAYS):
             s["status"] = "cooled"
             auto_cooled += 1
             kept.append(s)

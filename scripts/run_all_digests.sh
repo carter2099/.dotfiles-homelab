@@ -39,7 +39,7 @@ for topic in "${TOPICS[@]}"; do
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) START $topic" | tee -a "$LOGFILE"
     START_TS=$(date +%s)
 
-    if python3 "$HOME/scripts/digest_runner.py" "$topic"; then
+    if timeout 7200 python3 "$HOME/scripts/digest_runner.py" "$topic"; then
         END_TS=$(date +%s)
         DURATION=$((END_TS - START_TS))
         echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DONE  $topic duration=${DURATION}s" | tee -a "$LOGFILE"
