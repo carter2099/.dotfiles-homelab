@@ -95,7 +95,7 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 
 `k` is aliased to `kubectl`. Full reference at [`~/notes/docs/homelab/k3s.md`](notes/docs/homelab/k3s.md).
 
-**Key:** No explicit `--flannel-iface` config (flannel auto-detects via default route interface `enp3s0f0`). Pod↔host traffic needs `ufw allow in on cni0` + `flannel.1` — if ClusterIPs fail after a reboot/ufw reload, check these first.
+**Key:** Explicit `flannel-iface: "enp3s0f0"` in `/etc/rancher/k3s/config.yaml` (matches the default route interface). Pod↔host traffic needs `ufw allow in on cni0` + `flannel.1` — if ClusterIPs fail after a reboot/ufw reload, check these first.
 ## App Details
 
 Each app has a reference doc in `~/notes/docs/homelab/`:
