@@ -3193,7 +3193,7 @@ def _html_usage(usage_data):
             extra_parts.append(f'PAYG ${acct["payg_balance"]:.2f}')
         extra = " · ".join(extra_parts)
         out.append(
-            f'<p style="margin:0 0 3px; font-size:13px; white-space:nowrap;">'
+            f'<p style="margin:0 0 3px; font-size:13px;">'
             f'<strong style="color:#1a1a2e;">{name}</strong> '
             f'<span style="color:#9aa0b2; font-size:12px;">{extra}</span></p>'
         )
@@ -3214,13 +3214,12 @@ def _html_usage(usage_data):
             fill_color = "#c62828" if pct >= 90 else color
             rows += (
                 '<tr>'
-                f'<td width="72px" style="padding:3px 0; color:#7b7b8a; font-size:12px; '
-                f'vertical-align:middle; white-space:nowrap;">{label}</td>'
-                f'<td style="padding:3px 0; vertical-align:middle;">'
+                f'<td width="35%" style="padding:3px 0; color:#7b7b8a; font-size:12px; '
+                f'vertical-align:middle;">{label}</td>'
+                f'<td width="45%" style="padding:3px 0; vertical-align:middle;">'
                 f'{_mini_bar(pct, fill_color)}</td>'
-                f'<td align="right" width="40px" style="padding:3px 0; color:#2a2a36; '
-                f'font-weight:600; vertical-align:middle; white-space:nowrap; '
-                f'font-variant-numeric:tabular-nums;">{pct:.0f}%</td>'
+                f'<td align="right" width="20%" style="padding:3px 0; color:#2a2a36; '
+                f'font-weight:600; vertical-align:middle;">{pct:.0f}%</td>'
                 '</tr>'
             )
         rows += '</table>'
