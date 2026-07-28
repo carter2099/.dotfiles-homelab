@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Homelab Steward — nightly deterministic Python orchestrator.
-Replaces update-check + agents-md-audit. Adds work queue + kimi-k3 executor.
+Replaces update-check + agents-md-audit. Adds work queue.
 
 Scheduled via homelab-steward.timer. Every phase writes a numbered artifact;
 skip-if-exists resume; failures become email badges, never sys.exit mid-run.
@@ -9,6 +9,7 @@ skip-if-exists resume; failures become email badges, never sys.exit mid-run.
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -46,14 +47,23 @@ ENDPOINTS = {
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
 STEWARD_MODEL = "opencode-go/deepseek-v4-flash"
-STEWARD_PATH = "/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+STEWARD_PATH = "/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Resolve fnm default node bin for PATH (if available)
+_FNM_NODE_DIRS = sorted(
+    (d for d in (HOME / ".local/share/fnm/node-versions").glob("*/installation/bin")
+     if (d / "node").exists()),
+    key=lambda d: d.stat().st_mtime if d.exists() else 0,
+    reverse=True)
+if _FNM_NODE_DIRS:
+    STEWARD_PATH = f"{_FNM_NODE_DIRS[0]}:{STEWARD_PATH}"
 SMALL_MODEL = "opencode-go/deepseek-v4-flash"
-EXECUTOR_MODEL = "opencode-go/deepseek-v4-pro"
 PROXY_HEALTH = "http://localhost:8082/health"
-EXECUTOR_MONTHLY_CAP = 4
 MAX_WORKERS = 3
-EXECUTOR_TIMEOUT = 2700
-EXECUTOR_MODE = "execute"
+
+# Timeout and model for headless omp JSON calls
+OMP_JSON_TIMEOUT = 2700
+OMP_JSON_MODEL = "opencode-go/deepseek-v4-pro"
 PENDING_PATH = HOME / "agent-state" / "pending.md"
 DEPENDABOT_UNIT = "dependabot-webhook.service"
 
@@ -100,21 +110,15 @@ DEFAULT_TEMPLATE = """<!DOCTYPE html>
 </td></tr>
 <tr><td style="padding:8px 32px 14px;">{{UPDATES}}</td></tr>
 <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
-<!-- Validation -->
+<!-- Health -->
 <tr><td style="padding:18px 32px 0;">
-<h2 style="margin:0; padding-left:10px; border-left:3px solid #1565c0; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Validation</h2>
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #5b3cc4; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Health</h2>
 </td></tr>
-<tr><td style="padding:8px 32px 14px;">{{VALIDATION}}</td></tr>
+<tr><td style="padding:8px 32px 14px;">{{HEALTH}}</td></tr>
 <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
-<!-- Heartbeat -->
+<!-- Audit &amp; Fixes -->
 <tr><td style="padding:18px 32px 0;">
-<h2 style="margin:0; padding-left:10px; border-left:3px solid #5b3cc4; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Status Heartbeat</h2>
-</td></tr>
-<tr><td style="padding:8px 32px 14px;">{{HEARTBEAT}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
-<!-- Audit -->
-<tr><td style="padding:18px 32px 0;">
-<h2 style="margin:0; padding-left:10px; border-left:3px solid #00838f; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Nightly Audit</h2>
+<h2 style="margin:0; padding-left:10px; border-left:3px solid #00838f; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Audit &amp; Fixes</h2>
 </td></tr>
 <tr><td style="padding:8px 32px 14px;">{{AUDIT}}</td></tr>
 <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
@@ -123,18 +127,6 @@ DEFAULT_TEMPLATE = """<!DOCTYPE html>
 <h2 style="margin:0; padding-left:10px; border-left:3px solid #e65100; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Work Queue</h2>
 </td></tr>
 <tr><td style="padding:8px 32px 14px;">{{QUEUE}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
-<!-- Executor -->
-<tr><td style="padding:18px 32px 0;">
-<h2 style="margin:0; padding-left:10px; border-left:3px solid #6a1b9a; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Executor</h2>
-</td></tr>
-<tr><td style="padding:8px 32px 14px;">{{EXECUTOR}}</td></tr>
-<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
-<!-- Auto-Fixes -->
-<tr><td style="padding:18px 32px 0;">
-<h2 style="margin:0; padding-left:10px; border-left:3px solid #2e7d32; color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">Auto-Fixes</h2>
-</td></tr>
-<tr><td style="padding:8px 32px 14px;">{{FIXES}}</td></tr>
 <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #ececf2; margin:4px 0;"></td></tr>
 <!-- Usage -->
 <tr><td style="padding:18px 32px 0;">
@@ -179,7 +171,7 @@ def run_capture(cmd, **kwargs):
     try:
         cp = subprocess.run(cmd, capture_output=True, check=True, **kwargs)
         return cp.stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
         return ""
 
 
@@ -195,7 +187,11 @@ def run_capture_ok(cmd, **kwargs):
 
 
 def user_env():
-    return {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}", "PATH": f"{STEWARD_PATH}:{os.environ.get('PATH', '')}"}
+    env = {**os.environ,
+           "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}",
+           "KUBECONFIG": str(HOME / ".kube" / "config"),
+           "PATH": f"{STEWARD_PATH}:{os.environ.get('PATH', '')}"}
+    return env
 
 
 def write_json(path, data):
@@ -375,10 +371,10 @@ def extract_from_ndjson(stdout):
     return "".join(accumulated), stats
 
 
-def _call_omp_p_json(prompt, timeout=EXECUTOR_TIMEOUT, extra_args=None):
+def _call_omp_p_json(prompt, timeout=OMP_JSON_TIMEOUT, extra_args=None):
     """Call omp -p in --mode json. Returns (accumulated_text, stats, packet, raw_stdout)."""
     cmd = [
-        str(HOME / ".bun/bin/omp"), "-p", "--model", EXECUTOR_MODEL, "--mode", "json",
+        str(HOME / ".bun/bin/omp"), "-p", "--model", OMP_JSON_MODEL, "--mode", "json",
         "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
         "--allow-home",
@@ -608,28 +604,78 @@ def _p1_docker_assert():
     return {"step": "docker_daemon_assert", "status": "ok", "root": root}
 
 
-def _p1_k3s_rollouts():
-    """Rollout restart freshrss."""
-    results = []
+FRESHRSS_DEPLOYMENT = HOME / "k3s" / "freshrss" / "freshrss-deployment.yaml"
+
+
+def _p1_freshrss_update():
+    """Check FreshRSS Docker Hub for newer tag, bump and apply if newer."""
+    print("  [1e] freshrss tag check")
     env = user_env()
-    for name, ns, timeout_s in [
-        ("freshrss", "freshrss", 120),
-    ]:
-        print(f"  [1e] k3s rollout restart {name}/{ns}")
-        try:
-            run([K3S, "kubectl", "rollout", "restart", f"deploy/{name}", "-n", ns],
-                env=env, capture_output=True, text=True)
-            run([K3S, "kubectl", "rollout", "status", f"deploy/{name}", "-n", ns,
-                 f"--timeout={timeout_s}s"],
-                env=env, capture_output=True, text=True)
-            results.append({"step": f"k3s_{name}", "status": "ok"})
-        except subprocess.CalledProcessError as e:
-            stderr_tail = (e.stderr or "").strip()
-            msg = str(e)
-            if stderr_tail:
-                msg += f" | stderr: {stderr_tail[-500:]}"
-            results.append({"step": f"k3s_{name}", "status": "failed", "error": msg})
-    return results
+
+    if not FRESHRSS_DEPLOYMENT.exists():
+        return {"step": "freshrss", "status": "skipped",
+                "reason": f"deployment file not found: {FRESHRSS_DEPLOYMENT}"}
+
+    dep_text = FRESHRSS_DEPLOYMENT.read_text()
+    m = re.search(r"freshrss/freshrss:(\S+)", dep_text)
+    if not m:
+        return {"step": "freshrss", "status": "skipped",
+                "reason": "could not parse current tag from deployment yaml"}
+    current_tag = m.group(1)
+
+    # Resolve latest from Docker Hub
+    latest_tag = None
+    try:
+        req = urllib.request.Request(
+            "https://hub.docker.com/v2/repositories/freshrss/freshrss/tags?"
+            "page_size=50&ordering=last_updated",
+            headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            tags = [t["name"] for t in data.get("results", [])]
+        # Prefer newest stable semver (N.N.N)
+        semver = [t for t in tags if re.match(r"^\d+\.\d+\.\d+$", t)]
+        if semver:
+            latest_tag = sorted(semver, key=lambda s: tuple(int(x) for x in s.split(".")))[-1]
+        else:
+            # Fallback: newest numeric build tag
+            numeric = [t for t in tags if re.match(r"^\d+$", t)]
+            if numeric:
+                latest_tag = sorted(numeric, key=int)[-1]
+    except Exception as e:
+        return {"step": "freshrss", "status": "error",
+                "reason": f"Docker Hub unreachable: {e}", "current_tag": current_tag}
+
+    if not latest_tag:
+        return {"step": "freshrss", "status": "error",
+                "reason": "no valid tag found on Docker Hub", "current_tag": current_tag}
+
+    if current_tag == latest_tag:
+        return {"step": "freshrss", "status": "current", "current_tag": current_tag}
+
+    # Newer tag found — bump, apply, rollout
+    print(f"  freshrss: {current_tag} -> {latest_tag}")
+    new_dep_text = dep_text.replace(f"freshrss/freshrss:{current_tag}",
+                                     f"freshrss/freshrss:{latest_tag}")
+
+    try:
+        FRESHRSS_DEPLOYMENT.write_text(new_dep_text)
+        run(["kubectl", "apply", "-f", str(FRESHRSS_DEPLOYMENT)],
+            env=env, capture_output=True, text=True)
+        run(["kubectl", "rollout", "status", "deploy/freshrss", "-n", "freshrss",
+             "--timeout=180s"],
+            env=env, capture_output=True, text=True)
+        return {"step": "freshrss", "status": "bumped",
+                "current_tag": current_tag, "latest_tag": latest_tag}
+    except subprocess.CalledProcessError as e:
+        msg = str(e)
+        if e.stderr:
+            msg += f" | stderr: {e.stderr[-500:]}"
+        # If apply failed, revert yaml
+        if "apply" in msg:
+            FRESHRSS_DEPLOYMENT.write_text(dep_text)
+        return {"step": "freshrss", "status": "failed",
+                "current_tag": current_tag, "latest_tag": latest_tag, "error": msg}
 
 
 def _p1_openwebui():
@@ -750,8 +796,8 @@ def phase_1_apply(run_dir, dry_run=False):
         except subprocess.CalledProcessError as e:
             steps.append({"step": "cloudflared_restart", "status": "failed", "error": str(e)})
 
-    # 1e: k3s rollouts
-    steps.extend(_p1_k3s_rollouts())
+    # 1e: freshrss update
+    steps.append(_p1_freshrss_update())
 
     # 1f: open-webui
     steps.append(_p1_openwebui())
@@ -1731,23 +1777,6 @@ def phase_5_work_queue(run_dir):
                     "detail": f"Status implementing but no lock file exists; stale for {age} days",
                 })
 
-    # Pick executor candidate
-    candidate = None
-    monthly_used = 0
-    if RUNS_LOG.exists():
-        this_month = datetime.now().strftime("%Y-%m")
-        for line in RUNS_LOG.read_text().strip().splitlines():
-            try:
-                entry = json.loads(line)
-                if entry.get("executor") and entry.get("ts", "").startswith(this_month):
-                    monthly_used += 1
-            except json.JSONDecodeError:
-                pass
-
-    eligible = sorted(plans_approved, key=lambda p: (p["priority"], p["approved"] or "9999"))
-    if eligible:
-        candidate = eligible[0]
-
     data = {
         "ideas": {
             "outstanding": ideas_outstanding,
@@ -1760,9 +1789,6 @@ def phase_5_work_queue(run_dir):
             "done_this_week": plans_done_this_week,
         },
         "inconsistencies": inconsistencies,
-        "executor_candidate": candidate,
-        "executor_monthly_used": monthly_used,
-        "executor_monthly_cap": EXECUTOR_MONTHLY_CAP,
     }
     write_json(run_dir / "05-queue.json", data)
     print(f"[P5] done -> {run_dir / '05-queue.json'}")
@@ -1770,218 +1796,10 @@ def phase_5_work_queue(run_dir):
     print(f"  plans: {len(plans_draft)} draft, {len(plans_approved)} approved, "
           f"{len(plans_implementing)} implementing, {len(plans_done_this_week)} done this week")
     print(f"  inconsistencies: {len(inconsistencies)}")
-    if candidate:
-        print(f"  executor candidate: {candidate['file']} (priority {candidate['priority']})")
     return data
 
 
-# ── P6: executor ─────────────────────────────────────────────────────
 
-
-def phase_6_executor(run_dir, setup_data, dry_run=False):
-    """Phase 6: execute one approved plan via omp agent + post-impl review."""
-    print("[P6] executor")
-    queue_path = run_dir / "05-queue.json"
-    if not queue_path.exists():
-        print("  skipped — no queue data")
-        data = {"executed": False, "reason": "no_queue_data"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    queue = read_json(queue_path)
-    candidate = queue.get("executor_candidate")
-    usage = setup_data.get("usage", {})
-
-    if dry_run:
-        print("  DRY RUN — skipping executor")
-        data = {"executed": False, "reason": "dry_run"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    if not candidate:
-        print("  skipped — no approved plan")
-        data = {"executed": False, "reason": "no_approved_plan"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    monthly_used = queue.get("executor_monthly_used", 0)
-    if monthly_used >= EXECUTOR_MONTHLY_CAP:
-        print(f"  skipped — monthly cap reached ({monthly_used}/{EXECUTOR_MONTHLY_CAP})")
-        data = {"executed": False, "reason": "monthly_cap"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    # Lock file check
-    lock_path = PLANS_DIR / ".steward-lock"
-    if lock_path.exists():
-        lock_content = lock_path.read_text().strip()
-        lock_age = (datetime.now() - datetime.fromtimestamp(lock_path.stat().st_mtime)).days
-        if lock_age < 2:
-            print(f"  skipped — lock exists ({lock_content}), {lock_age}d old")
-            data = {"executed": False, "reason": f"lock_exists: {lock_content}"}
-            write_json(run_dir / "06-executor.json", data)
-            return data
-    # Proceed with execution
-    plan_file = PLANS_DIR / candidate["file"]
-    if not plan_file.exists():
-        print(f"  error — plan file not found: {plan_file}")
-        data = {"executed": False, "reason": "plan_file_missing"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    plan_content = plan_file.read_text()
-
-    # Write lock
-    lock_path.write_text(f"{candidate['file']} {datetime.now().isoformat()}")
-
-    # Update plan status to implementing
-    new_plan = re.sub(r"\*\*Status:\*\*\s*approved", "**Status:** implementing", plan_content)
-    plan_file.write_text(new_plan)
-
-    # Determine execution mode
-    is_preview = EXECUTOR_MODE == "preview"
-
-    # Build prompt
-    context_contract = f"""
-You are executing a homelab plan unattended. Read the plan below carefully.
-
-CRITICAL RULES:
-- Work in ~/dev/<repo> clones, NEVER in prod deploy dirs (~/blog/, ~/delta_neutral/, etc.)
-- Run the repo's test suite before committing
-- Commit + push to main branch
-- Deploy via release.sh ONLY if the plan says `deploy: true` (check the plan metadata)
-- Use omp's task tool to fan out parallel implementation work
-- End your response with a fenced ```json packet:
-  {{"status": "success"|"partial"|"failed",
-    "summary": "...",
-    "commits": ["hash message"],
-    "evidence": ["check1: result", ...],
-    "acceptance_passed": true|false}}
-"""
-    if is_preview:
-        context_contract += """
-PREVIEW MODE: Confine all work to a fresh git worktree under /tmp/steward-preview/.
-Do NOT push. Do NOT deploy. Collect `git diff` output as evidence.
-"""
-    else:
-        context_contract += """
-LIVE MODE: Commit and push to main. Deploy if deploy:true. Full execution.
-"""
-
-    full_prompt = context_contract + "\n\n--- PLAN ---\n\n" + plan_content
-
-    extra_args = []
-    try:
-        raw_text, stats, packet, raw_ndjson = _call_omp_p_json(full_prompt)
-    except Exception as e:
-        print(f"  EXECUTOR FAILED: {e}")
-        # Restore plan status
-        plan_file.write_text(plan_content)
-        lock_path.unlink(missing_ok=True)
-        data = {"executed": False, "reason": f"executor_error: {e}"}
-        write_json(run_dir / "06-executor.json", data)
-        return data
-
-    # Save full NDJSON stream (tool-call audit trail)
-    (run_dir / "06-executor.ndjson").write_text(raw_ndjson)
-
-    executor_packet = packet
-    exec_status = executor_packet.get("status", "unknown")
-    commits = executor_packet.get("commits", [])
-
-    # Post-implementation review (judge)
-    print("  post-implementation review...")
-    review_prompt = f"""
-You are a skeptical reviewer. A plan was just executed by an automated agent.
-
-PLAN:
-{plan_content[:3000]}
-
-EXECUTOR RESULT PACKET:
-{json.dumps(executor_packet, indent=2)}
-
-{'GIT DIFF/COMMITS:' + json.dumps(commits, indent=2) if commits else 'No commits listed.'}
-
-Verify each acceptance criterion in the plan against the cited evidence.
-Return a fenced ```json packet:
-{{"verdict": "pass"|"fail",
- "findings": [{{"criterion": "...", "met": true|false, "evidence_cited": "...", "your_assessment": "..."}}]}}
-"""
-    try:
-        review_text = _call_omp_p(review_prompt, timeout=300)
-        review_packet = _extract_json(review_text, "review packet")
-    except Exception as e:
-        review_packet = {"verdict": "fail", "findings": [],
-                         "review_error": str(e), "raw": review_text if 'review_text' in dir() else ""}
-
-    # Deterministic probes
-    probes = {}
-    repo_match = re.search(r"~/dev/([a-zA-Z0-9_-]+)", plan_content)
-    if repo_match:
-        repo_name = repo_match.group(1)
-        repo_path = HOME / "dev" / repo_name
-        if repo_path.exists():
-            probes["git_log"] = run_capture(
-                ["git", "-C", str(repo_path), "log", "--oneline", "-3"])
-            probes["git_status"] = run_capture(
-                ["git", "-C", str(repo_path), "status", "-sb"])
-
-    # Endpoint re-check
-    ep_checks = {}
-    for name, url in ENDPOINTS.items():
-        code = run_capture(["curl", "-so", "/dev/null", "-w", "%{http_code}", url])
-        ep_checks[name] = code
-    probes["endpoints"] = ep_checks
-
-    review_pass = review_packet.get("verdict") == "pass"
-    probes_ok = all(code.startswith("2") or code.startswith("3") for code in ep_checks.values())
-
-    if review_pass and probes_ok and exec_status == "success":
-        # Mark done
-        done_dir = PLANS_DIR / "done"
-        done_dir.mkdir(exist_ok=True)
-        done_plan = done_dir / candidate["file"]
-        done_content = new_plan
-        done_content = re.sub(
-            r"\*\*Status:\*\*\s*implementing",
-            f"**Status:** done  \n**Completed:** {datetime.now().strftime('%Y-%m-%d')}",
-            done_content,
-        )
-        done_plan.write_text(done_content)
-        plan_file.unlink()
-
-        # Move the plan's linked idea (via its **Idea:** backlink, if declared)
-        idea_link = candidate.get("idea_link") or ""
-        idea_name = idea_link.rstrip("/").split("/")[-1] if idea_link else ""
-        idea_file = IDEAS_DIR / idea_name if idea_name else None
-        if idea_file and idea_file.exists():
-            ideas_done_dir = IDEAS_DIR / "done"
-            ideas_done_dir.mkdir(exist_ok=True)
-            idea_content = idea_file.read_text()
-            idea_content = re.sub(r"\*\*Status:\*\*\s*\S+", "**Status:** done", idea_content)
-            (ideas_done_dir / idea_name).write_text(idea_content)
-            idea_file.unlink()
-
-        lock_path.unlink(missing_ok=True)
-        final_status = "done"
-    else:
-        # Leave implementing, remove lock
-        lock_path.unlink(missing_ok=True)
-        final_status = "failed_review" if not review_pass else "failed_probes"
-
-    data = {
-        "executed": True,
-        "plan": candidate["file"],
-        "mode": EXECUTOR_MODE,
-        "executor_packet": executor_packet,
-        "review_packet": review_packet,
-        "probes": probes,
-        "status": final_status,
-        "stats": stats,
-    }
-    write_json(run_dir / "06-executor.json", data)
-    print(f"[P6] done -> {run_dir / '06-executor.json'} (status: {final_status})")
-    return data
 
 
 # ── P7: audit ────────────────────────────────────────────────────────
@@ -2363,21 +2181,9 @@ def _audit_collector_7_agent_fleet():
          "--since", "7 days ago", "--no-pager"],
         env=env,
     )
-    # Steward's own yesterday executor outcome
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    yesterday_exec = None
-    yesterday_dir = RUN_DIR_BASE / yesterday
-    exec_path = yesterday_dir / "06-executor.json"
-    if exec_path.exists():
-        try:
-            yesterday_exec = read_json(exec_path)
-        except Exception:
-            pass
-
     return {
         "hyperliquid_sdk_recent": hyperliquid_log[:3000],
         "dependabot_errors": dependabot_errors[:2000],
-        "steward_yesterday_executor": yesterday_exec,
     }
 
 def _audit_collector_8_docs_accuracy():
@@ -2452,11 +2258,10 @@ AUDIT_SECTIONS = [
         "artifact": "07-audit-3-digests.json",
         "timeout": 600,
         "guidance": (
-            "Judge the quality of the 5 daily digests over the trailing 7 days using the collector metrics plus "
-            "your own read of ~/digests/<topic>/<date>/ artifacts: run completeness per topic/day, story freshness, "
-            "cross-day duplication vs summary.md files, template placeholder leakage, source diversity "
-            "(unique domains), stories-in-flight.json hygiene (5d cool / 7d prune enforced), duration trends, "
-            "llm-proxy fallback in the digest window. Sample up to 3 links per digest with curl -sI (read-only)."
+            "Judge digest quality focusing on the last 48 hours plus any ongoing systemic regressions: "
+            "run completeness, story freshness, cross-day duplication, stories-in-flight.json hygiene "
+            "(5d cool / 7d prune). Do NOT file historical empty-digest days as findings once they are "
+            "already known — only flag recent misses. Sample up to 3 links with curl -sI (read-only)."
         ),
     },
     {
@@ -2504,8 +2309,7 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Review the other unattended agents' recent runs from the evidence: hyperliquid-sdk (Mon/Thu timer — "
-            "did it fire? outcome? errors?), dependabot-webhook (jobs, failures), and the steward's own prior "
-            "executor outcome (if any — did yesterday's executor work hold up?). Also read recent session files in "
+            "did it fire? outcome? errors?), dependabot-webhook (jobs, failures). Also read recent session files in "
             "~/.omp/agent/sessions-automated if you need outcomes the journal lacks. Flag failed or silently-"
             "skipped runs."
         ),
@@ -2876,9 +2680,12 @@ def phase_7b_fix(run_dir, dry_run=False):
     audit = read_json(audit_path)
     sections = audit.get("sections", [])
 
-    # Collect sections with confirmed findings
+    # Collect sections with confirmed findings (DRIFT/ATTENTION only)
     to_fix = []
     for s in sections:
+        verdict = s.get("verdict", "")
+        if verdict not in ("DRIFT", "ATTENTION"):
+            continue
         confirmed = s.get("judge_confirmed", [])
         if not confirmed:
             continue
@@ -2928,7 +2735,7 @@ def phase_7b_fix(run_dir, dry_run=False):
     return master
 
 def _html_updates(applied_data):
-    """Render update steps as HTML."""
+    """Render update steps — signal only, no no-op greys."""
     steps = applied_data.get("steps", [])
     if not steps:
         if applied_data.get("dry_run"):
@@ -2939,545 +2746,417 @@ def _html_updates(applied_data):
     for s in steps:
         name = s.get("step", "")
         status = s.get("status", "")
+
+        # apt_upgrade: show only if upgrades happened or failed
         if name == "apt_upgrade":
             n = s.get("upgraded_count", 0)
-            lines.append(f'<p style="margin:0 0 4px; color:#555; font-size:13px;">'
-                         f'apt upgrade: {n} packages</p>')
+            if n > 0:
+                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
+                             f'apt: {n} packages upgraded</p>')
+            elif status == "failed":
+                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                             f'apt: FAILED — {s.get("error","")}</p>')
+
+        # auto_* packages: show only ok or failed
         elif name.startswith("auto_"):
             pkg = name.replace("auto_", "")
             if status == "ok":
-                lines.append(f'<p style="margin:0 0 4px; color:#555; font-size:13px;">'
+                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'{pkg}: {s.get("pre_version","?")} -> {s.get("post_version","?")}</p>')
-            elif status == "skipped":
-                lines.append(f'<p style="margin:0 0 4px; color:#888; font-size:13px;">'
-                             f'{pkg}: already current ({s.get("pre_version","?")})</p>')
-            else:
+            elif status in ("failed", "error"):
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
                              f'{pkg}: FAILED — {s.get("error","")}</p>')
-        elif name.startswith("k3s_"):
-            svc = name.replace("k3s_", "")
-            lines.append(f'<p style="margin:0 0 4px; color:#555; font-size:13px;">'
-                         f'{svc}: rollout {"OK" if status=="ok" else "FAILED"}</p>')
+
+        # openwebui: show only bumped/failed/error
         elif name == "openwebui":
             if status == "bumped":
-                lines.append(f'<p style="margin:0 0 4px; color:#555; font-size:13px;">'
+                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'open-webui: {s.get("current_tag")} -> {s.get("latest_tag")}</p>')
-            elif status == "current":
-                lines.append(f'<p style="margin:0 0 4px; color:#555; font-size:13px;">'
-                             f'open-webui: current at {s.get("current_tag")}</p>')
-            else:
-                lines.append(f'<p style="margin:0 0 4px; color:#888; font-size:13px;">'
-                             f'open-webui: {status}</p>')
-    return "\n".join(lines) if lines else '<p style="margin:0; color:#888; font-size:13px;">No updates.</p>'
+            elif status in ("failed", "error"):
+                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                             f'open-webui: {status} — {s.get("error",s.get("reason",""))}</p>')
 
+        # freshrss: show only bumped/failed/error
+        elif name == "freshrss":
+            if status == "bumped":
+                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
+                             f'freshrss: {s.get("current_tag")} -> {s.get("latest_tag")}</p>')
+            elif status in ("failed", "error"):
+                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                             f'freshrss: {status} — {s.get("error",s.get("reason",""))}</p>')
 
-def _html_validation(validation_data):
-    """Render validation checks as HTML."""
-    checks = validation_data.get("checks", [])
-    lines = []
-    for c in checks:
-        name = c.get("name", "")
-        if name == "k3s_pods":
-            bad = c.get("bad_pods", [])
-            if bad:
-                lines.append(f'<p style="margin:0 0 4px; color:#f57f17; font-size:13px;">'
-                             f'k3s: {len(bad)} pods not Running/Completed</p>')
-            else:
-                lines.append(f'<p style="margin:0 0 4px; color:#2e7d32; font-size:13px;">'
-                             f'k3s pods: all healthy</p>')
-        elif name == "llm_fallback":
-            fb = c.get("fallback_active", False)
-            lines.append(f'<p style="margin:0 0 4px; color:#{"f57f17" if fb else "2e7d32"}; font-size:13px;">'
-                         f'LLM: {"CLOUD FALLBACK" if fb else "local"}</p>')
-        elif name == "openwebui_image_match":
-            st = c.get("status", "?")
-            color = {"ok": "#2e7d32", "warning": "#f57f17", "error": "#c62828"}.get(st, "#555")
-            lines.append(f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
-                         f'open-webui image: {st}</p>')
-        elif name.startswith("endpoint_"):
-            svc = name.replace("endpoint_", "")
-            ok = c.get("status") == "ok"
-            icon = "OK" if ok else "FAIL"
-            color = "#2e7d32" if ok else "#c62828"
-            # Tunnel health: show connector count instead of HTTP code
-            if svc == "tunnel-health":
-                detail = f'{c.get("active_connections", "?")} connectors'
-            else:
-                code = c.get("http_code", "?")
-                detail = f'HTTP {code}'
-            lines.append(f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
-                         f'{icon} {svc} — {detail}</p>')
-        elif name == "docker_containers":
-            out = c.get("output", "")
-            if out:
-                lines.append(f'<p style="margin:0 0 4px; color:#2e7d32; font-size:13px;">'
-                             f'containers: all running</p>')
-    return "\n".join(lines)
-
-
-
-
-def _trend_bar(values, segments=14, color="#5b3cc4"):
-    """Email-safe trend visualization: a row of cells whose shade ramps with value.
-    Uses a nested table (no SVG, no flexbox) so it renders in every mail client."""
-    nums = [float(v) for v in (values or []) if v is not None]
-    if not nums:
-        return '<span style="color:#9aa0b2; font-size:11px;">no data</span>'
-    mn, mx = min(nums), max(nums)
-    shades = ["#eef0f6", "#d8def0", "#bcc7e8", "#9daee0",
-              "#7c91d4", "#5b71c4", "#3d4fa8", "#2a2e78"]
-    cell_w = 100.0 / segments
-    n = len(nums)
-    cells = []
-    for i in range(segments):
-        idx = int(i * n / segments)
-        if idx >= n:
-            idx = n - 1
-        v = nums[idx]
-        if mx == mn:
-            si = len(shades) // 2 if mn > 0 else 0
+        # Generic fallback: show any step with real change/failure
         else:
-            si = int(round((v - mn) / (mx - mn) * (len(shades) - 1)))
-        shade = shades[si]
-        cells.append(
-            f'<td width="{cell_w:.2f}%" style="background-color:{shade}; '
-            f'height:8px; line-height:8px; font-size:0;" align="left">&nbsp;</td>'
-        )
-    return (
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="border-collapse:collapse;"><tr>' + "".join(cells) + '</tr></table>'
-    )
+            if status in ("ok", "bumped"):
+                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
+                             f'{name}: ok</p>')
+            elif status in ("failed", "error"):
+                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                             f'{name}: FAILED — {s.get("error","")}</p>')
+
+    return "\n".join(lines) if lines else '<p style="margin:0; color:#888; font-size:13px;">No updates tonight.</p>'
 
 
-def _fmt_num(v):
-    if v is None:
-        return "—"
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return str(v)
-    return f"{f:g}"
 
-
-def _html_heartbeat(hb_data, sparklines=None):
-    """Render the heartbeat as grouped, scannable HTML instead of a wall of <p>."""
-    out = []
-
-    def append_group(header, rows):
-        if not rows:
-            return
-        out.append(_sub_header(header))
-        out.append(_kv_rows(rows))
-
-    # ── Systemd units + reboot ──
-    sys_rows = []
-    uf = hb_data.get("failed_units", {}) or {}
-    user_f = [x for x in uf.get("user", []) if x and x.strip()]
-    sys_f = [x for x in uf.get("system", []) if x and x.strip()]
-    missing = (hb_data.get("units", {}) or {}).get("missing", [])
-    if not user_f and not sys_f and not missing:
-        sys_rows.append(("Systemd units", _dot("ok") + "All units healthy"))
-    else:
-        for u in user_f:
-            sys_rows.append(("Failed (user)", _dot("danger") + u.strip()))
-        for u in sys_f:
-            sys_rows.append(("Failed (system)", _dot("danger") + u.strip()))
-        if missing:
-            sys_rows.append(("Missing units", _dot("warn") + ", ".join(missing)))
-    rb = hb_data.get("reboot", {}) or {}
-    if rb.get("needed"):
-        sys_rows.append(("Reboot", _dot("danger") + f'Needed — kernel {rb.get("kernel","?")}'.strip()))
-    else:
-        sys_rows.append(("Reboot", _dot("ok") + "Not needed"))
-    append_group("System health", sys_rows)
-
-    # ── Resources ──
-    res_rows = []
-    mem = hb_data.get("memory", {}) or {}
-    mem_avail = mem.get("available", "")
-    if mem_avail:
-        pressure = ""
-        mp = mem.get("pressure", "")
-        m = re.search(r"some avg10=([\d.]+).*full avg10=([\d.]+)", mp) if mp else None
-        if m:
-            pressure = f' · pressure {m.group(1)}/{m.group(2)}'
-        res_rows.append(("Memory", f'{mem_avail} available{pressure}'))
-    disk_parts = []
-    disk = hb_data.get("disk", {}) or {}
-    if disk.get("df_root"):
-        parts = disk["df_root"].splitlines()[-1].split()
-        if len(parts) >= 5:
-            disk_parts.append(f'{parts[4]} used ({parts[2]}/{parts[1]})')
-    journal = hb_data.get("journal_disk_usage", "")
-    if journal:
-        jm = re.search(r"take up (\S+)", journal)
-        if jm:
-            disk_parts.append(f'journal {jm.group(1)}')
-    if disk_parts:
-        res_rows.append(("Disk · journal", " · ".join(disk_parts)))
-    smart = hb_data.get("smart", {}) or {}
-    if smart.get("wear_pct") or smart.get("available_spare"):
-        res_rows.append(("NVMe SMART", _dot("ok") +
-                         f'{smart.get("wear_pct","?")} wear · '
-                         f'{smart.get("available_spare","?")} spare · '
-                         f'{smart.get("media_errors","?")} media errors'))
-    elif smart.get("status") == "skipped":
-        pass
-    append_group("System resources", res_rows)
-
-    # ── Network & services ──
-    net_rows = []
-    nodes = hb_data.get("k3s_nodes", [])
-    for n in nodes:
-        if "NAME" in n and "STATUS" in n:
-            continue
-        parts = n.split()
-        if len(parts) >= 2:
-            net_rows.append(("k3s node",
-                f'{parts[0]} <span style="color:#2e7d32; font-weight:600;">{parts[1]}</span>'))
-            break
-    fb = (hb_data.get("llm_stack", {}) or {}).get("falling_back", False)
-    net_rows.append(("LLM proxy",
-                     _dot("warn") + "Cloud fallback" if fb else _dot("ok") + "Local"))
-    bt = (hb_data.get("backup", {}) or {}).get("last_run", "")
-    if bt:
-        net_rows.append(("Last backup", bt))
-    dns = hb_data.get("dns", {}) or {}
-    if dns:
-        ok = sum(1 for v in dns.values() if v.get("resolves"))
-        total = len(dns)
-        level = "ok" if ok == total else ("warn" if ok > 0 else "danger")
-        net_rows.append(("DNS", _dot(level) + f'{ok}/{total} hostnames resolve'))
-    hosts = hb_data.get("hosts", {}) or {}
-    for hostname, info in hosts.items():
-        level = "ok" if info.get("resolves") else "danger"
-        ip = info.get("output", "").split()[0] if info.get("output") else "?"
-        net_rows.append((f'/etc/hosts {hostname}', _dot(level) + ip))
-    dur = hb_data.get("docker_user_rules", {}) or {}
-    if dur:
-        if dur.get("has_drop_default"):
-            net_rows.append(("ufw docker-user", _dot("ok") + "DROP present"))
-        else:
-            net_rows.append(("ufw docker-user", _dot("danger") + "MISSING DROP"))
-    append_group("Network & services", net_rows)
-
-    # ── Security ──
-    sec_rows = []
-    tls = hb_data.get("tls_certs", {}) or {}
-    if tls:
-        tls_parts = []
-        for host, expiry in tls.items():
-            dm = re.search(r"notAfter=(.+?\d{4})\s", expiry)
-            date_str = dm.group(1) if dm else expiry[:20]
-            tls_parts.append(
-                f'<code style="font-family:Menlo,Consolas,monospace; font-size:11px; '
-                f'color:#2a2a36;">{host.split(".")[0]} {date_str}</code>')
-        sec_rows.append(("TLS certificates", "  ·  ".join(tls_parts)))
-    ba = hb_data.get("bundle_audit", {}) or {}
-    if ba:
-        ba_parts = []
-        for app, result in ba.items():
-            level = "ok" if "no vulnerabilities" in str(result) else "warn"
-            ba_parts.append(f"{app} {_dot(level)}")
-        sec_rows.append(("bundle-audit", "  ·  ".join(ba_parts)))
-    append_group("Security", sec_rows)
-
-    # ── Config drift ──
-    sd = hb_data.get("self_drift", {}) or {}
-    drift_rows = []
-    for section, data in sd.items():
-        if isinstance(data, dict):
-            issues = sum(1 for v in data.values()
-                         if v and isinstance(v, list) and len(v) > 0)
-            if issues:
-                drift_rows.append((section.replace("_", " "),
-                    _dot("warn") + f'{issues} drift item{"s" if issues != 1 else ""}'))
-    append_group("Config drift", drift_rows)
-
-    # ── 30-day trends ──
-    if sparklines:
-        out.append(_sub_header("30-day trends"))
-        trends = ['<table role="presentation" width="100%" cellpadding="0" '
-                  'cellspacing="0" style="font-size:12px; border-collapse:collapse;">']
-        for label, values in sparklines:
-            nums = [float(v) for v in (values or []) if v is not None]
-            latest = _fmt_num(nums[-1] if nums else None)
-            peak = _fmt_num(max(nums) if nums else None)
-            bar = _trend_bar(nums) if nums else '<span style="color:#9aa0b2; font-size:11px;">no data</span>'
-            trends.append(
-                '<tr>'
-                f'<td width="42%" style="padding:4px 0 2px; color:#7b7b8a; vertical-align:middle;">{label}</td>'
-                f'<td align="right" style="padding:4px 10px 2px 0; color:#2a2a36; font-weight:600; vertical-align:middle;">{latest}</td>'
-                f'<td align="right" style="padding:4px 0 2px; color:#9aa0b2; font-size:11px; vertical-align:middle;">peak {peak}</td>'
-                '</tr>'
-                f'<tr><td colspan="3" style="padding:0 0 8px;">{bar}</td></tr>'
-            )
-        trends.append('</table>')
-        out.append("".join(trends))
-
-    return "".join(out)
 
 
 def _mini_bar(pct, color="#37474f"):
-    """Inline 0-100% horizontal bar, email-safe via nested table cells."""
+    """Inline 0-100% horizontal bar, email-safe via nested table cells.
+    Track is darker (#d0d4de). Min fill 2% when pct>0."""
     try:
         w = max(0.0, min(100.0, float(pct)))
     except (TypeError, ValueError):
         w = 0.0
+    fill_w = max(w, 2.0) if w > 0 else 0.0
     return (
         '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" '
         'style="border-collapse:collapse;"><tr>'
-        f'<td width="{w:.0f}%" style="background-color:{color}; height:5px; '
+        f'<td width="{fill_w:.0f}%" style="background-color:{color}; height:5px; '
         f'line-height:5px; font-size:0;">&nbsp;</td>'
-        f'<td width="{100-w:.0f}%" style="background-color:#ececf2; height:5px; '
+        f'<td width="{100-fill_w:.0f}%" style="background-color:#d0d4de; height:5px; '
         f'line-height:5px; font-size:0;">&nbsp;</td>'
         '</tr></table>'
     )
 
 
-def _html_audit(audit_data):
-    """Render audit sections as compact per-section cards."""
+def _html_health(validation_data, hb_data):
+    """Merged health section: validation checks + system status from heartbeat.
+    No 30-day trends."""
+    out = []
+
+    # If heartbeat phase failed, show the error
+    if hb_data.get("phase_failed"):
+        err = hb_data.get("error", "unknown error")
+        out.append(f'<p style="margin:0; color:#c62828; font-size:13px;">{_dot("danger")}Heartbeat failed: {err}</p>')
+        return "".join(out)
+
+    # ── A. Checks table ──
+    checks = validation_data.get("checks", [])
+    check_rows = []
+    for c in checks:
+        name = c.get("name", "")
+        status = c.get("status", "")
+
+        # Normalize label
+        label_map = {
+            "docker_containers": "Containers",
+            "k3s_pods": "k3s pods",
+            "llm_fallback": "LLM routing",
+            "openwebui_image_match": "open-webui image",
+        }
+        label = label_map.get(name, name)
+        if name.startswith("endpoint_"):
+            svc = name.replace("endpoint_", "")
+            label = {"tunnel-health": "CF tunnel"}.get(svc, svc)
+
+        if status == "ok":
+            chip = _chip("OK", "#2e7d32")
+            detail = ""
+            # Add compact detail for endpoints
+            if name.startswith("endpoint_"):
+                svc = name.replace("endpoint_", "")
+                if svc == "tunnel-health":
+                    detail = f'{c.get("active_connections", "?")} connectors'
+                else:
+                    code = c.get("http_code", "?")
+                    detail = f'HTTP {code}'
+            elif name == "llm_fallback":
+                fb = c.get("fallback_active", False)
+                chip = _chip("OK", "#2e7d32") if not fb else _chip("FAIL", "#c62828")
+                detail = "local" if not fb else "cloud fallback"
+                label = "LLM routing"
+            check_rows.append((label, f'{chip} {detail}'.strip()))
+        elif status in ("fail", "error"):
+            chip = _chip("FAIL", "#c62828")
+            detail = c.get("error", c.get("status", ""))
+            check_rows.append((label, f'{chip} {detail}'.strip()))
+        elif status == "warning":
+            chip = _chip("WARN", "#e65100")
+            check_rows.append((label, chip))
+
+    if check_rows:
+        out.append(_sub_header("Checks"))
+        out.append(_kv_rows(check_rows))
+
+    # ── B. System status (from heartbeat, no trends) ──
+    sys_rows = []
+
+    # Failed systemd units
+    uf = hb_data.get("failed_units", {}) or {}
+    user_f = [x for x in uf.get("user", []) if x and x.strip()]
+    sys_f = [x for x in uf.get("system", []) if x and x.strip()]
+    missing = (hb_data.get("units", {}) or {}).get("missing", [])
+    if user_f or sys_f or missing:
+        parts = []
+        for u in user_f:
+            parts.append(_dot("danger") + u.strip())
+        for u in sys_f:
+            parts.append(_dot("danger") + u.strip())
+        if missing:
+            parts.append(_dot("warn") + ", ".join(missing))
+        sys_rows.append(("Systemd units", " ".join(parts)))
+
+    # Reboot
+    rb = hb_data.get("reboot", {}) or {}
+    sys_rows.append(("Reboot",
+        (_dot("danger") + f'Needed — kernel {rb.get("kernel","?")}' if rb.get("needed")
+         else _dot("ok") + "Not needed")))
+
+    # Disk
+    disk = hb_data.get("disk", {}) or {}
+    if disk.get("df_root"):
+        parts = disk["df_root"].splitlines()[-1].split()
+        if len(parts) >= 5:
+            used_pct = parts[4]
+            sys_rows.append(("Disk", f'{used_pct} used ({parts[2]}/{parts[1]})'))
+
+    # Memory
+    mem = hb_data.get("memory", {}) or {}
+    mem_avail = mem.get("available", "")
+    if mem_avail:
+        sys_rows.append(("Memory", mem_avail))
+
+    # Backup
+    bt = (hb_data.get("backup", {}) or {}).get("last_run", "")
+    if bt:
+        sys_rows.append(("Last backup", bt))
+
+    # DNS — only if not all ok
+    dns = hb_data.get("dns", {}) or {}
+    if dns:
+        ok = sum(1 for v in dns.values() if v.get("resolves"))
+        total = len(dns)
+        if ok != total:
+            sys_rows.append(("DNS", _dot("warn") + f'{ok}/{total} hostnames resolve'))
+
+    # TLS — only if any cert expires within 30 days
+    tls = hb_data.get("tls_certs", {}) or {}
+    if tls:
+        now_dt = datetime.now()
+        expiring = []
+        for host, expiry in tls.items():
+            dm = re.search(r"notAfter=(.+?\d{4})\s", expiry)
+            if dm:
+                try:
+                    exp_date = datetime.strptime(dm.group(1), "%b %d %H:%M:%S %Y %Z")
+                    days_left = (exp_date - now_dt).days
+                    if days_left <= 30:
+                        expiring.append(f'{host.split(".")[0]} ({days_left}d)')
+                except ValueError:
+                    pass
+        if expiring:
+            sys_rows.append(("TLS expiring", _dot("warn") + ", ".join(expiring)))
+
+    # LLM routing (from heartbeat)
+    fb = (hb_data.get("llm_stack", {}) or {}).get("falling_back", False)
+    if fb:
+        sys_rows.append(("LLM proxy", _dot("warn") + "Cloud fallback"))
+
+    # bundle-audit — only if vulnerabilities found
+    ba = hb_data.get("bundle_audit", {}) or {}
+    for app, result in ba.items():
+        if "no vulnerabilities" not in str(result):
+            sys_rows.append((f"bundle-audit ({app})", _dot("warn") + "vulnerabilities"))
+
+    if sys_rows:
+        out.append(_sub_header("System status"))
+        out.append(_kv_rows(sys_rows))
+
+    return "".join(out) if out else '<p style="margin:0; color:#888; font-size:13px;">All health checks passed.</p>'
+
+
+def _html_audit(audit_data, fixes_data=None):
+    """Render audit sections merged with fixes. No cached-PASS, no struck-through."""
     sections = audit_data.get("sections", []) or []
     if not sections:
         return '<p style="margin:0; color:#9aa0b2; font-size:13px;">No audit results.</p>'
+
+    # Index fixes by section name
+    fixes_by_section = {}
+    if fixes_data:
+        for s in fixes_data.get("sections", []):
+            fixes_by_section[s.get("section", "")] = s.get("fixes_applied", [])
+
+    # Date string for digest stale filter
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
     out = []
     for sec in sections:
-        name = (sec.get("name", "unknown") or "unknown").replace("_", " ")
         verdict = sec.get("verdict", "UNKNOWN")
-        badge = _badge(verdict)
-        confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", []) or []
-        rejected = sec.get("judge_rejected", []) or []
-        n_confirmed = len(confirmed)
-        n_rejected = len(rejected)
-        summary = f'{n_confirmed} finding{"s" if n_confirmed != 1 else ""}'
-        if n_rejected:
-            summary += f' · {n_rejected} rejected'
+
+        # Skip clean verdicts
+        if verdict in ("PASS", "cached-PASS"):
+            continue
+
+        name = (sec.get("name", "unknown") or "unknown").replace("_", " ")
+
+        # Map verdict to chip
+        if verdict == "DRIFT":
+            chip = _chip("Needs attention", "#c62828")
+        elif verdict == "ATTENTION":
+            chip = _chip("Needs attention", "#e65100")
+        elif verdict in ("collector-failed", "worker-failed"):
+            chip = _chip("Check failed", "#c62828")
+            err = sec.get("error", sec.get("worker_error", ""))
+            if err:
+                chip += f'<span style="color:#c62828; font-size:12px; margin-left:6px;">{err[:200]}</span>'
+        elif verdict == "UNVERIFIABLE":
+            chip = _chip("Unverified", "#9aa0b2")
+        else:
+            chip = _chip(verdict, "#9aa0b2")
+
         out.append(
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             'style="font-size:13px; border-collapse:collapse; margin:0 0 12px;">'
             f'<tr><td style="padding:3px 0; color:#1a1a2e; font-weight:700;">{name}</td>'
-            f'<td align="right" style="padding:3px 0; white-space:nowrap;">{badge}</td></tr>'
-            f'<tr><td colspan="2" style="padding:0 0 4px; color:#9aa0b2; '
-            f'font-size:11px;">{summary}</td></tr>'
+            f'<td align="right" style="padding:3px 0; white-space:nowrap;">{chip}</td></tr>'
         )
-        for finding in confirmed[:3]:
-            claim = (finding.get("claim") or finding.get("evidence") or "").strip()
+
+        # Confirmed findings (max 5), filter stale digest dates
+        confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", []) or []
+        filtered = []
+        for f in confirmed:
+            claim = (f.get("claim") or f.get("evidence") or "").strip()
+            # Digest stale filter: drop findings whose only date is >2d before run
+            if sec.get("name") == "digest-quality":
+                dates_in_claim = re.findall(r"20\d{2}-\d{2}-\d{2}", claim)
+                if dates_in_claim:
+                    # Keep if any date is within 2 days of run
+                    has_recent = any(
+                        (datetime.strptime(d, "%Y-%m-%d") >= datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=2))
+                        for d in dates_in_claim
+                    )
+                    if not has_recent:
+                        continue
+            filtered.append(claim[:180])
+
+        for claim in filtered[:5]:
             out.append(
                 f'<tr><td colspan="2" style="padding:2px 0 2px 14px; color:#3a3a4a; '
-                f'font-size:12px; border-left:2px solid #ececf2;">{claim[:180]}</td></tr>'
+                f'font-size:12px; border-left:2px solid #ececf2;">{claim}</td></tr>'
             )
-        if n_confirmed > 3:
+        if len(filtered) > 5:
             out.append(
                 f'<tr><td colspan="2" style="padding:2px 0 2px 14px; color:#9aa0b2; '
-                f'font-size:11px;">+ {n_confirmed - 3} more</td></tr>'
+                f'font-size:11px;">+ {len(filtered) - 5} more</td></tr>'
             )
-        for r in rejected[:2]:
-            claim = (r.get("claim") or "").strip()
-            reason = (r.get("reason") or "").strip()
-            out.append(
-                f'<tr><td colspan="2" style="padding:2px 0 1px 14px; color:#9aa0b2; '
-                f'font-size:12px; text-decoration:line-through; '
-                f'border-left:2px solid #ececf2;">{claim[:140]}</td></tr>'
-                f'<tr><td colspan="2" style="padding:0 0 3px 14px; color:#9aa0b2; '
-                f'font-size:11px;">Judge: {reason[:120]}</td></tr>'
-            )
-        if n_rejected > 2:
-            out.append(
-                f'<tr><td colspan="2" style="padding:2px 0 1px 14px; color:#9aa0b2; '
-                f'font-size:11px;">+ {n_rejected - 2} more rejected</td></tr>'
-            )
+
+        # Merge fixes for this section
+        section_fixes = fixes_by_section.get(sec.get("name", ""), [])
+        real_fixes = [
+            f for f in section_fixes
+            if f.get("status") in ("fixed", "failed", "deferred")
+            and not re.search(r"(?i)no action required|no action needed|no fix needed|already clean|nothing to|verified:.*no action",
+                              f.get("action", "") + " " + f.get("finding", ""))
+        ]
+        if real_fixes:
+            for fix in real_fixes[:3]:
+                st = fix.get("status", "?")
+                st_color = {"fixed": "#2e7d32", "deferred": "#e65100", "failed": "#c62828"}.get(st, "#9aa0b2")
+                finding_txt = (fix.get("finding", "") or "")[:120]
+                out.append(
+                    f'<tr><td colspan="2" style="padding:2px 0 2px 14px; font-size:12px; '
+                    f'border-left:2px solid {st_color}; padding-left:8px;">'
+                    f'{_chip(st.upper(), st_color)} '
+                    f'<span style="color:#3a3a4a;">{finding_txt}</span></tr>'
+                )
+
         out.append('</table>')
+
+    if not out:
+        return '<p style="margin:0; color:#888; font-size:13px;">All audit sections clear.</p>'
     return "".join(out)
 
 
 def _html_queue(queue_data):
-    """Render work queue as clean grouped rows with status chips."""
+    """Render work queue as grouped tables."""
     ideas = queue_data.get("ideas", {}) or {}
     plans = queue_data.get("plans", {}) or {}
     inconsistencies = queue_data.get("inconsistencies", []) or []
     out = []
-    out.append(
-        f'<p style="margin:0 0 6px; font-size:13px;">'
-        f'<strong style="color:#1a1a2e;">Ideas outstanding:</strong> '
-        f'{ideas.get("total_outstanding", 0)}</p>'
-    )
-    for idea in ideas.get("outstanding", [])[:10]:
-        out.append(
-            f'<p style="margin:0 0 2px 14px; color:#3a3a4a; font-size:12px; '
-            f'border-left:2px solid #ececf2; padding-left:8px;">'
-            f'{idea["file"]} <span style="color:#9aa0b2;">({idea["age_days"]}d)</span> '
-            f'— {idea["heading"][:80]}</p>'
-        )
 
-    def _plan_row(chip_text, color, detail):
-        return (
-            f'<p style="margin:0 0 2px 14px; font-size:12px; padding-left:8px; '
-            f'border-left:2px solid {color};">{_chip(chip_text, color)} '
-            f'<span style="color:#3a3a4a;">{detail}</span></p>'
-        )
+    # Ideas
+    outstanding = ideas.get("outstanding", [])
+    if outstanding:
+        out.append(_sub_header(f'Ideas outstanding ({len(outstanding)})'))
+        idea_rows = []
+        for idea in outstanding[:10]:
+            age = idea.get("age_days", "?")
+            heading = idea.get("heading", "")[:80]
+            idea_rows.append((f'{age}d', heading))
+        out.append(_kv_rows(idea_rows))
+    else:
+        out.append('<p style="margin:0; color:#9aa0b2; font-size:13px;">No open ideas.</p>')
 
-    for plan in plans.get("draft", []):
-        out.append(_plan_row("DRAFT", "#1565c0",
-                              f'{plan["file"]} — {plan["heading"][:80]}'))
-    for plan in plans.get("approved", []):
-        out.append(_plan_row("APPROVED", "#2e7d32",
-                              f'{plan["file"]} (priority {plan["priority"]})'))
-    for plan in plans.get("implementing", []):
-        out.append(_plan_row("IMPLEMENTING", "#e65100",
-                              f'{plan["file"]} ({plan["age_days"]}d)'))
-    for plan in plans.get("done_this_week", []):
-        out.append(_plan_row("DONE", "#9aa0b2", plan["file"]))
+    # Plans
+    plan_groups = [
+        ("Draft", plans.get("draft", []), "#1565c0"),
+        ("Approved", plans.get("approved", []), "#2e7d32"),
+        ("Implementing", plans.get("implementing", []), "#e65100"),
+        ("Done this week", plans.get("done_this_week", []), "#9aa0b2"),
+    ]
+    non_empty = [(label, items, color) for label, items, color in plan_groups if items]
+    if non_empty:
+        plan_rows = []
+        for label, items, color in non_empty:
+            for item in items[:5]:
+                detail = item.get("heading", item.get("file", ""))[:80]
+                plan_rows.append((_chip(label, color), detail))
+        out.append(_sub_header("Plans"))
+        out.append(_kv_rows(plan_rows))
 
+    # Inconsistencies
     if inconsistencies:
-        out.append(
-            '<p style="margin:10px 0 2px; color:#1a1a2e; font-size:11px; '
-            'font-weight:700; letter-spacing:0.6px; '
-            'text-transform:uppercase;">Inconsistencies</p>'
-        )
+        out.append(_sub_header("Inconsistencies"))
+        inc_rows = []
         for inc in inconsistencies:
-            out.append(
-                f'<p style="margin:0 0 2px 14px; color:#c62828; font-size:12px; '
-                f'border-left:2px solid #c62828; padding-left:8px;">'
-                f'{inc["type"]}: {inc["detail"][:200]}</p>'
-            )
+            inc_rows.append((inc["type"], inc["detail"][:200]))
+        out.append(_kv_rows(inc_rows))
 
-    candidate = queue_data.get("executor_candidate")
-    cap = queue_data.get("executor_monthly_cap", 4)
-    used = queue_data.get("executor_monthly_used", 0)
-    if candidate:
-        out.append(
-            f'<p style="margin:10px 0 0; color:#00838f; font-size:12px;">'
-            f'<strong>Next executor candidate:</strong> {candidate["file"]} '
-            f'<span style="color:#9aa0b2;">(monthly {used}/{cap})</span></p>'
-        )
     return "".join(out) if out else \
         '<p style="margin:0; color:#9aa0b2; font-size:13px;">Queue empty.</p>'
 
 
-def _html_executor(exec_data):
-    """Render executor result as HTML."""
-    if not exec_data.get("executed"):
-        reason = exec_data.get("reason", "no plan")
-        return f'<p style="margin:0; color:#9aa0b2; font-size:13px;">Idle — {reason}</p>'
-    status = exec_data.get("status", "unknown")
-    plan = exec_data.get("plan", "?")
-    packet = exec_data.get("executor_packet", {}) or {}
-    review = exec_data.get("review_packet", {}) or {}
-    status_color = {"done": "#2e7d32", "partial": "#e65100",
-                    "failed": "#c62828"}.get(status, "#9aa0b2")
-    out = [
-        f'<p style="margin:0 0 4px; font-size:13px;">{_chip(status.upper(), status_color)} '
-        f'<strong style="color:#1a1a2e; margin-left:6px;">{plan}</strong></p>',
-        f'<p style="margin:0 0 6px; color:#3a3a4a; font-size:13px;">'
-        f'Summary: {str(packet.get("summary", "N/A"))[:300]}</p>',
-    ]
-    commits = packet.get("commits", []) or []
-    if commits:
-        out.append(
-            '<p style="margin:0 0 2px; color:#9aa0b2; font-size:10px; font-weight:700; '
-            'letter-spacing:0.8px; text-transform:uppercase;">Commits</p>'
-        )
-        for c in commits[:5]:
-            out.append(
-                f'<p style="margin:0 0 2px 14px; color:#3a3a4a; font-size:12px; '
-                f'font-family:Menlo,Consolas,monospace;">{str(c)[:120]}</p>'
-            )
-    if review:
-        rev = (review.get("verdict") or "?")
-        rc = "#2e7d32" if rev == "pass" else "#c62828"
-        out.append(
-            f'<p style="margin:6px 0 0; font-size:13px;">'
-            f'{_chip("REVIEW " + rev.upper(), rc)}</p>'
-        )
-    return "".join(out)
-
-
-def _html_fixes(fixes_data):
-    """Render auto-fix results as HTML."""
-    sections = fixes_data.get("sections", []) or []
-    if not sections:
-        return '<p style="margin:0; color:#9aa0b2; font-size:13px;">No fixes applied.</p>'
-    out = []
-    for s in sections:
-        status = s.get("status", "?")
-        if status == "dry-run":
-            out.append(
-                f'<p style="margin:0 0 8px; font-size:13px;">{_chip("DRY-RUN", "#9aa0b2")} '
-                f'<strong style="color:#1a1a2e; margin-left:6px;">{s["section"]}</strong> '
-                f'<span style="color:#9aa0b2; font-size:12px;">'
-                f'{s.get("findings_count", 0)} findings</span></p>'
-            )
-            continue
-        if status == "skipped":
-            out.append(
-                f'<p style="margin:0 0 8px; font-size:13px;">{_chip("SKIPPED", "#9aa0b2")} '
-                f'<strong style="color:#1a1a2e; margin-left:6px;">{s["section"]}</strong> '
-                f'<span style="color:#9aa0b2; font-size:12px;">{s.get("reason","")}</span></p>'
-            )
-            continue
-        jv = s.get("judge_verdict", "?")
-        jv_color = {"pass": "#2e7d32", "partial": "#e65100",
-                    "fail": "#c62828"}.get(jv, "#9aa0b2")
-        fixes = s.get("fixes_applied", []) or []
-        out.append(
-            f'<p style="margin:0 0 4px; font-size:13px;">'
-            f'<strong style="color:#1a1a2e;">{s["section"]}</strong> '
-            f'{len(fixes)} fixes {_chip("JUDGE " + jv.upper(), jv_color)}</p>'
-        )
-        for f in fixes:
-            st = f.get("status", "?")
-            st_color = {"fixed": "#2e7d32", "deferred": "#e65100",
-                        "failed": "#c62828"}.get(st, "#9aa0b2")
-            finding_txt = (f.get("finding", "") or "")[:120]
-            action_txt = (f.get("action", "") or "")[:80]
-            out.append(
-                f'<p style="margin:0 0 2px 14px; font-size:12px; '
-                f'border-left:2px solid {st_color}; padding-left:8px;">'
-                f'{_chip(st.upper(), st_color)} '
-                f'<span style="color:#3a3a4a;">{finding_txt}</span> '
-                f'<span style="color:#9aa0b2;">{action_txt}</span></p>'
-            )
-    return "".join(out)
-
-
 def _html_usage(usage_data):
-    """Render OpenCode Go usage report with mini-bars per utilization metric."""
+    """Render OpenCode Go usage report with higher contrast bars."""
     accounts = usage_data.get("accounts", []) or []
     out = []
     for acct in accounts:
         name = acct.get("name", "?")
         tier = acct.get("tier", "?")
-        extra = ""
+        extra_parts = [tier]
         if acct.get("payg_balance") is not None:
-            extra = f' · PAYG ${acct["payg_balance"]:.2f} remaining'
+            extra_parts.append(f'PAYG ${acct["payg_balance"]:.2f}')
+        extra = " · ".join(extra_parts)
         out.append(
-            f'<p style="margin:0 0 3px; font-size:13px;">'
+            f'<p style="margin:0 0 3px; font-size:13px; white-space:nowrap;">'
             f'<strong style="color:#1a1a2e;">{name}</strong> '
-            f'<span style="color:#9aa0b2; font-size:12px;">({tier}){extra}</span></p>'
+            f'<span style="color:#9aa0b2; font-size:12px;">{extra}</span></p>'
         )
         rows = (
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             'style="font-size:12px; border-collapse:collapse; margin-bottom:10px;">'
         )
         for label, key, color in [
-            ("Rolling 24h", "rolling_pct", "#37474f"),
-            ("Weekly", "weekly_pct", "#1565c0"),
-            ("Monthly", "monthly_pct", "#5b3cc4"),
+            ("Rolling 24h", "rolling_pct", "#1a1a2e"),
+            ("Weekly", "weekly_pct", "#0d47a1"),
+            ("Monthly", "monthly_pct", "#4a148c"),
         ]:
             pct = acct.get(key, 0)
             try:
                 pct = float(pct)
             except (TypeError, ValueError):
                 pct = 0.0
+            fill_color = "#c62828" if pct >= 90 else color
             rows += (
                 '<tr>'
-                f'<td width="22%" style="padding:3px 0; color:#7b7b8a; font-size:12px; '
-                f'vertical-align:middle;">{label}</td>'
-                f'<td width="68%" style="padding:3px 0; vertical-align:middle;">'
-                f'{_mini_bar(pct, color)}</td>'
-                f'<td align="right" width="10%" style="padding:3px 0; color:#2a2a36; '
-                f'font-weight:600; vertical-align:middle; white-space:nowrap;">'
-                f'{pct:.0f}%</td>'
+                f'<td width="72px" style="padding:3px 0; color:#7b7b8a; font-size:12px; '
+                f'vertical-align:middle; white-space:nowrap;">{label}</td>'
+                f'<td style="padding:3px 0; vertical-align:middle;">'
+                f'{_mini_bar(pct, fill_color)}</td>'
+                f'<td align="right" width="40px" style="padding:3px 0; color:#2a2a36; '
+                f'font-weight:600; vertical-align:middle; white-space:nowrap; '
+                f'font-variant-numeric:tabular-nums;">{pct:.0f}%</td>'
                 '</tr>'
             )
         rows += '</table>'
@@ -3490,6 +3169,107 @@ def _html_usage(usage_data):
     if not out:
         out.append('<p style="margin:0; color:#9aa0b2; font-size:13px;">No usage data.</p>')
     return "".join(out)
+
+
+def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str):
+    """Build the TL;DR LLM summary with deterministic fallback.
+    Returns HTML-safe paragraph."""
+    # Build facts dict
+    n_applied = sum(1 for s in applied.get("steps", []) if s.get("status") in ("ok", "bumped"))
+    n_failed_apply = sum(1 for s in applied.get("steps", []) if s.get("status") == "failed")
+    n_audit_drift = sum(1 for s in audit.get("sections", []) if s.get("verdict") in ("DRIFT", "ATTENTION"))
+    n_audit_failed = sum(1 for s in audit.get("sections", []) if s.get("verdict", "").endswith("-failed"))
+    n_ideas = queue.get("ideas", {}).get("total_outstanding", 0)
+    n_plans_approved = len(queue.get("plans", {}).get("approved", []))
+    n_fixes = sum(len(s.get("fixes_applied", [])) for s in fixes.get("sections", []))
+
+    updates = []
+    for s in applied.get("steps", []):
+        step = s.get("step", "")
+        status = s.get("status", "")
+        if step == "apt_upgrade" and s.get("upgraded_count", 0) > 0:
+            updates.append(f"apt: {s['upgraded_count']} packages upgraded")
+        elif step.startswith("auto_") and status == "ok":
+            pkg = step.replace("auto_", "")
+            updates.append(f"{pkg}: {s.get('pre_version','?')} -> {s.get('post_version','?')}")
+        elif step == "openwebui" and status == "bumped":
+            updates.append(f"open-webui: {s.get('current_tag')} -> {s.get('latest_tag')}")
+        elif step == "freshrss" and status == "bumped":
+            updates.append(f"freshrss: {s.get('current_tag')} -> {s.get('latest_tag')}")
+        elif status == "failed":
+            updates.append(f"{step} failed: {s.get('error','')[:80]}")
+
+    health_issues = []
+    if heartbeat.get("phase_failed"):
+        health_issues.append(f"heartbeat failed: {heartbeat.get('error','')[:80]}")
+    rb = heartbeat.get("reboot", {}) or {}
+    if rb.get("needed"):
+        health_issues.append("reboot needed")
+    llm = (heartbeat.get("llm_stack", {}) or {}).get("falling_back", False)
+    if llm:
+        health_issues.append("LLM on cloud fallback")
+
+    facts = {
+        "date": date_str,
+        "updates": updates,
+        "n_failed_apply": n_failed_apply,
+        "n_applied": n_applied,
+        "audit_drift": n_audit_drift,
+        "audit_failed": n_audit_failed,
+        "n_fixes": n_fixes,
+        "ideas": n_ideas,
+        "plans_approved": n_plans_approved,
+        "health_issues": health_issues,
+    }
+
+    # Try LLM summary
+    try:
+        prompt = (
+            f"You are the Homelab Steward, writing a nightly summary for {date_str}.\n\n"
+            f"Facts:\n{json.dumps(facts, indent=2)}\n\n"
+            "Write 3-5 short plain-English sentences. What actually changed tonight, "
+            "what is broken or needs Carter, what was auto-fixed. "
+            "No badge jargon (DRIFT, ATTENTION, artifact filenames). "
+            "No bullet soup. If nothing notable: one quiet-night sentence."
+        )
+        summary_text = _call_omp_p(prompt, model=STEWARD_MODEL, timeout=90)
+        summary_text = summary_text.strip()
+        if not summary_text:
+            raise ValueError("empty summary")
+    except Exception:
+        summary_text = _tldr_deterministic(facts)
+
+    # Escape and wrap in paragraph
+    safe = html.escape(summary_text)
+    # Convert double newlines to paragraph breaks
+    safe = re.sub(r'\n\n+', '</p><p>', safe)
+    return f'<p style="margin:0; color:#2a2a36; font-size:14px; line-height:1.55;">{safe}</p>'
+
+
+def _tldr_deterministic(facts):
+    """Deterministic fallback summary from facts dict."""
+    parts = []
+    if facts["updates"]:
+        parts.append(" ".join(facts["updates"][:3]))
+        if facts["n_failed_apply"]:
+            parts.append(f"{facts['n_failed_apply']} update failed.")
+    else:
+        parts.append("No package changes applied.")
+
+    if facts["health_issues"]:
+        parts.append("Health: " + "; ".join(facts["health_issues"][:3]))
+    else:
+        parts.append("Health checks passed.")
+
+    if facts["audit_drift"]:
+        parts.append(f"{facts['audit_drift']} audit items need attention.")
+    elif facts["audit_failed"]:
+        parts.append(f"{facts['audit_failed']} audit sections failed.")
+
+    if facts["n_fixes"]:
+        parts.append(f"{facts['n_fixes']} auto-fixes applied.")
+
+    return " ".join(parts)
 
 
 def phase_8_render_send(run_dir, setup_data, dry_run=False):
@@ -3505,35 +3285,8 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     troubleshoot = read_json(run_dir / "03-troubleshoot.json") if (run_dir / "03-troubleshoot.json").exists() else None
     heartbeat = read_json(run_dir / "04-heartbeat.json") if (run_dir / "04-heartbeat.json").exists() else {}
     queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
-    executor = read_json(run_dir / "06-executor.json") if (run_dir / "06-executor.json").exists() else {}
     fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
     audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {"sections": []}
-
-    # Load sparkline data from runs log (last 30 entries)
-    sparklines = []
-    if RUNS_LOG.exists():
-        try:
-            raw_lines = RUNS_LOG.read_text().strip().splitlines()
-            entries = [json.loads(l) for l in raw_lines[-30:] if l.strip()]
-            series = {
-                "duration_s": [],
-                "applied": [],
-                "sections_fired": [],
-                "judge_rejections": [],
-                "usage_accounts": [],
-            }
-            for e in entries:
-                for k in series:
-                    series[k].append(e.get(k, 0))
-            sparklines = [
-                ("duration", series["duration_s"]),
-                ("updates applied", series["applied"]),
-                ("audit sections", series["sections_fired"]),
-                ("judge rej", series["judge_rejections"]),
-                ("OCG accts", series["usage_accounts"]),
-            ]
-        except Exception:
-            pass
 
     # Phase failures anywhere in the pipeline (each artifact records phase_failed)
     phase_failures = []
@@ -3545,38 +3298,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
             pass
 
     # Build TLDR
-    n_applied = sum(1 for s in applied.get("steps", []) if s.get("status") in ("ok", "bumped"))
-    n_failed_apply = sum(1 for s in applied.get("steps", []) if s.get("status") == "failed")
-    n_audit_drift = sum(1 for s in audit.get("sections", []) if s.get("verdict") in ("DRIFT", "ATTENTION"))
-    n_audit_failed = sum(1 for s in audit.get("sections", []) if s.get("verdict", "").endswith("-failed"))
-    n_ideas = queue.get("ideas", {}).get("total_outstanding", 0)
-    n_plans_approved = len(queue.get("plans", {}).get("approved", []))
-    n_fixes = sum(len(s.get("fixes_applied", [])) for s in fixes.get("sections", []))
-    exec_status = "idle"
-    if executor.get("executed"):
-        exec_status = executor.get("status", "done")
-
-    tldr_parts = [f"{n_applied} updates applied"]
-    if n_failed_apply:
-        tldr_parts.append(f"{n_failed_apply} failed")
-    if n_audit_drift:
-        tldr_parts.append(f"{n_audit_drift} audit items need attention")
-    elif n_audit_failed:
-        tldr_parts.append(f"{n_audit_failed} audit sections FAILED")
-    else:
-        tldr_parts.append("audit clean")
-    tldr_parts.append(f"{n_ideas} ideas, {n_plans_approved} plans approved")
-    tldr_parts.append(f"executor: {exec_status}")
-    if n_fixes:
-        tldr_parts.append(f"{n_fixes} fixes applied")
-    tldr = " · ".join(tldr_parts) + "."
-    if phase_failures:
-        tldr += (
-            f'<br><span style="display:inline-block; margin-top:6px; padding:2px 8px; '
-            f'border-radius:6px; background-color:#c628281f; color:#c62828; '
-            f'font-size:12px; font-weight:700;">PHASE FAILURES: '
-            f'{", ".join(phase_failures)}</span>'
-        )
+    tldr = _build_tldr(applied, audit, queue, fixes, heartbeat, date_str)
 
     # Troubleshoot section
     troubleshoot_html = ""
@@ -3623,12 +3345,9 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         .replace("{{TLDR}}", tldr)
         .replace("{{UPDATES}}", _html_updates(applied))
         .replace("{{TROUBLESHOOT}}", troubleshoot_html)
-        .replace("{{VALIDATION}}", _html_validation(validation))
-        .replace("{{HEARTBEAT}}", _html_heartbeat(heartbeat, sparklines=sparklines))
-        .replace("{{AUDIT}}", _html_audit(audit))
+        .replace("{{HEALTH}}", _html_health(validation, heartbeat))
+        .replace("{{AUDIT}}", _html_audit(audit, fixes))
         .replace("{{QUEUE}}", _html_queue(queue))
-        .replace("{{EXECUTOR}}", _html_executor(executor))
-        .replace("{{FIXES}}", _html_fixes(fixes))
         .replace("{{USAGE}}", _html_usage(usage))
         .replace("{{FOOTER}}", footer)
     )
@@ -3638,14 +3357,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     print(f"[P8] rendered -> {email_path}")
 
     # Build subject
-    n_applied_count = n_applied
-    audit_summary = f"{n_audit_drift} drift" if n_audit_drift else (f"{n_audit_failed} failed" if n_audit_failed else "clean")
-    subject = (
-        f"Steward {date_str} — "
-        f"{n_applied_count} applied / audit: {audit_summary} / "
-        f"queue: {n_ideas} ideas, {n_plans_approved} plans awaiting approval / "
-        f"executor: {exec_status}"
-    )
+    subject = f"Homelab Steward {date_str}"
 
     if dry_run:
         print(f"  DRY RUN — would send: {subject}")
@@ -3679,7 +3391,6 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     validation = read_json(run_dir / "02-validation.json") if (run_dir / "02-validation.json").exists() else {}
     audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {}
     queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
-    executor = read_json(run_dir / "06-executor.json") if (run_dir / "06-executor.json").exists() else {}
     fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
 
 
@@ -3723,14 +3434,7 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
 
     lines.append("")
     lines.append("## Queue")
-    executor = read_json(run_dir / "06-executor.json") if (run_dir / "06-executor.json").exists() else {}
     lines.append(f"- Plans approved: {len(queue.get('plans', {}).get('approved', []))}")
-    lines.append("")
-    lines.append("## Executor")
-    if executor.get("executed"):
-        lines.append(f"- Plan: {executor.get('plan')} -> {executor.get('status')}")
-    else:
-        lines.append(f"- Idle ({executor.get('reason', 'no plan')})")
 
     md_content = "\n".join(lines) + "\n"
     (run_dir / "summary.md").write_text(md_content)
@@ -3748,7 +3452,6 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
         "duration_s": round(elapsed_s),
         "applied": sum(1 for s in applied.get("steps", []) if s.get("status") in ("ok", "bumped")),
         "usage_accounts": len(usage.get("accounts", [])),
-        "executor": executor.get("status") if executor.get("executed") else None,
         "sections_fired": n_sections_fired,
         "judge_rejections": n_judge_rejected,
     }
@@ -4084,17 +3787,6 @@ def main():
         print(f"[P5] FAILED: {e}")
         write_json(run_dir / "05-queue.json",
                    {"phase_failed": True, "error": str(e)})
-
-    # P6: executor
-    try:
-        if should_run("06-executor.json"):
-            phase_6_executor(run_dir, setup, dry_run=args.dry_run)
-        else:
-            print("[P6] skipped (resume)")
-    except Exception as e:
-        print(f"[P6] FAILED: {e}")
-        write_json(run_dir / "06-executor.json",
-                   {"executed": False, "phase_failed": True, "error": str(e)})
 
     # P7: audit
     try:

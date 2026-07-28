@@ -1,11 +1,12 @@
 [Unit]
-Description=Homelab steward — nightly orchestrator (updates, audit, work queue, executor)
+Description=Homelab steward — nightly orchestrator (updates, audit, work queue)
 Wants=network-online.target
 After=network-online.target
 OnFailure=homelab-steward-notify.service
 
 [Service]
 Type=oneshot
-Environment="PATH=/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="KUBECONFIG=/home/carter/.kube/config"
 ExecStart=/usr/bin/python3 /home/carter/scripts/steward_runner.py
 TimeoutStartSec=7200
