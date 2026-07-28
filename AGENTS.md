@@ -22,11 +22,11 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static IP `192.168.4.92` (k3s node IP; blog + delta_neutral ingress) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
+Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 512 GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static IP `192.168.4.92` (k3s node IP; blog + delta_neutral ingress) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
 
 ## Hardware
 
-**ThinkPad L14 Gen 3 (AMD)** — Ryzen 5 PRO 5675U, 16GB RAM, 500GB NVMe. Wired NIC `enp3s0f0` (primary), static IP `192.168.4.92` for k3s ingress. Full specs at [`~/notes/docs/homelab/hardware.md`](notes/docs/homelab/hardware.md).
+**ThinkPad L14 Gen 3 (AMD)** — Ryzen 5 PRO 5675U, 16GB RAM, 512 GB NVMe. Wired NIC `enp3s0f0` (primary), static IP `192.168.4.92` for k3s ingress. Full specs at [`~/notes/docs/homelab/hardware.md`](notes/docs/homelab/hardware.md).
 ## Repository Structure
 
 Home directory managed as a bare git repo for dotfiles. Key dirs:
