@@ -1740,8 +1740,297 @@ def _scan_md_files(directory, default_status="idea"):
     return results
 
 
-def phase_5_work_queue(run_dir):
-    """Phase 5: scan ideas/plans, consistency checks, pick executor candidate."""
+def _item_abs_path(item, kind):
+    """Resolve absolute path for a scanned idea/plan item (open dirs only)."""
+    base = IDEAS_DIR if kind == "idea" else PLANS_DIR
+    return base / item["file"]
+
+
+def _set_status_line(path, status_value):
+    """Rewrite **Status:** line (or insert after first heading). Returns new text."""
+    text = path.read_text()
+    if re.search(r"^\*\*Status:\*\*", text, re.MULTILINE):
+        return re.sub(
+            r"^\*\*Status:\*\*\s*.+$",
+            f"**Status:** {status_value}",
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    # Insert after first H1
+    m = re.search(r"^#\s+.+$", text, re.MULTILINE)
+    if m:
+        insert_at = m.end()
+        return text[:insert_at] + f"\n\n**Status:** {status_value}\n" + text[insert_at:].lstrip("\n")
+    return f"**Status:** {status_value}\n\n" + text
+
+
+def _apply_queue_status_update(update, dry_run=False):
+    """Apply one judge-confirmed status update. Returns result dict."""
+    kind = update.get("kind", "idea")
+    rel = update.get("file") or update.get("path") or ""
+    # Accept absolute or bare filename
+    path = Path(rel).expanduser() if rel.startswith("/") or rel.startswith("~") else None
+    if path is None:
+        base = IDEAS_DIR if kind == "idea" else PLANS_DIR
+        path = base / Path(rel).name
+    if not path.exists():
+        # Maybe already moved
+        done_path = (IDEAS_DIR if kind == "idea" else PLANS_DIR) / "done" / path.name
+        if done_path.exists():
+            return {"file": path.name, "kind": kind, "status": "already_done",
+                    "path": str(done_path)}
+        return {"file": path.name, "kind": kind, "status": "missing", "path": str(path)}
+
+    new_status = (update.get("new_status") or "").strip().lower()
+    reason = (update.get("reason") or "").strip()
+    move_to_done = bool(update.get("move_to_done")) or new_status == "done"
+
+    # Status line value — keep a short human note for done
+    if new_status == "done":
+        today = datetime.now().strftime("%Y-%m-%d")
+        status_value = f"DONE ({today})"
+        if reason:
+            status_value += f" — {reason[:120]}"
+    elif new_status in ("planned", "idea", "scrapped", "draft", "approved",
+                        "implementing"):
+        status_value = new_status
+        if reason and new_status == "scrapped":
+            status_value += f" — {reason[:120]}"
+    else:
+        return {"file": path.name, "kind": kind, "status": "rejected_status",
+                "new_status": new_status}
+
+    if dry_run:
+        return {
+            "file": path.name, "kind": kind, "status": "dry_run",
+            "would_set": status_value, "would_move": move_to_done and new_status == "done",
+            "path": str(path),
+        }
+
+    new_text = _set_status_line(path, status_value)
+    path.write_text(new_text)
+
+    final_path = path
+    if move_to_done and new_status == "done":
+        done_dir = (IDEAS_DIR if kind == "idea" else PLANS_DIR) / "done"
+        done_dir.mkdir(parents=True, exist_ok=True)
+        dest = done_dir / path.name
+        if dest.exists() and dest.resolve() != path.resolve():
+            # Prefer not to clobber; leave updated file in place
+            return {
+                "file": path.name, "kind": kind, "status": "updated_exists_in_done",
+                "path": str(path), "dest_exists": str(dest),
+            }
+        if dest.resolve() != path.resolve():
+            path.rename(dest)
+            final_path = dest
+
+    return {
+        "file": path.name, "kind": kind, "status": "updated",
+        "new_status": new_status, "path": str(final_path),
+        "moved_to_done": move_to_done and new_status == "done",
+        "reason": reason[:200],
+    }
+
+
+def _reconcile_queue_statuses(ideas_outstanding, plans_open, dry_run=False):
+    """Agent checks each open idea/plan; judge verifies; apply confirmed updates.
+
+    Returns {updates_proposed, updates_confirmed, applied, judge, error?}.
+    """
+    candidates = []
+    for item in ideas_outstanding:
+        p = _item_abs_path(item, "idea")
+        if p.exists():
+            candidates.append({
+                "kind": "idea",
+                "file": item["file"],
+                "path": str(p),
+                "status": item["status"],
+                "heading": item.get("heading", ""),
+                "summary": item.get("summary", ""),
+                "age_days": item.get("age_days"),
+            })
+    for item in plans_open:
+        p = _item_abs_path(item, "plan")
+        if p.exists():
+            candidates.append({
+                "kind": "plan",
+                "file": item["file"],
+                "path": str(p),
+                "status": item["status"],
+                "heading": item.get("heading", ""),
+                "summary": item.get("summary", ""),
+                "age_days": item.get("age_days"),
+            })
+
+    if not candidates:
+        return {"updates_proposed": [], "updates_confirmed": [], "applied": [],
+                "judge": {"verdict": "skip", "reason": "no open items"}}
+
+    # Include short file bodies so the agent can read intent without extra tools first
+    for c in candidates:
+        try:
+            body = Path(c["path"]).read_text()[:2500]
+        except OSError:
+            body = ""
+        c["body_preview"] = body
+
+    agent_prompt = f"""You are the Homelab Steward work-queue status agent.
+
+For each open idea/plan below, decide whether its **Status** is stale relative to
+reality on disk. Investigate with tools when needed (read files, list dirs, check
+AGENTS.md / ~/notes / git history). Only propose a status change when evidence is
+strong.
+
+Valid idea statuses: idea | planned | done | scrapped
+Valid plan statuses: draft | approved | implementing | done | scrapped
+
+Rules:
+- If the work described is clearly already implemented on the host, set new_status
+  to "done" and move_to_done=true.
+- If an idea is still raw thought with no implementation, leave it (omit from updates).
+- Do NOT mark something done just because the markdown body talks in past tense —
+  verify against the live filesystem / docs.
+- Do NOT invent new work. Status hygiene only.
+- Prefer fewer, high-confidence updates.
+
+CANDIDATES:
+{json.dumps(candidates, indent=2)}
+
+Return ONLY fenced JSON:
+```json
+{{
+  "updates": [
+    {{
+      "kind": "idea"|"plan",
+      "file": "filename.md",
+      "path": "/home/carter/ideas/filename.md",
+      "current_status": "planned",
+      "new_status": "done",
+      "move_to_done": true,
+      "reason": "short why",
+      "evidence": ["concrete evidence strings"]
+    }}
+  ],
+  "unchanged": [{{"file": "...", "reason": "still open because..."}}]
+}}
+```
+"""
+
+    print(f"  status agent: checking {len(candidates)} open item(s)")
+    try:
+        agent_raw = _call_omp_p(agent_prompt, model=STEWARD_MODEL, timeout=600, mode="json")
+        agent_packet = _extract_json(agent_raw, "queue-status-agent")
+    except Exception as e:
+        print(f"  status agent failed: {e}")
+        return {
+            "updates_proposed": [], "updates_confirmed": [], "applied": [],
+            "error": str(e), "judge": {"verdict": "agent_failed"},
+        }
+
+    proposed = agent_packet.get("updates") or []
+    if not isinstance(proposed, list):
+        proposed = []
+    # Keep only well-formed updates with a real status change
+    clean_proposed = []
+    for u in proposed:
+        if not isinstance(u, dict):
+            continue
+        if not u.get("file") and not u.get("path"):
+            continue
+        ns = (u.get("new_status") or "").strip().lower()
+        cs = (u.get("current_status") or "").strip().lower()
+        if ns and ns != cs:
+            clean_proposed.append(u)
+
+    if not clean_proposed:
+        print("  status agent: no status changes proposed")
+        return {
+            "updates_proposed": [], "updates_confirmed": [], "applied": [],
+            "unchanged": agent_packet.get("unchanged", []),
+            "judge": {"verdict": "nothing_to_do"},
+        }
+
+    judge_prompt = f"""You are a skeptical judge reviewing work-queue status changes
+proposed by another agent on Carter's homelab.
+
+For each proposed update, independently verify the evidence. Confirm only if you
+agree the item's status should change. Reject weak or wrong claims.
+
+PROPOSED UPDATES:
+{json.dumps(clean_proposed, indent=2)}
+
+Open candidates for context:
+{json.dumps([{k: c[k] for k in ('kind','file','path','status','heading')} for c in candidates], indent=2)}
+
+Return ONLY fenced JSON:
+```json
+{{
+  "verdict": "pass"|"partial"|"fail",
+  "confirmed": [
+    {{
+      "kind": "idea"|"plan",
+      "file": "filename.md",
+      "path": "...",
+      "current_status": "...",
+      "new_status": "done",
+      "move_to_done": true,
+      "reason": "..."
+    }}
+  ],
+  "rejected": [{{"file": "...", "reason": "why rejected"}}],
+  "summary": "one sentence"
+}}
+```
+"""
+
+    print(f"  status judge: reviewing {len(clean_proposed)} proposal(s)")
+    try:
+        judge_raw = _call_omp_p(judge_prompt, model=STEWARD_MODEL, timeout=600, mode="json")
+        judge_packet = _extract_json(judge_raw, "queue-status-judge")
+    except Exception as e:
+        print(f"  status judge failed: {e}")
+        return {
+            "updates_proposed": clean_proposed, "updates_confirmed": [], "applied": [],
+            "error": f"judge failed: {e}",
+            "judge": {"verdict": "judge_failed", "summary": str(e)},
+        }
+
+    confirmed = judge_packet.get("confirmed") or []
+    if not isinstance(confirmed, list):
+        confirmed = []
+
+    applied = []
+    for u in confirmed:
+        # Force kind/file from proposal when missing
+        if not u.get("kind") and u.get("file"):
+            for p in clean_proposed:
+                if p.get("file") == u.get("file"):
+                    u.setdefault("kind", p.get("kind", "idea"))
+                    u.setdefault("path", p.get("path"))
+                    break
+        result = _apply_queue_status_update(u, dry_run=dry_run)
+        applied.append(result)
+        print(f"    {result.get('kind')} {result.get('file')}: {result.get('status')}"
+              f" -> {result.get('new_status', result.get('would_set', ''))}")
+
+    return {
+        "updates_proposed": clean_proposed,
+        "updates_confirmed": confirmed,
+        "applied": applied,
+        "rejected": judge_packet.get("rejected", []),
+        "unchanged": agent_packet.get("unchanged", []),
+        "judge": {
+            "verdict": judge_packet.get("verdict", "unknown"),
+            "summary": judge_packet.get("summary", ""),
+        },
+    }
+
+
+def phase_5_work_queue(run_dir, dry_run=False):
+    """Phase 5: scan ideas/plans, reconcile stale statuses, consistency checks."""
     print("[P5] work queue scan")
 
     ideas = _scan_md_files(IDEAS_DIR, default_status="idea")
@@ -1751,15 +2040,47 @@ def phase_5_work_queue(run_dir):
     ideas_done = _scan_md_files(IDEAS_DIR / "done", default_status="done")
     plans_done = _scan_md_files(PLANS_DIR / "done", default_status="done")
 
-    # Buckets
+    # Buckets (pre-reconcile)
     ideas_outstanding = [i for i in ideas if i["status"] not in ("done", "scrapped")]
     plans_draft = [p for p in plans if p["status"] == "draft"]
     plans_approved = [p for p in plans if p["status"] == "approved"]
     plans_implementing = [p for p in plans if p["status"] == "implementing"]
+    plans_open = plans_draft + plans_approved + plans_implementing
+
+    # Agent + judge: mark completed ideas/plans done when evidence supports it
+    reconcile = {"updates_proposed": [], "updates_confirmed": [], "applied": [],
+                 "judge": {"verdict": "skipped"}}
+    if ideas_outstanding or plans_open:
+        if dry_run:
+            print("  DRY RUN — status reconcile will not mutate files")
+        try:
+            reconcile = _reconcile_queue_statuses(
+                ideas_outstanding, plans_open, dry_run=dry_run
+            )
+        except Exception as e:
+            print(f"  status reconcile failed: {e}")
+            reconcile = {
+                "updates_proposed": [], "updates_confirmed": [], "applied": [],
+                "error": str(e), "judge": {"verdict": "error"},
+            }
+
+        # Re-scan after mutations so the email reflects new reality
+        if any(a.get("status") in ("updated", "dry_run") for a in reconcile.get("applied", [])):
+            ideas = _scan_md_files(IDEAS_DIR, default_status="idea")
+            plans = _scan_md_files(PLANS_DIR, default_status="draft")
+            ideas_done = _scan_md_files(IDEAS_DIR / "done", default_status="done")
+            plans_done = _scan_md_files(PLANS_DIR / "done", default_status="done")
+            ideas_outstanding = [i for i in ideas if i["status"] not in ("done", "scrapped")]
+            plans_draft = [p for p in plans if p["status"] == "draft"]
+            plans_approved = [p for p in plans if p["status"] == "approved"]
+            plans_implementing = [p for p in plans if p["status"] == "implementing"]
+
     plans_done_this_week = [
         p for p in plans_done
         if (datetime.now() - datetime.fromisoformat(p["mtime"])).days <= 7
     ]
+    # Ideas moved to done today also surface under a lightweight note in inconsistencies? No —
+    # keep queue clean. Applied updates live in reconcile artifact field.
 
     # Consistency checks (linkage via a plan's **Idea:** backlink, not filename)
     inconsistencies = []
@@ -1778,12 +2099,16 @@ def phase_5_work_queue(run_dir):
         # Only flag plans that DECLARE an idea link; standalone plans are fine
         if plan.get("idea_link"):
             matching_idea = [i for i in ideas_done if i["file"] in plan["idea_link"]]
+            # Also accept idea still in open dir only if status already done (mid-move)
             if not matching_idea:
-                inconsistencies.append({
-                    "type": "plan_done_idea_not",
-                    "plan": plan["file"],
-                    "detail": f"Plan done but linked idea ({plan['idea_link']}) not in ideas/done/",
-                })
+                open_match = [i for i in ideas if i["file"] in plan["idea_link"]
+                              and i["status"] == "done"]
+                if not open_match:
+                    inconsistencies.append({
+                        "type": "plan_done_idea_not",
+                        "plan": plan["file"],
+                        "detail": f"Plan done but linked idea ({plan['idea_link']}) not in ideas/done/",
+                    })
 
     for plan in plans_implementing:
         lock_path = PLANS_DIR / ".steward-lock"
@@ -1808,6 +2133,7 @@ def phase_5_work_queue(run_dir):
             "done_this_week": plans_done_this_week,
         },
         "inconsistencies": inconsistencies,
+        "status_reconcile": reconcile,
     }
     write_json(run_dir / "05-queue.json", data)
     print(f"[P5] done -> {run_dir / '05-queue.json'}")
@@ -1815,6 +2141,10 @@ def phase_5_work_queue(run_dir):
     print(f"  plans: {len(plans_draft)} draft, {len(plans_approved)} approved, "
           f"{len(plans_implementing)} implementing, {len(plans_done_this_week)} done this week")
     print(f"  inconsistencies: {len(inconsistencies)}")
+    applied_n = len([a for a in reconcile.get("applied", [])
+                     if a.get("status") in ("updated", "dry_run")])
+    print(f"  status reconcile: judge={reconcile.get('judge', {}).get('verdict')} "
+          f"applied={applied_n}")
     return data
 
 
@@ -3055,120 +3385,235 @@ def _html_health(validation_data, hb_data):
     return "".join(out) if out else '<p style="margin:0; color:#888; font-size:13px;">All health checks passed.</p>'
 
 
+def _is_noop_fix(fix):
+    """True when a 'fix' is just confirming something already clean/current."""
+    blob = f"{fix.get('action', '')} {fix.get('finding', '')} {fix.get('status', '')}"
+    return bool(re.search(
+        r"(?i)no action required|no action needed|no fix needed|already clean|"
+        r"nothing to|verified:.*no action|already current|is current|"
+        r"confirmed current|no discrepancies|require no action|nothing to fix|"
+        r"no changes? (needed|required)|all (findings? )?(current|clean|fine)",
+        blob,
+    ))
+
+
+def _real_fixes(section_fixes):
+    """Meaningful fixes only — drop no-op 'already current' rows."""
+    return [
+        f for f in (section_fixes or [])
+        if f.get("status") in ("fixed", "failed", "deferred") and not _is_noop_fix(f)
+    ]
+
+
+def _section_findings_text(sec, date_str):
+    """Flatten confirmed findings for summarizer input (digest-stale filtered)."""
+    confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", []) or []
+    claims = []
+    for f in confirmed:
+        claim = (f.get("claim") or f.get("evidence") or "").strip()
+        if not claim:
+            continue
+        if sec.get("name") == "digest-quality":
+            dates_in_claim = re.findall(r"20\d{2}-\d{2}-\d{2}", claim)
+            if dates_in_claim:
+                has_recent = any(
+                    (datetime.strptime(d, "%Y-%m-%d")
+                     >= datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=2))
+                    for d in dates_in_claim
+                )
+                if not has_recent:
+                    continue
+        claims.append(claim[:240])
+    return claims
+
+
+def _deterministic_section_summary(name, findings, fixes, fix_summary=""):
+    """Fallback one-liner when the LLM summary call fails."""
+    n_fixed = sum(1 for f in fixes if f.get("status") == "fixed")
+    n_def = sum(1 for f in fixes if f.get("status") == "deferred")
+    n_fail = sum(1 for f in fixes if f.get("status") == "failed")
+    parts = []
+    if fix_summary:
+        parts.append(fix_summary.strip().rstrip(".") + ".")
+    elif findings:
+        parts.append(f"{len(findings)} finding(s) reviewed.")
+    else:
+        parts.append("Section reviewed.")
+    act = []
+    if n_fixed:
+        act.append(f"{n_fixed} fixed")
+    if n_def:
+        act.append(f"{n_def} deferred")
+    if n_fail:
+        act.append(f"{n_fail} failed")
+    if act:
+        parts.append("Actions: " + ", ".join(act) + ".")
+    elif not fixes:
+        parts.append("No automated fixes applied.")
+    return " ".join(parts)
+
+
+def _summarize_audit_sections(section_payloads):
+    """One LLM call → {section_name: summary_text}. Falls back per-section."""
+    if not section_payloads:
+        return {}
+
+    compact = []
+    for p in section_payloads:
+        compact.append({
+            "name": p["name"],
+            "verdict": p["verdict"],
+            "findings": p["findings"][:12],
+            "fixes": [
+                {
+                    "status": f.get("status"),
+                    "finding": (f.get("finding") or "")[:160],
+                    "action": (f.get("action") or "")[:160],
+                }
+                for f in p["fixes"][:12]
+            ],
+            "fix_summary": (p.get("fix_summary") or "")[:300],
+            "judge_summary": (p.get("judge_summary") or "")[:300],
+        })
+
+    prompt = (
+        "You summarize Homelab Steward audit+fix results for a nightly email.\n\n"
+        "For EACH section below, write 1-3 plain-English sentences a human can skim.\n"
+        "Cover: what was wrong (if anything), what got fixed, what remains / was deferred.\n"
+        "No badge jargon (DRIFT/ATTENTION). No bullet lists. No filenames unless load-bearing.\n"
+        "If findings are all 'already current' noise and fixes are empty, say versions/state "
+        "were verified current.\n\n"
+        f"SECTIONS:\n{json.dumps(compact, indent=2)}\n\n"
+        "Return ONLY fenced JSON:\n"
+        '```json\n'
+        '{"summaries": {"section-name": "one to three sentences", "...": "..."}}\n'
+        "```"
+    )
+
+    try:
+        raw = _call_omp_p(prompt, model=STEWARD_MODEL, timeout=120, mode="json")
+        packet = _extract_json(raw, "audit-section-summaries")
+        summaries = packet.get("summaries") or {}
+        if not isinstance(summaries, dict):
+            raise ValueError("summaries not a dict")
+        # Normalize keys to bare section names
+        out = {}
+        for p in section_payloads:
+            name = p["name"]
+            text = summaries.get(name) or summaries.get(name.replace("_", " "))
+            if isinstance(text, str) and text.strip():
+                out[name] = text.strip()
+        if out:
+            return out
+    except Exception as e:
+        print(f"  audit section summary LLM failed: {e}")
+
+    return {
+        p["name"]: _deterministic_section_summary(
+            p["name"], p["findings"], p["fixes"], p.get("fix_summary", "")
+        )
+        for p in section_payloads
+    }
+
+
 def _html_audit(audit_data, fixes_data=None):
-    """Render audit sections merged with fixes. No cached-PASS, no struck-through."""
+    """Render audit sections as LLM summaries with 'N fixes' badges."""
     sections = audit_data.get("sections", []) or []
     if not sections:
         return '<p style="margin:0; color:#9aa0b2; font-size:13px;">No audit results.</p>'
 
-    # Index fixes by section name
+    # Index fixes + fix_summary by section name
     fixes_by_section = {}
+    fix_meta = {}
     if fixes_data:
         for s in fixes_data.get("sections", []):
-            fixes_by_section[s.get("section", "")] = s.get("fixes_applied", [])
+            sname = s.get("section", "")
+            fixes_by_section[sname] = s.get("fixes_applied", [])
+            fix_meta[sname] = {
+                "fix_summary": s.get("fix_summary", ""),
+                "judge_summary": s.get("judge_summary", ""),
+                "judge_verdict": s.get("judge_verdict", ""),
+            }
 
-    # Date string for digest stale filter
     date_str = datetime.now().strftime("%Y-%m-%d")
 
-    out = []
+    # Build payloads for non-clean sections
+    payloads = []
     for sec in sections:
         verdict = sec.get("verdict", "UNKNOWN")
-
-        # Skip clean verdicts
         if verdict in ("PASS", "cached-PASS"):
             continue
+        name = sec.get("name", "unknown") or "unknown"
+        findings = _section_findings_text(sec, date_str)
+        fixes = _real_fixes(fixes_by_section.get(name, []))
+        meta = fix_meta.get(name, {})
+        payloads.append({
+            "name": name,
+            "verdict": verdict,
+            "findings": findings,
+            "fixes": fixes,
+            "fix_summary": meta.get("fix_summary", ""),
+            "judge_summary": meta.get("judge_summary", ""),
+            "error": (sec.get("error") or sec.get("worker_error") or "").strip(),
+            "sec": sec,
+        })
 
-        name = (sec.get("name", "unknown") or "unknown").replace("_", " ")
+    if not payloads:
+        return '<p style="margin:0; color:#888; font-size:13px;">All audit sections clear.</p>'
 
-        # Map verdict to chip. Errors go on their own full-width row — never
-        # appended into the right-aligned chip cell (mobile clients then crush
-        # the name column to 1-char width → vertical letter stacking).
-        err_row = ""
-        if verdict == "DRIFT":
-            chip = _chip("Needs attention", "#c62828")
-        elif verdict == "ATTENTION":
-            chip = _chip("Needs attention", "#e65100")
-        elif verdict in ("collector-failed", "worker-failed"):
+    summaries = _summarize_audit_sections(payloads)
+
+    out = []
+    for p in payloads:
+        name = p["name"]
+        display = name.replace("_", " ")
+        verdict = p["verdict"]
+        fixes = p["fixes"]
+        n_fixes = len(fixes)
+        n_failed = sum(1 for f in fixes if f.get("status") == "failed")
+        n_deferred = sum(1 for f in fixes if f.get("status") == "deferred")
+
+        # Badge: always "N fixes" (user-facing). Color by outcome.
+        if verdict in ("collector-failed", "worker-failed"):
             chip = _chip("Check failed", "#c62828")
-            err = (sec.get("error") or sec.get("worker_error") or "").strip()
-            if err:
-                # Prefer a short reason; strip the raw-text dump prefix when present.
-                m = re.match(r"Could not extract JSON from ([^.]+)\.\s*Raw text.*", err, re.S)
-                if m:
-                    short = f"Could not extract JSON from {m.group(1)} (agent returned prose)"
-                else:
-                    short = err.split("\n", 1)[0][:160]
-                err_row = (
-                    f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; color:#c62828; '
-                    f'font-size:12px;">{html.escape(short)}</td></tr>'
-                )
-        elif verdict == "UNVERIFIABLE":
-            chip = _chip("Unverified", "#9aa0b2")
+        elif n_failed:
+            chip = _chip(f"{n_fixes} fixes", "#c62828")
+        elif n_deferred and not any(f.get("status") == "fixed" for f in fixes):
+            chip = _chip(f"{n_fixes} fixes", "#e65100")
+        elif n_fixes:
+            chip = _chip(f"{n_fixes} fixes", "#2e7d32")
         else:
-            chip = _chip(verdict, "#9aa0b2")
+            # Reviewed / noise-only — still report 0 fixes, not "Needs attention"
+            chip = _chip("0 fixes", "#9aa0b2")
 
         out.append(
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             'style="font-size:13px; border-collapse:collapse; margin:0 0 12px;">'
-            f'<tr><td style="padding:3px 0; color:#1a1a2e; font-weight:700;">{html.escape(name)}</td>'
+            f'<tr><td style="padding:3px 0; color:#1a1a2e; font-weight:700;">{html.escape(display)}</td>'
             f'<td align="right" style="padding:3px 0; white-space:nowrap;">{chip}</td></tr>'
         )
-        if err_row:
-            out.append(err_row)
 
-        # Confirmed findings (max 5), filter stale digest dates
-        confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", []) or []
-        filtered = []
-        for f in confirmed:
-            claim = (f.get("claim") or f.get("evidence") or "").strip()
-            # Digest stale filter: drop findings whose only date is >2d before run
-            if sec.get("name") == "digest-quality":
-                dates_in_claim = re.findall(r"20\d{2}-\d{2}-\d{2}", claim)
-                if dates_in_claim:
-                    # Keep if any date is within 2 days of run
-                    has_recent = any(
-                        (datetime.strptime(d, "%Y-%m-%d") >= datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=2))
-                        for d in dates_in_claim
-                    )
-                    if not has_recent:
-                        continue
-            filtered.append(claim[:180])
-
-        for claim in filtered[:5]:
+        if verdict in ("collector-failed", "worker-failed") and p["error"]:
+            err = p["error"]
+            m = re.match(r"Could not extract JSON from ([^.]+)\.\s*Raw text.*", err, re.S)
+            if m:
+                short = f"Could not extract JSON from {m.group(1)} (agent returned prose)"
+            else:
+                short = err.split("\n", 1)[0][:160]
             out.append(
-                f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; color:#3a3a4a; '
-                f'font-size:12px;">{html.escape(claim)}</td></tr>'
-            )
-        if len(filtered) > 5:
-            out.append(
-                f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; color:#9aa0b2; '
-                f'font-size:11px;">+ {len(filtered) - 5} more</td></tr>'
+                f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; color:#c62828; '
+                f'font-size:12px;">{html.escape(short)}</td></tr>'
             )
 
-        # Merge fixes for this section
-        section_fixes = fixes_by_section.get(sec.get("name", ""), [])
-        real_fixes = [
-            f for f in section_fixes
-            if f.get("status") in ("fixed", "failed", "deferred")
-            and not re.search(r"(?i)no action required|no action needed|no fix needed|already clean|nothing to|verified:.*no action",
-                              f.get("action", "") + " " + f.get("finding", ""))
-        ]
-        if real_fixes:
-            for fix in real_fixes[:3]:
-                st = fix.get("status", "?")
-                st_color = {"fixed": "#2e7d32", "deferred": "#e65100", "failed": "#c62828"}.get(st, "#9aa0b2")
-                finding_txt = html.escape((fix.get("finding", "") or "")[:120])
-                out.append(
-                    f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; font-size:12px;'
-                    f'>'
-                    f'{_chip(st.upper(), st_color)} '
-                    f'<span style="color:#3a3a4a;">{finding_txt}</span></td></tr>'
-                )
-
+        summary = summaries.get(name) or _deterministic_section_summary(
+            name, p["findings"], fixes, p.get("fix_summary", "")
+        )
+        out.append(
+            f'<tr><td colspan="2" style="padding:4px 4px 2px 0; color:#3a3a4a; '
+            f'font-size:12px; line-height:1.45;">{html.escape(summary)}</td></tr>'
+        )
         out.append('</table>')
 
-    if not out:
-        return '<p style="margin:0; color:#888; font-size:13px;">All audit sections clear.</p>'
     return "".join(out)
 
 
@@ -3177,6 +3622,7 @@ def _html_queue(queue_data):
     ideas = queue_data.get("ideas", {}) or {}
     plans = queue_data.get("plans", {}) or {}
     inconsistencies = queue_data.get("inconsistencies", []) or []
+    reconcile = queue_data.get("status_reconcile", {}) or {}
     out = []
 
     # Ideas
@@ -3186,7 +3632,7 @@ def _html_queue(queue_data):
         idea_rows = []
         for idea in outstanding[:10]:
             age = idea.get("age_days", "?")
-            heading = idea.get("heading", "")[:80]
+            heading = idea.get("heading", "") or idea.get("file", "")
             idea_rows.append((f'{age}d', heading))
         out.append(_kv_rows(idea_rows))
     else:
@@ -3204,10 +3650,27 @@ def _html_queue(queue_data):
         plan_rows = []
         for label, items, color in non_empty:
             for item in items[:5]:
-                detail = item.get("heading", item.get("file", ""))[:80]
+                detail = item.get("heading", item.get("file", "")) or ""
                 plan_rows.append((_chip(label, color), detail))
         out.append(_sub_header("Plans"))
         out.append(_kv_rows(plan_rows))
+
+    # Status reconciles applied this run
+    applied = [
+        a for a in (reconcile.get("applied") or [])
+        if a.get("status") in ("updated", "dry_run")
+    ]
+    if applied:
+        out.append(_sub_header(f'Status updates ({len(applied)})'))
+        rows = []
+        for a in applied[:8]:
+            label = a.get("new_status") or a.get("would_set") or a.get("status")
+            detail = a.get("file", "?")
+            reason = a.get("reason") or ""
+            if reason:
+                detail = f"{detail} — {reason[:100]}"
+            rows.append((_chip(str(label), "#2e7d32"), detail))
+        out.append(_kv_rows(rows))
 
     # Inconsistencies
     if inconsistencies:
@@ -3884,7 +4347,7 @@ def main():
     # P5: work queue
     try:
         if should_run("05-queue.json"):
-            phase_5_work_queue(run_dir)
+            phase_5_work_queue(run_dir, dry_run=args.dry_run)
         else:
             print("[P5] skipped (resume)")
     except Exception as e:
@@ -3904,7 +4367,10 @@ def main():
                    {"sections": [], "phase_failed": True, "error": str(e)})
     # P7b: auto-fix
     try:
-        phase_7b_fix(run_dir, dry_run=args.dry_run)
+        if should_run("07b-fixes.json"):
+            phase_7b_fix(run_dir, dry_run=args.dry_run)
+        else:
+            print("[P7b] skipped (resume)")
     except Exception as e:
         print(f"[P7b] FAILED: {e}")
         write_json(run_dir / "07b-fixes.json",
