@@ -54,9 +54,8 @@ SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL_REASONING = "deepseek-v4-flash"               # faster API-based model for primary use
-MODEL_REASONING_FALLBACK = "qwen-3.6-35b-q5"     # local LLM fallback when API is unavailable
-MODEL_FAST = "qwen-3.5-4b-q8"                     # smaller local model for light tasks
+MODEL_REASONING = "qwen-3.6-35b-q5"                 # local Qwen on gaming rig for primary use
+MODEL_REASONING_FALLBACK = "deepseek-v4-flash"         # API-based fallback when GPU/LLM is unavailable
 DEFAULT_TIMEOUT = 900
 RESEARCH_TIMEOUT = 1800
 FETCH_TIMEOUT = 900
@@ -933,7 +932,7 @@ def _refetch_article_date(url: str, title: str) -> str | None:
         "Extract ONLY the publication date from the page. Output the JSON."
     )
     try:
-        raw = _call_omp_p(prompt, model=MODEL_FAST, timeout=600,
+        raw = _call_omp_p(prompt, model=MODEL_REASONING, timeout=600,
                          append_system=system)
         result = _extract_json(raw, f"date-refetch:{title[:40]}")
         dc = (result.get("date_confirmed") or "").strip()
