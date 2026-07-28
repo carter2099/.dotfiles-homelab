@@ -46,6 +46,7 @@ targets:
     excludes:
       - sessions-automated
       - sessions
+      - tools
       - "*.db-wal"
       - "*.db-shm"
       - ".omp-web-test-auth-*.db*"
