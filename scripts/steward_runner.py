@@ -254,8 +254,18 @@ def _date_context():
     )
 
 
-def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
-    """Call omp -p (headless text mode). Returns stdout. Retries on transient API errors."""
+def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None, mode="text"):
+    """Call omp -p (headless). Returns assistant text. Retries on transient API errors.
+
+    mode="text": plain -p stdout (final assistant message only). Fine for free-form
+    summaries.
+    mode="json": --mode json NDJSON, with assistant text accumulated across ALL turns.
+    Required when the caller will _extract_json — advisor loops often end on a prose
+    ack while the real ```json packet was emitted on an earlier turn. Plain -p only
+    surfaces the final message, which is how audit workers were failing.
+    """
+    if mode not in ("text", "json"):
+        raise ValueError(f"unsupported omp mode: {mode!r}")
     cmd = [
         str(HOME / ".bun/bin/omp"), "-p", "--model", model,
         "--api-key", "proxy",
@@ -263,6 +273,10 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
         "--allow-home",
         "--config", str(HOME / ".omp/agent/headless-override.yml"),
     ]
+    if mode == "json":
+        cmd.extend(["--mode", "json"])
+    if append_system:
+        cmd.extend(["--append-system-prompt", append_system])
     cmd.append(prompt)
     # Retry transient errors: 401 (stale key / account rotation), 429 (rate limit),
     # 5xx (server error), and subprocess timeout.
@@ -287,6 +301,11 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None):
             raise RuntimeError(f"omp -p timed out after {max_retries} attempts (timeout={timeout}s)")
 
         if result.returncode == 0 or result.stdout.strip():
+            if mode == "json":
+                text, _stats = extract_from_ndjson(result.stdout)
+                # Defensive: if NDJSON shape drifts, fall back to raw stdout so
+                # _extract_json can still hunt fences.
+                return text if text.strip() else result.stdout
             return result.stdout
 
         # Check if this is a recoverable error (401, 429, 5xx)
@@ -1099,7 +1118,7 @@ Return a fenced ```json packet:
     agent_output = ""
     agent_packet = {}
     try:
-        agent_output = _call_omp_p(troubleshoot_prompt, timeout=600)
+        agent_output = _call_omp_p(troubleshoot_prompt, timeout=600, mode="json")
         agent_packet = _extract_json(agent_output, "troubleshoot packet")
     except Exception as e:
         agent_packet = {"status": "agent-failed", "diagnosis": str(e),
@@ -2355,6 +2374,9 @@ Rules:
 - Return a fenced ```json packet:
 {{"verdict": "PASS"|"DRIFT"|"ATTENTION"|"UNVERIFIABLE",
  "findings": [{{"claim": "...", "evidence": "...", "fix": "..."}}]}}
+- CRITICAL: every assistant turn that yields must include that fenced ```json block.
+  If the advisor requests changes, emit a REVISED ```json packet — never a prose-only
+  ack like "you're right" / "updated above". The JSON is the only durable output.
 
 {_date_context()}
 
@@ -2362,7 +2384,7 @@ COLLECTED EVIDENCE:
 {json.dumps(evidence, indent=2, default=str)[:8000]}
 """
     try:
-        worker_text = _call_omp_p(worker_prompt, timeout=section["timeout"])
+        worker_text = _call_omp_p(worker_prompt, timeout=section["timeout"], mode="json")
         worker_packet = _extract_json(worker_text, f"worker-{section_name}")
     except Exception as e:
         return {
@@ -2390,9 +2412,11 @@ WORKER VERDICT + FINDINGS:
 Return a fenced ```json packet:
 {{"confirmed": [{{"claim": "...", "evidence": "..."}}],
  "rejected": [{{"claim": "...", "reason": "..."}}]}}
+- CRITICAL: every yielding turn must include the fenced ```json block. If the advisor
+  requests changes, emit a REVISED ```json packet — never a prose-only ack.
 """
     try:
-        judge_text = _call_omp_p(judge_prompt, timeout=section["timeout"])
+        judge_text = _call_omp_p(judge_prompt, timeout=section["timeout"], mode="json")
         judge_packet = _extract_json(judge_text, f"judge-{section_name}")
     except Exception as e:
         judge_packet = {
@@ -2676,8 +2700,9 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
         f'"summary": "one sentence"}}\n'
         f'```'
     )
+    fix_output = ""
     try:
-        fix_output = _call_omp_p(fix_prompt, timeout=600)
+        fix_output = _call_omp_p(fix_prompt, timeout=600, mode="json")
         fix_packet = _extract_json(fix_output, f"fix-{section_name}")
     except Exception as e:
         # Fallback: try to parse markdown table if JSON extraction failed
@@ -2700,7 +2725,7 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
         f'```'
     )
     try:
-        judge_output = _call_omp_p(judge_prompt, timeout=600)
+        judge_output = _call_omp_p(judge_prompt, timeout=600, mode="json")
         judge_packet = _extract_json(judge_output, f"judge-fix-{section_name}")
     except Exception as e:
         # Sometimes the judge returns plain text instead of JSON.
@@ -3055,16 +3080,28 @@ def _html_audit(audit_data, fixes_data=None):
 
         name = (sec.get("name", "unknown") or "unknown").replace("_", " ")
 
-        # Map verdict to chip
+        # Map verdict to chip. Errors go on their own full-width row — never
+        # appended into the right-aligned chip cell (mobile clients then crush
+        # the name column to 1-char width → vertical letter stacking).
+        err_row = ""
         if verdict == "DRIFT":
             chip = _chip("Needs attention", "#c62828")
         elif verdict == "ATTENTION":
             chip = _chip("Needs attention", "#e65100")
         elif verdict in ("collector-failed", "worker-failed"):
             chip = _chip("Check failed", "#c62828")
-            err = sec.get("error", sec.get("worker_error", ""))
+            err = (sec.get("error") or sec.get("worker_error") or "").strip()
             if err:
-                chip += f'<span style="color:#c62828; font-size:12px; margin-left:6px;">{err[:200]}</span>'
+                # Prefer a short reason; strip the raw-text dump prefix when present.
+                m = re.match(r"Could not extract JSON from ([^.]+)\.\s*Raw text.*", err, re.S)
+                if m:
+                    short = f"Could not extract JSON from {m.group(1)} (agent returned prose)"
+                else:
+                    short = err.split("\n", 1)[0][:160]
+                err_row = (
+                    f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; color:#c62828; '
+                    f'font-size:12px;">{html.escape(short)}</td></tr>'
+                )
         elif verdict == "UNVERIFIABLE":
             chip = _chip("Unverified", "#9aa0b2")
         else:
@@ -3073,9 +3110,11 @@ def _html_audit(audit_data, fixes_data=None):
         out.append(
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             'style="font-size:13px; border-collapse:collapse; margin:0 0 12px;">'
-            f'<tr><td style="padding:3px 0; color:#1a1a2e; font-weight:700;">{name}</td>'
+            f'<tr><td style="padding:3px 0; color:#1a1a2e; font-weight:700;">{html.escape(name)}</td>'
             f'<td align="right" style="padding:3px 0; white-space:nowrap;">{chip}</td></tr>'
         )
+        if err_row:
+            out.append(err_row)
 
         # Confirmed findings (max 5), filter stale digest dates
         confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", []) or []
@@ -3097,12 +3136,12 @@ def _html_audit(audit_data, fixes_data=None):
 
         for claim in filtered[:5]:
             out.append(
-                f'<tr><td colspan="2" style="padding:2px 0 2px 14px; color:#3a3a4a; '
-                f'font-size:12px; border-left:2px solid #ececf2;">{claim}</td></tr>'
+                f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; color:#3a3a4a; '
+                f'font-size:12px;">{html.escape(claim)}</td></tr>'
             )
         if len(filtered) > 5:
             out.append(
-                f'<tr><td colspan="2" style="padding:2px 0 2px 14px; color:#9aa0b2; '
+                f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; color:#9aa0b2; '
                 f'font-size:11px;">+ {len(filtered) - 5} more</td></tr>'
             )
 
@@ -3118,10 +3157,10 @@ def _html_audit(audit_data, fixes_data=None):
             for fix in real_fixes[:3]:
                 st = fix.get("status", "?")
                 st_color = {"fixed": "#2e7d32", "deferred": "#e65100", "failed": "#c62828"}.get(st, "#9aa0b2")
-                finding_txt = (fix.get("finding", "") or "")[:120]
+                finding_txt = html.escape((fix.get("finding", "") or "")[:120])
                 out.append(
-                    f'<tr><td colspan="2" style="padding:2px 0 2px 14px; font-size:12px; '
-                    f'border-left:2px solid {st_color}; padding-left:8px;">'
+                    f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; font-size:12px;'
+                    f'>'
                     f'{_chip(st.upper(), st_color)} '
                     f'<span style="color:#3a3a4a;">{finding_txt}</span></td></tr>'
                 )
@@ -3703,7 +3742,7 @@ Rules:
    "skipped": [{{"path": "...", "reason": "..."}}]}}"""
 
     print("  spawning dotfiles commit agent …")
-    agent_raw = _call_omp_p(agent_prompt, model=SMALL_MODEL, timeout=600)
+    agent_raw = _call_omp_p(agent_prompt, model=SMALL_MODEL, timeout=600, mode="json")
     try:
         agent_json = _extract_json(agent_raw, "dotfiles agent")
     except ValueError as e:
@@ -3740,7 +3779,7 @@ Return fenced JSON:
 {{"verdict": "confirmed"|"rejected", "issues": ["..."], "confirmed_commits": [...]}}"""
 
     print("  spawning judge review …")
-    judge_raw = _call_omp_p(judge_prompt, model=SMALL_MODEL, timeout=300)
+    judge_raw = _call_omp_p(judge_prompt, model=SMALL_MODEL, timeout=300, mode="json")
     try:
         judge_json = _extract_json(judge_raw, "dotfiles judge")
     except ValueError as e:
