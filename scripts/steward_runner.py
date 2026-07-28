@@ -3302,11 +3302,12 @@ def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str):
     except Exception:
         summary_text = _tldr_deterministic(facts)
 
-    # Escape and wrap in paragraph
+    # Escape - template already wraps in <p>, so use <br> for line breaks
     safe = html.escape(summary_text)
-    # Convert double newlines to paragraph breaks
-    safe = re.sub(r'\n\n+', '</p><p>', safe)
-    return f'<p style="margin:0; color:#2a2a36; font-size:14px; line-height:1.55;">{safe}</p>'
+    # Convert double newlines to <br><br>
+    safe = re.sub(r'\n\n+', '<br><br>', safe)
+    safe = safe.replace('\n', ' ')
+    return safe
 
 
 def _tldr_deterministic(facts):
