@@ -109,6 +109,8 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
 - **OpenCode Go Proxy** (localhost:8082) → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
+- **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
+- **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 ## Email Digests
 
 Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) via 9-phase Python workflow. Full architecture at [`~/notes/docs/homelab/email-digests.md`](notes/docs/homelab/email-digests.md).
