@@ -3175,7 +3175,6 @@ def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str):
     """Build the TL;DR LLM summary with deterministic fallback.
     Returns HTML-safe paragraph."""
     # Build facts dict
-    n_applied = sum(1 for s in applied.get("steps", []) if s.get("status") in ("ok", "bumped"))
     n_failed_apply = sum(1 for s in applied.get("steps", []) if s.get("status") == "failed")
     n_audit_drift = sum(1 for s in audit.get("sections", []) if s.get("verdict") in ("DRIFT", "ATTENTION"))
     n_audit_failed = sum(1 for s in audit.get("sections", []) if s.get("verdict", "").endswith("-failed"))
@@ -3183,6 +3182,7 @@ def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str):
     n_plans_approved = len(queue.get("plans", {}).get("approved", []))
     n_fixes = sum(len(s.get("fixes_applied", [])) for s in fixes.get("sections", []))
 
+    # Count real changes only (bumped steps or upgrades with count>0)
     updates = []
     for s in applied.get("steps", []):
         step = s.get("step", "")
@@ -3213,7 +3213,7 @@ def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str):
         "date": date_str,
         "updates": updates,
         "n_failed_apply": n_failed_apply,
-        "n_applied": n_applied,
+        "n_applied": len(updates),
         "audit_drift": n_audit_drift,
         "audit_failed": n_audit_failed,
         "n_fixes": n_fixes,
