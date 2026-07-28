@@ -2249,6 +2249,7 @@ AUDIT_SECTIONS = [
             "neovim, omp (npm), docker images (searxng, freshrss, traefik, open-webui), "
             "llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
             "Report per component: current / latest / status (current | behind | behind-major). "
+            "Do NOT exec into containers — the docker images evidence IS the current version. "
             "Checking upstream (GitHub releases, npm registry, go.dev) is allowed; mutations are not."
         ),
     },
