@@ -3,5 +3,6 @@ Description=Hyperliquid Ruby SDK autonomous maintenance run via omp (GLM 5.2)
 
 [Service]
 Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/bin:/bin
 ExecStart=/home/carter/scripts/run_hyperliquid_sdk.sh
 TimeoutStartSec=3600
