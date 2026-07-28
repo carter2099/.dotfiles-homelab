@@ -1560,6 +1560,28 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
     fresh_candidates = _dedup_by_url(fresh_candidates)
     ongoing_candidates = _dedup_by_url(ongoing_candidates)
 
+    # ── Cross-topic dedup: read other digests' curated outputs for today ──
+    # Prevents the same story appearing in multiple digests on the same day.
+    other_topic_urls: set[str] = set()
+    today_str = run_dir.name
+    try:
+        current_cat = topic["category"]
+        for cat, cfg in TOPICS.items():
+            if cfg["category"] == current_cat:
+                continue
+            other_run_dir = DIGESTS_DIR / cfg["category"] / today_str
+            other_curated = other_run_dir / "06-curated.json"
+            if other_curated.exists():
+                other_data = json.loads(other_curated.read_text())
+                for story in other_data.get("fresh", []) + other_data.get("ongoing", []):
+                    url = story.get("url", "").strip().rstrip("/").lower()
+                    if url:
+                        other_topic_urls.add(url)
+        if other_topic_urls:
+            print(f"  [6a cross-dedup] {len(other_topic_urls)} URLs already in other digests today")
+    except Exception as e:
+        print(f"  [6a cross-dedup warn] {e}")
+
     # Pre-rank by importance + recency, cap to top 15 for the LLM
     importance_order = {"high": 0, "medium": 1, "low": 2}
     ranked_candidates = sorted(
@@ -1638,6 +1660,17 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
           "reason": d.get("judge_issues", [])} for d in dropped],
         indent=2)
 
+    other_topic_block = ""
+    if other_topic_urls:
+        blocked = json.dumps(sorted(list(other_topic_urls)), indent=2)
+        other_topic_block = (
+            f"## Already Covered in Other Digests Today\n\n"
+            f"The following stories were already covered in another digest today. "
+            f"Do NOT select them for this digest — each story should only appear "
+            f"in one digest per day.\n"
+            f"{blocked}\n\n"
+        )
+
     user = (
         f"## Fresh/Ongoing Candidates (for the Fresh section)\n\n{candidates_json}\n\n"
         f"## Stories In Flight — Active Candidates (for Ongoing section)\n\n{sif_json}\n\n"
@@ -1645,6 +1678,7 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
         f"## Importance Rubric\n\n{rubric}\n\n"
         f"## Dropped Summaries (for reference, do not include)\n\n"
         f"{dropped_json}\n\n"
+        f"{other_topic_block}"
         "Curate the final selection. Fresh candidates go in the Fresh section. "
         "Stories-in-flight go in the Ongoing section. "
         "Update the tracker with new developments and new entries. "
@@ -1661,6 +1695,16 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
         updated_sif = result.get("stories_in_flight", stories_in_flight)
         gaps = result.get("gaps", "")
         intro = result.get("intro_hook", "")
+
+        # Auto-activate: if the LLM updated a cooled story's last_updated to today
+        # without changing status back to active, fix it here
+        auto_activated = 0
+        for s in updated_sif.get("stories", []):
+            if s.get("status") == "cooled" and s.get("last_updated") == today_str:
+                s["status"] = "active"
+                auto_activated += 1
+        if auto_activated:
+            print(f"  [6c activation] Re-activated {auto_activated} cooled stories updated today")
 
         # Validate URLs against source data — build the set of known URLs
         known_urls: set[str] = set()
@@ -1690,6 +1734,14 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
                 validated_ongoing.append(o)
             else:
                 print(f"  [6c validate] Dropped hallucinated URL from ongoing: {o.get('title', '?')[:60]}")
+
+        # Drop any stories whose URLs are already in another digest today
+        if other_topic_urls:
+            validated_fresh = [f for f in validated_fresh
+                               if f.get("url", "").strip().rstrip("/").lower() not in other_topic_urls]
+            validated_ongoing = [o for o in validated_ongoing
+                                 if o.get("url", "").strip().rstrip("/").lower() not in other_topic_urls]
+            print(f"  [6c cross-dedup] {len(validated_fresh)} fresh, {len(validated_ongoing)} ongoing after dedup")
 
         fresh = validated_fresh or fresh  # fall back to unvalidated if all were dropped
         ongoing = validated_ongoing or ongoing
