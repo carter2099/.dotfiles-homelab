@@ -2575,11 +2575,18 @@ def _badge(verdict):
 
 
 def _parse_fix_markdown_table(raw_text, section_name, original_error):
-    """Fallback: try to extract fixes from a markdown table when JSON parsing fails.
-    Handles the common pattern where the agent returns a table like:
-    | Finding | Action | Status |
-    |---|---|---|
-    | **thing** | did X | ✅ fixed |"""
+    """Fallback: try to extract fixes from plain text when JSON parsing fails.
+    Handles markdown tables OR simple 'PASS' / 'all current' text."""
+    text_lower = raw_text.lower()
+
+    # If the agent just said everything is fine / PASS
+    if re.search(r"(?i)(all|everything).*(pass|current|fine|ok|clean|up to date|no finding|nothing to)", text_lower):
+        return {
+            "fixes_applied": [],
+            "summary": "All findings already current or clean — no fixes needed.",
+            "status": "no_action",
+        }
+
     lines = raw_text.strip().splitlines()
     # Find a markdown table (line with |---| pattern)
     table_start = None
@@ -2701,6 +2708,7 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
             "no flags", "acknowledged", "all.*ok", "looks good",
             "no issues", "verified", "pass", "confirmed", "correctly",
             "applied correctly", "fixes confirmed", "no action needed",
+            "^correct", "no drift", "no changes needed", "all current",
         ]
         if any(re.search(p, judge_output, re.IGNORECASE) for p in positive_indicators):
             judge_packet = {
