@@ -39,16 +39,16 @@ for topic in "${TOPICS[@]}"; do
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) START $topic" | tee -a "$LOGFILE"
     START_TS=$(date +%s)
 
-    if timeout 7200 python3 "$HOME/scripts/digest_runner.py" "$topic"; then
+    if timeout 14400 python3 "$HOME/scripts/digest_runner.py" "$topic"; then
         END_TS=$(date +%s)
         DURATION=$((END_TS - START_TS))
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DONE  $topic duration=${DURATION}s" | tee -a "$LOGFILE"
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DONE  $topic duration=${DURATION}s" | tee -a "$LOGFILE" || true
     else
         RC=$?
         END_TS=$(date +%s)
         DURATION=$((END_TS - START_TS))
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FAIL  $topic (exit=$RC) duration=${DURATION}s — continuing" | tee -a "$LOGFILE"
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FAIL  $topic (exit=$RC) duration=${DURATION}s — continuing" | tee -a "$LOGFILE" || true
     fi
 done
 
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ALL DONE" | tee -a "$LOGFILE"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ALL DONE" | tee -a "$LOGFILE" || true

@@ -897,6 +897,22 @@ def _extract_json(text: str, label: str = "output") -> Any:
     raise ValueError(f"Could not extract JSON from {label}. Raw text (first 500 chars):\n{text[:500]}")
 
 
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for dedup comparison: strip protocol, www prefix, trailing slash, lowercase."""
+    u = url.strip().lower()
+    # Strip protocol
+    for prefix in ("https://", "http://"):
+        if u.startswith(prefix):
+            u = u[len(prefix):]
+            break
+    # Strip www. prefix
+    if u.startswith("www."):
+        u = u[4:]
+    # Strip trailing slash
+    u = u.rstrip("/")
+    return u
+
+
 def _refetch_article_date(url: str, title: str) -> str | None:
     """Re-fetch an article to independently extract its publication date.
 
@@ -1155,7 +1171,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     dedup_rejected: list[dict] = []
 
     for f in all_approved:
-        url = f.get("url", "").strip().rstrip("/").lower()
+        url = _normalize_url(f.get("url", ""))
         if url and url in seen_urls:
             dedup_rejected.append({"finding": f, "reason": "cross_batch_duplicate"})
         else:
@@ -1551,7 +1567,7 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
         seen: set[str] = set()
         result: list[dict] = []
         for item in items:
-            url = item.get("url", "").strip().rstrip("/").lower()
+            url = _normalize_url(item.get("url", ""))
             if url and url not in seen:
                 seen.add(url)
                 result.append(item)
@@ -1574,7 +1590,7 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
             if other_curated.exists():
                 other_data = json.loads(other_curated.read_text())
                 for story in other_data.get("fresh", []) + other_data.get("ongoing", []):
-                    url = story.get("url", "").strip().rstrip("/").lower()
+                    url = _normalize_url(story.get("url", ""))
                     if url:
                         other_topic_urls.add(url)
         if other_topic_urls:
@@ -1616,8 +1632,8 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
         "(e.g. diplomatic spat → military confrontation → escalate to high; resolved "
         "story → cool to low). You may set status to 'cooled' if a story has definitively "
         "resolved (e.g. bill signed, trial verdict, product shipped). Otherwise leave "
-        "status as-is — the system auto-cools stories with no updates after 3 days and "
-        "auto-prunes cooled stories after 5 days total.\n"
+        "status as-is — the system auto-cools stories with no updates after 5 days and "
+        "auto-prunes cooled stories after 7 days total.\n"
         "3. ADD NEW TRACKER ENTRIES: Major announcements, unfolding events, controversies, "
         "multi-day stories should be added to the tracker. Each needs: title, url, first_seen "
         "(today), last_updated (today), latest_dev (1-sentence summary of what's new), "
@@ -1709,18 +1725,18 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
         # Validate URLs against source data — build the set of known URLs
         known_urls: set[str] = set()
         for c in ranked_candidates:
-            u = c.get("url", "").strip().rstrip("/").lower()
+            u = _normalize_url(c.get("url", ""))
             if u:
                 known_urls.add(u)
         for s in sif_candidates:
-            u = s.get("url", "").strip().rstrip("/").lower()
+            u = _normalize_url(s.get("url", ""))
             if u:
                 known_urls.add(u)
 
         # Check fresh stories' URLs
         validated_fresh = []
         for f in fresh:
-            url = f.get("url", "").strip().rstrip("/").lower()
+            url = _normalize_url(f.get("url", ""))
             if url in known_urls or not url:
                 validated_fresh.append(f)
             else:
@@ -1729,7 +1745,7 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
         # Check ongoing stories' URLs
         validated_ongoing = []
         for o in ongoing:
-            url = o.get("url", "").strip().rstrip("/").lower()
+            url = _normalize_url(o.get("url", ""))
             if url in known_urls or not url:
                 validated_ongoing.append(o)
             else:
@@ -1738,13 +1754,22 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
         # Drop any stories whose URLs are already in another digest today
         if other_topic_urls:
             validated_fresh = [f for f in validated_fresh
-                               if f.get("url", "").strip().rstrip("/").lower() not in other_topic_urls]
+                               if _normalize_url(f.get("url", "")) not in other_topic_urls]
             validated_ongoing = [o for o in validated_ongoing
-                                 if o.get("url", "").strip().rstrip("/").lower() not in other_topic_urls]
+                                 if _normalize_url(o.get("url", "")) not in other_topic_urls]
             print(f"  [6c cross-dedup] {len(validated_fresh)} fresh, {len(validated_ongoing)} ongoing after dedup")
 
-        fresh = validated_fresh or fresh  # fall back to unvalidated if all were dropped
-        ongoing = validated_ongoing or ongoing
+        # Apply URL validation results (with fallback to original if all hallucinated)
+        fresh = validated_fresh if validated_fresh else fresh
+        ongoing = validated_ongoing if validated_ongoing else ongoing
+
+        # Cross-topic dedup: applied AFTER validation fallback so duplicates are never restored
+        if other_topic_urls:
+            fresh = [f for f in fresh
+                     if _normalize_url(f.get("url", "")) not in other_topic_urls]
+            ongoing = [o for o in ongoing
+                       if _normalize_url(o.get("url", "")) not in other_topic_urls]
+            print(f"  [6c cross-dedup final] {len(fresh)} fresh, {len(ongoing)} ongoing after dedup")
 
         elapsed = time.time() - t0
         print(f"  [done] curate — {len(fresh)} fresh, {len(ongoing)} ongoing ({elapsed:.0f}s)")
