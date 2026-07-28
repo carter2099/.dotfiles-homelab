@@ -3123,7 +3123,7 @@ def _html_audit(audit_data, fixes_data=None):
                     f'<tr><td colspan="2" style="padding:2px 0 2px 14px; font-size:12px; '
                     f'border-left:2px solid {st_color}; padding-left:8px;">'
                     f'{_chip(st.upper(), st_color)} '
-                    f'<span style="color:#3a3a4a;">{finding_txt}</span></tr>'
+                    f'<span style="color:#3a3a4a;">{finding_txt}</span></td></tr>'
                 )
 
         out.append('</table>')
