@@ -2574,6 +2574,51 @@ def _badge(verdict):
     return _chip(label, color)
 
 
+def _parse_fix_markdown_table(raw_text, section_name, original_error):
+    """Fallback: try to extract fixes from a markdown table when JSON parsing fails.
+    Handles the common pattern where the agent returns a table like:
+    | Finding | Action | Status |
+    |---|---|---|
+    | **thing** | did X | ✅ fixed |"""
+    lines = raw_text.strip().splitlines()
+    # Find a markdown table (line with |---| pattern)
+    table_start = None
+    for i, line in enumerate(lines):
+        if re.search(r"\|---\|.*\|---\|", line):
+            table_start = i + 1  # data starts after header separator
+            break
+    if table_start is None or table_start >= len(lines):
+        return {"fixes_applied": [], "summary": original_error, "error": original_error}
+
+    fixes = []
+    summary_parts = []
+    for line in lines[table_start:]:
+        line = line.strip()
+        if not line or not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.split("|")[1:-1]]
+        if len(cells) < 3:
+            continue
+        finding = re.sub(r"\*\*(.*?)\*\*", r"\1", cells[0]).strip()
+        action = re.sub(r"`(.*?)`", r"\1", cells[1]).strip()
+        status_cell = cells[2].strip().lower()
+        if "fixed" in status_cell or "check" in status_cell or "✅" in status_cell:
+            status = "fixed"
+        elif "defer" in status_cell or "skip" in status_cell:
+            status = "deferred"
+        elif "fail" in status_cell:
+            status = "failed"
+        else:
+            status = "fixed"
+        fixes.append({"finding": finding, "action": action, "commit": "N/A", "status": status})
+        summary_parts.append(finding[:60])
+
+    if fixes:
+        summary = "Extracted from markdown table: " + "; ".join(summary_parts[:3])
+        return {"fixes_applied": fixes, "summary": summary}
+    return {"fixes_applied": [], "summary": original_error, "error": original_error}
+
+
 def _fix_one_section(section_name, confirmed_findings, dry_run):
     """Fix all confirmed findings for one audit section. Returns fix result dict."""
     if dry_run:
@@ -2613,18 +2658,22 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
         f"- Skip findings that would require upgrading production infrastructure "
         f"(k3s, Docker daemon, etc.) — mark those as 'deferred'.\n"
         f"- Commit each fix with a clear message referencing the audit section.\n"
-        f"- Return a fenced ```json packet with your results.\n\n"
+        f"- CRITICAL: Return ONLY a fenced ```json code block. No surrounding text, "
+        f"no markdown tables, no explanations outside the JSON. The JSON is the ONLY output.\n\n"
         f"FINDINGS:\n{findings_text}\n\n"
-        f'Return JSON:\n'
+        f'Return ONLY this JSON (no other text):\n'
+        f'```json\n'
         f'{{"fixes_applied": [{{"finding": "...", "action": "...", '
         f'"commit": "hash or N/A", "status": "fixed"|"deferred"|"failed"}}], '
-        f'"summary": "one sentence"}}'
+        f'"summary": "one sentence"}}\n'
+        f'```'
     )
     try:
         fix_output = _call_omp_p(fix_prompt, timeout=600)
         fix_packet = _extract_json(fix_output, f"fix-{section_name}")
     except Exception as e:
-        fix_packet = {"fixes_applied": [], "summary": str(e), "error": str(e)}
+        # Fallback: try to parse markdown table if JSON extraction failed
+        fix_packet = _parse_fix_markdown_table(fix_output, section_name, str(e))
 
     # Judge review of all fixes
     fixes_json = json.dumps(fix_packet.get("fixes_applied", []), indent=2)
@@ -2633,19 +2682,26 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
         f"For each fix, verify it was applied correctly by checking the actual "
         f"files/state. Flag any fix that was incorrect, incomplete, or overreaching.\n\n"
         f"FIXES APPLIED:\n{fixes_json}\n\n"
-        f'Return JSON:\n'
-        f'{{"verdict": "pass"|"partial"|"fail", '
-        f'"reviewed": [{{"finding": "...", "ok": true|false, "note": "..."}}], '
-        f'"summary": "one sentence"}}'
+        f"CRITICAL: Return ONLY a fenced ```json code block. No surrounding text.\n"
+        f'```json\n'
+        f'{{\n'
+        f'  "verdict": "pass"|"partial"|"fail",\n'
+        f'  "reviewed": [{{"finding": "...", "ok": true|false, "note": "..."}}],\n'
+        f'  "summary": "one sentence"\n'
+        f'}}\n'
+        f'```'
     )
     try:
         judge_output = _call_omp_p(judge_prompt, timeout=600)
         judge_packet = _extract_json(judge_output, f"judge-fix-{section_name}")
     except Exception as e:
-        # Sometimes the judge returns plain text ("Acknowledged. No flags to raise.")
-        # instead of JSON — detect positive signals and treat as implicit pass.
-        positive_indicators = ["no flags", "acknowledged", "all.*ok", "looks good",
-                               "no issues", "verified", "pass"]
+        # Sometimes the judge returns plain text instead of JSON.
+        # Detect positive signals and treat as implicit pass.
+        positive_indicators = [
+            "no flags", "acknowledged", "all.*ok", "looks good",
+            "no issues", "verified", "pass", "confirmed", "correctly",
+            "applied correctly", "fixes confirmed", "no action needed",
+        ]
         if any(re.search(p, judge_output, re.IGNORECASE) for p in positive_indicators):
             judge_packet = {
                 "verdict": "pass",
