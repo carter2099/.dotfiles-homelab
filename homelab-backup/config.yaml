@@ -45,6 +45,9 @@ targets:
     source: /home/carter/.omp/agent
     excludes:
       - sessions-automated
+      - sessions
+      - "*.db-wal"
+      - "*.db-shm"
       - ".omp-web-test-auth-*.db*"
 
   - name: freshrss-db
