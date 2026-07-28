@@ -1,6 +1,6 @@
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.10.2
+    image: ghcr.io/open-webui/open-webui:0.11.0
     container_name: open-webui
     restart: unless-stopped
     # Loopback-only: reachable solely via the CF tunnel (cloudflared hits localhost), never the LAN.

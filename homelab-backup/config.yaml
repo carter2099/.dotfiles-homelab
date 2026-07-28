@@ -44,6 +44,7 @@ targets:
     type: directory
     source: /home/carter/.omp/agent
     excludes:
+      - sessions-automated
       - ".omp-web-test-auth-*.db*"
 
   - name: freshrss-db
