@@ -8,7 +8,7 @@ ExecStart=/home/carter/.local/bin/dependabot-webhook
 EnvironmentFile=/home/carter/.config/dependabot-webhook/env
 Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/bin:/bin
 Restart=on-failure
-RestartSec=5s
+RestartSec=15s
 
 [Install]
 WantedBy=default.target
