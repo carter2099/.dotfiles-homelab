@@ -4,5 +4,5 @@
 # interactive toggles advisor via /advisor on/off in config.yml;
 # enable: true to force advisor on for headless runs
 advisor:
-  enabled: false
+  enabled: true
   syncBacklog: off
