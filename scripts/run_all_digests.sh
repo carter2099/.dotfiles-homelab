@@ -12,10 +12,16 @@ export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 export HOME="/home/carter"
 LOGFILE="$HOME/digests/.digests.log"
 
-# ── Signal trap: log cleanly on termination ──
+# ── Signal trap: log cleanly on termination with current topic ──
+_CURRENT_TOPIC_FILE="$HOME/digests/.current-topic"
 _cleanup() {
     local rc=$?
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) SCRIPT TERMINATED (exit=$rc) — incomplete run" | tee -a "$LOGFILE" 2>/dev/null || true
+    local topic="(unknown)"
+    if [ -f "$_CURRENT_TOPIC_FILE" ]; then
+        topic=$(cat "$_CURRENT_TOPIC_FILE" 2>/dev/null || echo "(unknown)")
+        rm -f "$_CURRENT_TOPIC_FILE"
+    fi
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) SCRIPT TERMINATED (exit=$rc) topic=$topic — incomplete run" | tee -a "$LOGFILE" 2>/dev/null || true
     exit $rc
 }
 trap _cleanup TERM INT HUP
@@ -25,10 +31,13 @@ trap _cleanup TERM INT HUP
 if [ -f "$LOGFILE" ]; then
     LAST_LINE=$(tail -1 "$LOGFILE" 2>/dev/null || true)
     if [ -n "$LAST_LINE" ] && echo "$LAST_LINE" | grep -qv "ALL DONE"; then
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run incomplete (last: $LAST_LINE)"
-        # If world was the last started topic and never finished, flag it
-        if echo "$LAST_LINE" | grep -q "START world"; then
-            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING world-digest was interrupted — topics before it completed"
+        # Extract topic from SCRIPT TERMINATED line if available
+        local topic_hint=""
+        if echo "$LAST_LINE" | grep -q "topic="; then
+            topic_hint=$(echo "$LAST_LINE" | sed 's/.*topic=\([^ ]*\).*/\1/')
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run interrupted during topic=$topic_hint (last: $LAST_LINE)" | tee -a "$LOGFILE"
+        else
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run incomplete (last: $LAST_LINE)" | tee -a "$LOGFILE"
         fi
     fi
 fi
@@ -36,6 +45,7 @@ fi
 TOPICS=("ai-tech" "agentic-platform" "ai-hardware" "gaming" "world")
 
 for topic in "${TOPICS[@]}"; do
+    echo "$topic" > "$_CURRENT_TOPIC_FILE"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) START $topic" | tee -a "$LOGFILE"
     START_TS=$(date +%s)
 
@@ -49,6 +59,7 @@ for topic in "${TOPICS[@]}"; do
         DURATION=$((END_TS - START_TS))
         echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FAIL  $topic (exit=$RC) duration=${DURATION}s — continuing" | tee -a "$LOGFILE" || true
     fi
+    rm -f "$_CURRENT_TOPIC_FILE"
 done
 
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ALL DONE" | tee -a "$LOGFILE" || true

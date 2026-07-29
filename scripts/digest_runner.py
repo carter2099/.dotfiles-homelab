@@ -149,11 +149,20 @@ def _detect_model_provider(model_id: str) -> dict:
             _MODEL_PROVIDER_CACHE[model_id] = info
             return info
 
-    # Fallback: assume local-llm (served by gaming rig via llm-proxy)
-    fb = {
-        "provider": "local-llm",
-        "chat_url": "http://localhost:8081/v1/chat/completions",
-    }
+    # Fallback: assume opencode-go (primary API provider for digest models)
+    # Previously fell back to local-llm, which caused silent routing of API models
+    # (deepseek-v4-flash, mimo-v2.5) to the gaming rig's llama.cpp — resulting in
+    # command failures when the local provider didn't have those models.
+    if providers and "opencode-go" in providers:
+        fb = {
+            "provider": "opencode-go",
+            "chat_url": f"{providers['opencode-go']['baseUrl']}/chat/completions",
+        }
+    else:
+        fb = {
+            "provider": "opencode-go",
+            "chat_url": "http://localhost:8082/v1/chat/completions",
+        }
     _MODEL_PROVIDER_CACHE[model_id] = fb
     return fb
 
@@ -892,6 +901,21 @@ def _extract_json(text: str, label: str = "output") -> Any:
             return json.loads(text_stripped)
         except json.JSONDecodeError:
             pass
+
+    # Fallback: scan for JSON after common introductory keywords
+    # Catches cases where the model writes prose before the JSON payload
+    for keyword in ["Results:", "Output:", "Findings:", "JSON:", "Here is", "Here's", "following"]:
+        idx = text.find(keyword)
+        if idx >= 0:
+            # Try to find JSON after the keyword line
+            remainder = text[idx + len(keyword):]
+            for pattern in [r"\{.*\}", r"\[.*\]"]:
+                m = re.search(pattern, remainder, re.DOTALL)
+                if m:
+                    try:
+                        return json.loads(m.group(0))
+                    except json.JSONDecodeError:
+                        continue
 
     raise ValueError(f"Could not extract JSON from {label}. Raw text (first 500 chars):\n{text[:500]}")
 
@@ -1873,50 +1897,48 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     else:
         print(f"  [WARN] 06-curated.json missing — curated_copy.json not written")
 
-    # Idempotent resume (prod only — test runs always send)
-    if not TEST_MODE:
-        archive_path = digest_dir / f"{today_str}.html"
-        if archive_path.exists():
-            print(f"  [skip] Phase 8 output exists: {archive_path}")
-            return
+    # Archive path: prod → digest_dir with date, test → run_dir
+    archive_path = digest_dir / f"{today_str}.html" if not TEST_MODE else run_dir / "digest.html"
 
+    # Always write temp HTML first (needed for email body and archive)
     temp_html = digest_dir / ".daily_digest.html"
     temp_html.write_text(html)
 
-    recipients = topic["recipients"].copy()
-
-    if topic["category"] == "agentic-platform":
-        smtp_config = Path.home() / "scripts" / ".smtp_config"
-        if smtp_config.exists():
-            for line in smtp_config.read_text().splitlines():
-                if line.startswith("AGENTIC_CC="):
-                    cc = line.split("=", 1)[1].strip()
-                    if cc:
-                        recipients.append(cc)
-                    break
-
-    prefix = "[TEST] " if TEST_MODE else ""
-    subject = f"{prefix}{topic['title']} — {today_str}"
-    print(f"  [run ] send_email to {recipients}")
-    try:
-        subprocess.run(
-            ["python3", str(SEND_DIGEST_SCRIPT),
-             "--subject", subject,
-             "--body-file", str(temp_html),
-             "--to"] + recipients,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        print(f"  [done] send_email — sent to {', '.join(recipients)}")
-    except subprocess.CalledProcessError as e:
-        print(f"  [FAIL] send_email — {e.stderr[:300]}")
-
-    # Archive: test mode → run_dir, prod → digest_dir with date
-    if TEST_MODE:
-        archive_path = run_dir / "digest.html"
+    # Only send email if archive doesn't already exist (idempotent resume guard)
+    archive_already_exists = archive_path.exists()
+    if archive_already_exists and not TEST_MODE:
+        print(f"  [skip] send_email — archive already exists: {archive_path}")
     else:
-        archive_path = digest_dir / f"{today_str}.html"
+        recipients = topic["recipients"].copy()
+
+        if topic["category"] == "agentic-platform":
+            smtp_config = Path.home() / "scripts" / ".smtp_config"
+            if smtp_config.exists():
+                for line in smtp_config.read_text().splitlines():
+                    if line.startswith("AGENTIC_CC="):
+                        cc = line.split("=", 1)[1].strip()
+                        if cc:
+                            recipients.append(cc)
+                        break
+
+        prefix = "[TEST] " if TEST_MODE else ""
+        subject = f"{prefix}{topic['title']} — {today_str}"
+        print(f"  [run ] send_email to {recipients}")
+        try:
+            subprocess.run(
+                ["python3", str(SEND_DIGEST_SCRIPT),
+                 "--subject", subject,
+                 "--body-file", str(temp_html),
+                 "--to"] + recipients,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print(f"  [done] send_email — sent to {', '.join(recipients)}")
+        except subprocess.CalledProcessError as e:
+            print(f"  [FAIL] send_email — {e.stderr[:300]}")
+
+    # Always archive the latest HTML (overwrite stale/empty archive from prior run)
     shutil.copy(temp_html, archive_path)
     print(f"  [done] archived HTML → {archive_path}")
 
