@@ -46,7 +46,7 @@ ENDPOINTS = {
     "llm-proxy": "http://127.0.0.1:8081/health",
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
-STEWARD_MODEL = "opencode-go/deepseek-v4-flash"
+STEWARD_MODEL = "opencode-go/deepseek-v4-pro"
 STEWARD_PATH = "/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Resolve fnm default node bin for PATH (if available)
@@ -1921,7 +1921,7 @@ Return ONLY fenced JSON:
 
     print(f"  status agent: checking {len(candidates)} open item(s)")
     try:
-        agent_raw = _call_omp_p(agent_prompt, model=STEWARD_MODEL, timeout=600, mode="json")
+        agent_raw = _call_omp_p(agent_prompt, model=SMALL_MODEL, timeout=600, mode="json")
         agent_packet = _extract_json(agent_raw, "queue-status-agent")
     except Exception as e:
         print(f"  status agent failed: {e}")
@@ -1988,7 +1988,7 @@ Return ONLY fenced JSON:
 
     print(f"  status judge: reviewing {len(clean_proposed)} proposal(s)")
     try:
-        judge_raw = _call_omp_p(judge_prompt, model=STEWARD_MODEL, timeout=600, mode="json")
+        judge_raw = _call_omp_p(judge_prompt, model=SMALL_MODEL, timeout=600, mode="json")
         judge_packet = _extract_json(judge_raw, "queue-status-judge")
     except Exception as e:
         print(f"  status judge failed: {e}")
@@ -2714,7 +2714,7 @@ COLLECTED EVIDENCE:
 {json.dumps(evidence, indent=2, default=str)[:8000]}
 """
     try:
-        worker_text = _call_omp_p(worker_prompt, timeout=section["timeout"], mode="json")
+        worker_text = _call_omp_p(worker_prompt, model=SMALL_MODEL, timeout=section["timeout"], mode="json")
         worker_packet = _extract_json(worker_text, f"worker-{section_name}")
     except Exception as e:
         return {
@@ -3032,7 +3032,7 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
     )
     fix_output = ""
     try:
-        fix_output = _call_omp_p(fix_prompt, timeout=600, mode="json")
+        fix_output = _call_omp_p(fix_prompt, model=SMALL_MODEL, timeout=600, mode="json")
         fix_packet = _extract_json(fix_output, f"fix-{section_name}")
     except Exception as e:
         # Fallback: try to parse markdown table if JSON extraction failed
@@ -3055,7 +3055,7 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
         f'```'
     )
     try:
-        judge_output = _call_omp_p(judge_prompt, timeout=600, mode="json")
+        judge_output = _call_omp_p(judge_prompt, model=SMALL_MODEL, timeout=600, mode="json")
         judge_packet = _extract_json(judge_output, f"judge-fix-{section_name}")
     except Exception as e:
         # Sometimes the judge returns plain text instead of JSON.
@@ -3491,7 +3491,7 @@ def _summarize_audit_sections(section_payloads):
     )
 
     try:
-        raw = _call_omp_p(prompt, model=STEWARD_MODEL, timeout=120, mode="json")
+        raw = _call_omp_p(prompt, model=SMALL_MODEL, timeout=120, mode="json")
         packet = _extract_json(raw, "audit-section-summaries")
         summaries = packet.get("summaries") or {}
         if not isinstance(summaries, dict):
@@ -3798,7 +3798,7 @@ def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str):
             "No badge jargon (DRIFT, ATTENTION, artifact filenames). "
             "No bullet soup. If nothing notable: one quiet-night sentence."
         )
-        summary_text = _call_omp_p(prompt, model=STEWARD_MODEL, timeout=90)
+        summary_text = _call_omp_p(prompt, model=SMALL_MODEL, timeout=90)
         summary_text = summary_text.strip()
         if not summary_text:
             raise ValueError("empty summary")

@@ -54,8 +54,8 @@ SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL_REASONING = "qwen-3.6-35b-q5"                 # local Qwen on gaming rig for primary use
-MODEL_REASONING_FALLBACK = "deepseek-v4-flash"         # API-based fallback when GPU/LLM is unavailable
+MODEL = "deepseek-v4-flash"                 # API-based primary
+MODEL_FALLBACK = "mimo-v2.5"               # API-based fallback via opencode-go
 DEFAULT_TIMEOUT = 900
 RESEARCH_TIMEOUT = 1800
 FETCH_TIMEOUT = 900
@@ -800,7 +800,7 @@ def _date_context() -> str:
 def _call_llm_proxy(
     system: str,
     user: str,
-    model: str = MODEL_REASONING,
+    model: str = MODEL,
     temperature: float = 0.3,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
@@ -823,7 +823,7 @@ def _call_llm_proxy(
 
 def _call_omp_p(
     prompt: str,
-    model: str = MODEL_REASONING,
+    model: str = MODEL,
     timeout: int = RESEARCH_TIMEOUT,
     append_system: str | None = None,
 ) -> str:
@@ -932,7 +932,7 @@ def _refetch_article_date(url: str, title: str) -> str | None:
         "Extract ONLY the publication date from the page. Output the JSON."
     )
     try:
-        raw = _call_omp_p(prompt, model=MODEL_REASONING, timeout=600,
+        raw = _call_omp_p(prompt, model=MODEL, timeout=600,
                          append_system=system)
         result = _extract_json(raw, f"date-refetch:{title[:40]}")
         dc = (result.get("date_confirmed") or "").strip()
@@ -1007,7 +1007,7 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
         print(f"  [run ] {label}")
         t0 = time.time()
         try:
-            raw = _call_omp_p(angle["prompt"], model=MODEL_REASONING, timeout=RESEARCH_TIMEOUT,
+            raw = _call_omp_p(angle["prompt"], model=MODEL, timeout=RESEARCH_TIMEOUT,
                              append_system=system_prompt)
             findings = _extract_json(raw, f"{label} output")
             elapsed = time.time() - t0
@@ -1153,7 +1153,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         )
 
         try:
-            raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
+            raw = _call_llm_proxy(system, user, model=MODEL)
             result = _extract_json(raw, f"judge_research batch {batch_idx + 1}")
             batch_approved = result.get("approved", [])
             batch_rejected = result.get("rejected", [])
@@ -1314,7 +1314,7 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
             "wrapped in ```json fences."
         )
         try:
-            raw = _call_omp_p(prompt, model=MODEL_REASONING, timeout=FETCH_TIMEOUT,
+            raw = _call_omp_p(prompt, model=MODEL, timeout=FETCH_TIMEOUT,
                              append_system=system_prompt)
             result = _extract_json(raw, f"{label} output")
             elapsed = time.time() - t0
@@ -1497,7 +1497,7 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
         )
 
         try:
-            raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
+            raw = _call_llm_proxy(system, user, model=MODEL)
             judgments = _extract_json(raw, f"judge_summaries batch {batch_idx + 1}")
             if not isinstance(judgments, list):
                 judgments = [judgments]
@@ -1701,7 +1701,7 @@ def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict
     )
 
     try:
-        raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
+        raw = _call_llm_proxy(system, user, model=MODEL)
         result = _extract_json(raw, "curate output")
 
         # ── 6c: Python validate ──
@@ -1844,7 +1844,7 @@ def phase_7_write(topic: dict, fresh: list[dict], ongoing: list[dict],
     )
 
     try:
-        raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
+        raw = _call_llm_proxy(system, user, model=MODEL)
         html_output = re.sub(r"^```html?\s*\n?", "", raw.strip())
         html_output = re.sub(r"\n?```\s*$", "", html_output)
         elapsed = time.time() - t0
@@ -1968,7 +1968,7 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
     )
 
     try:
-        raw = _call_llm_proxy(system, user, model=MODEL_REASONING)
+        raw = _call_llm_proxy(system, user, model=MODEL)
         md_output = re.sub(r"^```(?:markdown)?\s*\n?", "", raw.strip())
         md_output = re.sub(r"\n?```\s*$", "", md_output)
         output_path.write_text(md_output + "\n")
@@ -2196,7 +2196,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                     print(f"  *** Both primary and fallback models already exhausted "
                           f"(inner retry used {MODEL_OVERRIDE}). No more retries.")
                     break
-                MODEL_OVERRIDE = MODEL_REASONING_FALLBACK
+                MODEL_OVERRIDE = MODEL_FALLBACK
                 print(f"  *** STUB RETRY: No stories produced. "
                       f"Retrying with fallback: {MODEL_OVERRIDE}")
                 for p in run_dir.glob("0*-*.json"):
@@ -2219,9 +2219,9 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 sys.exit(2)
             if not findings:
                 # Retry with fallback model when primary model produces empty results
-                fallback = MODEL_REASONING_FALLBACK
+                fallback = MODEL_FALLBACK
                 if MODEL_OVERRIDE:
-                    fallback = MODEL_REASONING   # already on override, flip to original
+                    fallback = MODEL   # already on override, flip to original
                 if not TEST_MODE:
                     import time as _time
                     retry_delay = min(10 * (2 ** (retry_count + 1)), 120)  # exponential backoff
@@ -2404,7 +2404,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
 
     # ── .runs.log duration tracking ──────────────────────────────────────
     if not TEST_MODE:
-        model = MODEL_OVERRIDE if MODEL_OVERRIDE else MODEL_REASONING
+        model = MODEL_OVERRIDE if MODEL_OVERRIDE else MODEL
         runs_log = digest_dir / ".runs.log"
         now_utc = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         entry = f"{now_utc} {category} duration={overall_elapsed:.0f}s model={model}\n"
@@ -2436,7 +2436,7 @@ def _write_test_report(run_dir: Path, topic: dict, category: str,
                        n_fresh: int, n_ongoing: int) -> None:
     """Write a test report summarizing timing and quality metrics."""
     report_path = run_dir / "test-report.md"
-    model = MODEL_OVERRIDE or MODEL_REASONING
+    model = MODEL_OVERRIDE or MODEL
     provider_info = _detect_model_provider(model)
 
     lines = [

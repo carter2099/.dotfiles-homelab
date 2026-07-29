@@ -8,6 +8,8 @@ providers:
         name: deepseek-v4-flash
       - id: deepseek-v4-pro
         name: deepseek-v4-pro
+      - id: mimo-v2.5
+        name: mimo-v2.5
   local-llm:
     baseUrl: http://localhost:8081/v1
     api: openai-completions
