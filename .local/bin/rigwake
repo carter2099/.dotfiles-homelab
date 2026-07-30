@@ -1,0 +1,25 @@
+#!/bin/bash
+# rigwake — wake the gaming rig via WoL, wait for SSH to come up
+set -euo pipefail
+
+RIG_IP="${GAMING_RIG_IP:-192.168.4.103}"
+RIG_MAC="${GAMING_RIG_MAC:-00:D8:61:39:52:71}"
+RIG_SSH_USER="${GAMING_RIG_SSH_USER:-carte}"
+RIG_SSH_KEY="${GAMING_RIG_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+WAIT="${1:-45}"
+
+echo "Sending WoL to $RIG_MAC..."
+wakeonlan "$RIG_MAC"
+
+echo "Waiting up to ${WAIT}s for SSH..."
+for i in $(seq 1 "$WAIT"); do
+    if ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -i "$RIG_SSH_KEY" \
+        "${RIG_SSH_USER}@${RIG_IP}" "echo ready" 2>/dev/null | grep -q ready; then
+        echo "Rig is online (${i}s)."
+        exit 0
+    fi
+    sleep 1
+done
+
+echo "Timed out after ${WAIT}s — rig did not come online." >&2
+exit 1
