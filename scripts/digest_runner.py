@@ -65,6 +65,14 @@ TEST_MODE: bool = False
 TEST_LABEL: str | None = None
 MODEL_OVERRIDE: str | None = None
 
+# ── Upstream outage tracking ──────────────────────────────────────────────
+# Set by phase_1_research when ALL research angles fail due to API
+# connectivity errors. Checked in run_digest Phase 7 to annotate empty
+# digests with an outage explanation instead of "No stories found today."
+_UPSTREAM_OUTAGE: bool = False
+_RESEARCH_FAILURES: list[str] = []
+_RESEARCH_SUCCESSES: int = 0
+
 # ── Provider detection (cached from omp models.yml) ───────────────────────
 _MODEL_PROVIDER_CACHE: dict[str, dict] = {}
 _OMP_MODELS_YML = Path.home() / ".omp" / "agent" / "models.yml"
@@ -997,6 +1005,11 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
     Each research angle gets its own omp -p call. They use web_search and
     web_fetch to find stories. Returns merged list of findings.
     """
+    global _UPSTREAM_OUTAGE, _RESEARCH_FAILURES, _RESEARCH_SUCCESSES
+    _RESEARCH_FAILURES = []
+    _RESEARCH_SUCCESSES = 0
+    _UPSTREAM_OUTAGE = False
+
     output_path = run_dir / "01-research-raw.json"
     if output_path.exists():
         print(f"  [skip] Phase 1 output exists: {output_path}")
@@ -1040,11 +1053,13 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
             h = check_search_health(f"after-{angle['id']}")
             if h.get("recommendation") == "halt":
                 print(f"  *** HALT during {label}: search health critical ***")
+            _RESEARCH_SUCCESSES += 1
             return findings
         except Exception as e:
             elapsed = time.time() - t0
             print(f"  [FAIL] {label} — {e} ({elapsed:.0f}s)")
             check_search_health(f"fail-{angle['id']}")
+            _RESEARCH_FAILURES.append(str(e))
             return []
 
     findings: list[dict] = []
@@ -1058,6 +1073,16 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
     findings = [f for f in findings if isinstance(f, dict)]
     if artifacts:
         print(f"  Filtered {len(artifacts)} non-dict artifact(s): {artifacts}")
+
+    # Detect upstream outage: all angles failed with connectivity errors
+    if not findings and _RESEARCH_FAILURES and _RESEARCH_SUCCESSES == 0:
+        err_msg = " ".join(_RESEARCH_FAILURES).lower()
+        if any(kw in err_msg for kw in ["502", "503", "connection refused",
+                                         "connection reset", "upstream",
+                                         "timeout", "econnrefused"]):
+            _UPSTREAM_OUTAGE = True
+            print(f"  *** UPSTREAM OUTAGE: All {len(_RESEARCH_FAILURES)} research angle(s) "
+                  f"failed with API connectivity errors")
 
     output_path.write_text(json.dumps(findings, indent=2))
     print(f"  Phase 1 done: {len(findings)} total findings")
@@ -2373,10 +2398,23 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         if fresh:
             html = phase_7_write(topic, fresh, ongoing, intro_hook, run_dir)
         else:
-            html = (
-                f'<html><body><h1>{topic["title"]}</h1>'
-                f'<p>{today_str}</p><p>No stories found today.</p></body></html>'
-            )
+            if _UPSTREAM_OUTAGE:
+                html = (
+                    f'<html><body style="font-family:-apple-system,system-ui,sans-serif;padding:2em;">'
+                    f'<h1 style="color:#1a1a2e;">{topic["title"]}</h1>'
+                    f'<p style="color:#666;">{today_str}</p>'
+                    f'<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:1em 1.2em;margin:1em 0;">'
+                    f'<p style="margin:0;color:#856404;font-weight:600;">Digest unavailable — upstream API outage</p>'
+                    f'<p style="margin:0.5em 0 0;color:#856404;font-size:14px;">'
+                    f'The research API (opencode-go-proxy) was unreachable during today\'s run. '
+                    f'This is a transient infrastructure issue, not a news drought. '
+                    f'Stories will resume when the API is available.</p></div></body></html>'
+                )
+            else:
+                html = (
+                    f'<html><body><h1>{topic["title"]}</h1>'
+                    f'<p>{today_str}</p><p>No stories found today.</p></body></html>'
+                )
             (run_dir / "digest.html").write_text(html)
         _phase_done("Phase 7: Write HTML", t7)
 
