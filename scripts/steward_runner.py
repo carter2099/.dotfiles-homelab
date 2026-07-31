@@ -263,15 +263,107 @@ def _date_context():
     )
 
 
+def _ndjson_looks_like_event_stream(text):
+    """True when text is omp --mode json NDJSON (not assistant prose/JSON)."""
+    if not text or not isinstance(text, str):
+        return False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(obj, dict):
+            return False
+        return obj.get("type") in {
+            "session", "agent_start", "agent_end", "turn_start", "turn_end",
+            "message_start", "message_end", "message_update", "message",
+        }
+    return False
+
+
+def _assistant_text_from_message(msg):
+    """Join text parts from an assistant message content list. Skip thinking/tools."""
+    if not isinstance(msg, dict):
+        return ""
+    if msg.get("role") and msg.get("role") != "assistant":
+        return ""
+    parts = []
+    for item in msg.get("content") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            t = item.get("text")
+            if isinstance(t, str) and t:
+                parts.append(t)
+    return "".join(parts)
+
+
+def _message_error_str(msg):
+    """Format stopReason=error / errorMessage from an omp message object."""
+    if not isinstance(msg, dict):
+        return ""
+    err_msg = (msg.get("errorMessage") or msg.get("error") or "").strip()
+    status = msg.get("errorStatus") or msg.get("status")
+    stop = msg.get("stopReason") or ""
+    if stop != "error" and not err_msg and not status:
+        return ""
+    first = err_msg.splitlines()[0] if err_msg else stop or "error"
+    first = first[:300]
+    if status:
+        return f"{status} {first}".strip()
+    return first
+
+
+
+def _balanced_json_slice(text, start):
+    """Return exclusive end index of balanced JSON value starting at start, or -1."""
+    if start < 0 or start >= len(text):
+        return -1
+    open_ch = text[start]
+    if open_ch not in "{[":
+        return -1
+    pairs = {"{": "}", "[": "]"}
+    stack = [open_ch]
+    in_str = False
+    esc = False
+    for i in range(start + 1, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack:
+                return -1
+            op = stack.pop()
+            if pairs[op] != ch:
+                return -1
+            if not stack:
+                return i + 1
+    return -1
+
+
 def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None, mode="text"):
     """Call omp -p (headless). Returns assistant text. Retries on transient API errors.
 
     mode="text": plain -p stdout (final assistant message only). Fine for free-form
-    summaries.
-    mode="json": --mode json NDJSON, with assistant text accumulated across ALL turns.
-    Required when the caller will _extract_json — advisor loops often end on a prose
-    ack while the real ```json packet was emitted on an earlier turn. Plain -p only
-    surfaces the final message, which is how audit workers were failing.
+    summaries. Rejects NDJSON event streams (misconfigured --mode json bleed).
+    mode="json": --mode json NDJSON, assistant text accumulated across ALL turns via
+    extract_from_ndjson. Required when the caller will _extract_json — advisor loops
+    often end on a prose ack while the real ```json packet was on an earlier turn.
+    Never returns raw NDJSON for the caller to scavenge.
     """
     if mode not in ("text", "json"):
         raise ValueError(f"unsupported omp mode: {mode!r}")
@@ -288,9 +380,14 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None, mo
         cmd.extend(["--append-system-prompt", append_system])
     cmd.append(prompt)
     # Retry transient errors: 401 (stale key / account rotation), 429 (rate limit),
-    # 5xx (server error), and subprocess timeout.
+    # 5xx (server error), subprocess timeout, and API errors surfaced in NDJSON.
     max_retries = 3
     last_error = None
+    recoverable_markers = ("401", "429", "500", "502", "503", "504")
+
+    def _is_recoverable(err_text: str) -> bool:
+        return any(code in (err_text or "") for code in recoverable_markers)
+
     for attempt in range(max_retries):
         try:
             result = subprocess.run(
@@ -309,18 +406,72 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None, mo
                 continue
             raise RuntimeError(f"omp -p timed out after {max_retries} attempts (timeout={timeout}s)")
 
-        if result.returncode == 0 or result.stdout.strip():
-            if mode == "json":
-                text, _stats = extract_from_ndjson(result.stdout)
-                # Defensive: if NDJSON shape drifts, fall back to raw stdout so
-                # _extract_json can still hunt fences.
-                return text if text.strip() else result.stdout
-            return result.stdout
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
 
-        # Check if this is a recoverable error (401, 429, 5xx)
-        err_text = result.stderr[:500]
-        is_recoverable = any(code in err_text for code in ["401", "429", "500", "502", "503", "504"])
-        if is_recoverable and attempt < max_retries - 1:
+        if mode == "json":
+            if not stdout.strip() and result.returncode != 0:
+                err_text = stderr[:500]
+                if _is_recoverable(err_text) and attempt < max_retries - 1:
+                    delay = 2 ** attempt
+                    print(f"  omp -p rc={result.returncode} (attempt {attempt + 1}/{max_retries}), retrying in {delay}s")
+                    time.sleep(delay)
+                    last_error = f"rc={result.returncode}: {err_text}"
+                    continue
+                raise RuntimeError(
+                    f"omp -p failed (rc={result.returncode}): {err_text}"
+                )
+
+            text, stats = extract_from_ndjson(stdout)
+            errors = stats.get("errors") or []
+            err_join = "; ".join(errors)
+
+            if errors and not text.strip():
+                if _is_recoverable(err_join) and attempt < max_retries - 1:
+                    delay = 2 ** attempt
+                    print(f"  omp -p api error (attempt {attempt + 1}/{max_retries}): {err_join[:120]}; retrying in {delay}s")
+                    time.sleep(delay)
+                    last_error = err_join
+                    continue
+                raise RuntimeError(f"omp -p api error: {err_join}")
+
+            if not text.strip():
+                # Empty assistant — may be hard failure or stream with only tools
+                if result.returncode != 0:
+                    err_text = stderr[:500] or err_join or "empty assistant text"
+                    if _is_recoverable(err_text) and attempt < max_retries - 1:
+                        delay = 2 ** attempt
+                        print(f"  omp -p rc={result.returncode} (attempt {attempt + 1}/{max_retries}), retrying in {delay}s")
+                        time.sleep(delay)
+                        last_error = f"rc={result.returncode}: {err_text}"
+                        continue
+                    raise RuntimeError(
+                        f"omp -p failed (rc={result.returncode}): {err_text}"
+                    )
+                raise RuntimeError(
+                    "omp -p json returned empty assistant text"
+                    + (f" ({err_join})" if err_join else "")
+                )
+
+            # Prefer assistant text; if API errors also present, still return text
+            # (partial success) — callers extract JSON from text.
+            return text
+
+        # mode == "text"
+        if result.returncode == 0 or stdout.strip():
+            if _ndjson_looks_like_event_stream(stdout):
+                raise RuntimeError(
+                    "omp -p text mode received NDJSON event stream; "
+                    "refusing to treat session logs as assistant prose"
+                )
+            if stdout.strip():
+                return stdout
+            # rc==0 but empty
+            if result.returncode == 0:
+                return stdout
+
+        err_text = stderr[:500]
+        if _is_recoverable(err_text) and attempt < max_retries - 1:
             delay = 2 ** attempt
             print(f"  omp -p rc={result.returncode} (attempt {attempt + 1}/{max_retries}), retrying in {delay}s")
             time.sleep(delay)
@@ -337,45 +488,108 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None, mo
 
 
 def _extract_json(text, label="output"):
-    """Extract JSON from LLM output. Tries last fenced block first, then raw JSON."""
-    # Find ALL fenced blocks — the agent's final JSON is typically the last one.
-    # omp -p echoes tool outputs (file reads, command results) to stdout before
-    # the assistant response, which may contain extraneous ``` blocks.
+    """Extract JSON from assistant text. Never scavenges omp NDJSON event streams."""
+    if text is None:
+        raise ValueError(f"Could not extract JSON from {label}: text is None")
+    if not isinstance(text, str):
+        text = str(text)
+
+    if _ndjson_looks_like_event_stream(text):
+        raise ValueError(
+            f"Could not extract JSON from {label}: got omp NDJSON event stream "
+            f"(parser should have returned assistant text only). "
+            f"Raw text (first 500 chars):\n{text[:500]}"
+        )
+
+    # Fenced blocks — last successful parse wins (final agent packet).
     fences = re.findall(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
     for block in reversed(fences):
         try:
             return json.loads(block.strip())
         except json.JSONDecodeError:
             continue
-    # Fall back to raw JSON patterns
-    for pattern in [r"\{[\s\S]*\}", r"\[[\s\S]*\]"]:
-        m = re.search(pattern, text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                continue
-    text_stripped = text.strip()
-    if text_stripped.startswith("{") or text_stripped.startswith("["):
+
+    stripped = text.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
         try:
-            return json.loads(text_stripped)
+            return json.loads(stripped)
         except json.JSONDecodeError:
             pass
+
+    # Brace-balanced scan — keep (start, end, value) and prefer largest dict packet.
+    candidates = []  # (end-start, start, value)
+    for i, ch in enumerate(text):
+        if ch not in "{[":
+            continue
+        end = _balanced_json_slice(text, i)
+        if end < 0:
+            continue
+        snippet = text[i:end]
+        try:
+            val = json.loads(snippet)
+        except json.JSONDecodeError:
+            continue
+        candidates.append((end - i, i, val))
+    if candidates:
+        dicts = [c for c in candidates if isinstance(c[2], dict)]
+        pool = dicts or candidates
+        # Largest span wins; tie-break later start (final packet in multi-object prose).
+        pool.sort(key=lambda c: (c[0], c[1]))
+        return pool[-1][2]
+
     raise ValueError(
         f"Could not extract JSON from {label}. Raw text (first 500 chars):\n{text[:500]}"
     )
 
 
 def extract_from_ndjson(stdout):
-    """Parse omp --mode json NDJSON output (same format as pi's --mode json).
-    Returns (accumulated_assistant_text, stats_dict).
-    Real shape (verified live 2026-07-20):
-      message_update -> {"assistantMessageEvent": {"type": "text_delta", "delta": "..."}}
-      message_end    -> {"message": {"usage": {"input":N,"output":N,"cost":{"total":F}}}}
+    """Parse omp --mode json NDJSON stdout → (assistant_text, stats).
+
+    Supports:
+      - Legacy (pi-style): message_update / assistantMessageEvent text_delta
+      - Current omp (2026-07+): message_start/message_end with full message objects;
+        also turn_end and agent_end.assistant messages
+
+    stats keys: input_tokens, output_tokens, cost_usd, errors[list[str]], format
+    Never returns raw NDJSON as text.
     """
-    accumulated = []
-    stats = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
-    for line in stdout.strip().splitlines():
+    stats = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "errors": [],
+        "format": "empty",
+    }
+    if not stdout or not str(stdout).strip():
+        return "", stats
+
+    delta_parts = []
+    end_texts = []  # assistant texts from message_end / turn_end (ordered)
+    saw_delta = False
+    saw_end = False
+    agent_end_text = ""
+
+    def _absorb_usage(msg):
+        if not isinstance(msg, dict):
+            return
+        usage = msg.get("usage") or {}
+        if not isinstance(usage, dict):
+            return
+        stats["input_tokens"] += int(usage.get("input") or 0)
+        stats["output_tokens"] += int(usage.get("output") or 0)
+        cost = usage.get("cost") or {}
+        if isinstance(cost, dict):
+            try:
+                stats["cost_usd"] += float(cost.get("total") or 0.0)
+            except (TypeError, ValueError):
+                pass
+
+    def _absorb_error(msg):
+        err = _message_error_str(msg)
+        if err and err not in stats["errors"]:
+            stats["errors"].append(err)
+
+    for line in str(stdout).splitlines():
         line = line.strip()
         if not line:
             continue
@@ -383,20 +597,69 @@ def extract_from_ndjson(stdout):
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        typ = obj.get("type", "")
+        if not isinstance(obj, dict):
+            continue
+        typ = obj.get("type") or ""
+
         if typ == "message_update":
-            ev = obj.get("assistantMessageEvent", {})
-            if ev.get("type") == "text_delta":
-                accumulated.append(ev.get("delta", ""))
-        elif typ == "message_end":
-            usage = obj.get("message", {}).get("usage", {})
-            if usage:
-                stats["input_tokens"] += usage.get("input", 0)
-                stats["output_tokens"] += usage.get("output", 0)
-                cost = usage.get("cost", {})
-                if isinstance(cost, dict):
-                    stats["cost_usd"] += cost.get("total", 0.0)
-    return "".join(accumulated), stats
+            ev = obj.get("assistantMessageEvent") or {}
+            if isinstance(ev, dict) and ev.get("type") == "text_delta":
+                delta = ev.get("delta") or ""
+                if delta:
+                    delta_parts.append(delta)
+                    saw_delta = True
+
+        elif typ in ("message_end", "turn_end"):
+            msg = obj.get("message") or {}
+            if not isinstance(msg, dict):
+                continue
+            _absorb_usage(msg)
+            _absorb_error(msg)
+            if msg.get("role") == "assistant":
+                saw_end = True
+                t = _assistant_text_from_message(msg)
+                if t:
+                    end_texts.append(t)
+
+        elif typ == "message_start":
+            # Errors sometimes only appear fully on message_end; still check.
+            msg = obj.get("message") or {}
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                _absorb_error(msg)
+
+        elif typ == "agent_end":
+            messages = obj.get("messages") or []
+            if isinstance(messages, list):
+                for msg in messages:
+                    if not isinstance(msg, dict):
+                        continue
+                    if msg.get("role") == "assistant":
+                        _absorb_usage(msg)
+                        _absorb_error(msg)
+                        t = _assistant_text_from_message(msg)
+                        if t:
+                            agent_end_text = t  # last assistant wins
+
+    if saw_delta and saw_end:
+        stats["format"] = "mixed"
+    elif saw_delta:
+        stats["format"] = "legacy-delta"
+    elif saw_end or agent_end_text:
+        stats["format"] = "message-end"
+    else:
+        stats["format"] = "empty"
+
+    # Prefer deltas when present (streaming path); else message_end texts;
+    # else agent_end fallback. Do not double-append end text when deltas exist.
+    if saw_delta:
+        text = "".join(delta_parts)
+    elif end_texts:
+        # Multiple assistant message_ends across turns — join in order (advisor loops).
+        text = "\n".join(end_texts)
+    else:
+        text = agent_end_text or ""
+
+    return text, stats
 
 
 def _call_omp_p_json(prompt, timeout=OMP_JSON_TIMEOUT, extra_args=None):
@@ -419,17 +682,25 @@ def _call_omp_p_json(prompt, timeout=OMP_JSON_TIMEOUT, extra_args=None):
         timeout=timeout,
         env={**os.environ, "HOME": str(HOME)},
     )
-    if result.returncode != 0 and not result.stdout.strip():
+    raw_stdout = result.stdout or ""
+    if result.returncode != 0 and not raw_stdout.strip():
         raise RuntimeError(
-            f"omp -p json failed (rc={result.returncode}): {result.stderr[:500]}"
+            f"omp -p json failed (rc={result.returncode}): {(result.stderr or '')[:500]}"
         )
 
-    text, stats = extract_from_ndjson(result.stdout)
+    text, stats = extract_from_ndjson(raw_stdout)
+    errors = stats.get("errors") or []
+    if errors and not text.strip():
+        raise RuntimeError(f"omp -p api error: {'; '.join(errors)}")
+    if not text.strip():
+        raise RuntimeError("omp -p json returned empty assistant text")
+
     try:
         packet = _extract_json(text, "executor packet")
     except ValueError:
         packet = {"raw_text": text[:2000]}
-    return text, stats, packet, result.stdout
+    return text, stats, packet, raw_stdout
+
 
 
 def _evidence_hash(evidence):
@@ -3863,26 +4134,12 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
             judge_output = _call_omp_p(judge_prompt, model=SMALL_MODEL, timeout=600, mode="json")
             judge_packet = _extract_json(judge_output, f"judge-fix-{section_name}-i{n}")
         except Exception as e:
-            positive_indicators = [
-                "no flags", "acknowledged", "all.*ok", "looks good",
-                "no issues", "verified", "pass", "confirmed", "correctly",
-                "applied correctly", "fixes confirmed", "no action needed",
-                "^correct", "no drift", "no changes needed", "all current",
-            ]
-            if judge_output and any(
-                re.search(p, judge_output, re.IGNORECASE) for p in positive_indicators
-            ):
-                judge_packet = {
-                    "verdict": "pass",
-                    "reviewed": [],
-                    "summary": "Implicit pass — judge returned plain text with positive signals",
-                }
-            else:
-                judge_packet = {
-                    "verdict": "fail",
-                    "reviewed": [],
-                    "summary": str(e),
-                }
+            # Fail closed — never implicit-pass on prose/NDJSON/empty failures.
+            judge_packet = {
+                "verdict": "fail",
+                "reviewed": [],
+                "summary": f"judge extract/call failed: {e}"[:400],
+            }
 
         if not isinstance(judge_packet, dict):
             judge_packet = {"verdict": "fail", "reviewed": [], "summary": "invalid judge packet"}
