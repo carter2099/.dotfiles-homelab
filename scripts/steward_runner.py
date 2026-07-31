@@ -572,6 +572,8 @@ def phase_0_setup(args):
         print(f"  usage ({len(usage['accounts'])} accounts):")
         for line in acct_lines:
             print(line)
+    return data
+
 
 # ── P0b: session memory ───────────────────────────────────────────────
 
