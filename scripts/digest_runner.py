@@ -1040,6 +1040,7 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
     )
 
     def _research_one(angle: dict) -> list[dict]:
+        global _RESEARCH_SUCCESSES  # += below rebinds; must be global here too
         label = f"research:{angle['id']}"
         print(f"  [run ] {label}")
         t0 = time.time()
@@ -1988,6 +1989,27 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
 
     print(f"  [run ] summary_md")
     t0 = time.time()
+
+    if not fresh and not ongoing:
+        # Empty digest: never send empty data to the LLM. The hard "every story
+        # MUST include its URL" constraint makes it fabricate placeholder
+        # stories with example.com URLs. Write an honest summary directly.
+        md_output = (
+            f"# {topic['title']} — {today_str}\n"
+            f"**Sent to:** {', '.join(topic['recipients'])}\n\n"
+            "## Fresh\n"
+            "- No stories published in the last 24 hours.\n\n"
+            "## Ongoing\n"
+            "- No ongoing stories reported.\n\n"
+            "## Coverage Gaps\n"
+            f"- No {topic['title']} stories were published or aggregated "
+            "in the last 24 hours.\n"
+        )
+        output_path.write_text(md_output)
+        shutil.copy(output_path, digest_md_path)
+        elapsed = time.time() - t0
+        print(f"  [done] summary_md — empty digest, direct summary ({elapsed:.0f}s)")
+        return
 
     fresh_json = json.dumps(fresh, indent=2)
     ongoing_json = json.dumps(ongoing, indent=2)
