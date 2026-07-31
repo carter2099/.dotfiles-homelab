@@ -141,9 +141,28 @@ This is opt-in — only do it when past context would materially help the curren
 
 **After significant sessions**, write a brief session memoir. "Significant" means: architectural decisions, system state changes, or context a future agent would need. Routine checks and quick Q&A don't need one.
 
-Write to `~/notes/logs/sessions/YYYY-MM-DD.md` using this exact format:
+### Session memory bank (`~/notes/logs/sessions/`)
+
+The steward (P0b, nightly) maintains this bank from interactive omp sessions — it writes
+missing memoirs, judges/updates agent-written ones against the source transcript, and
+filter-skips test/dead-end sessions (LLM judge, fail-open). P7 audit workers + judges and
+the email TL;DR writer receive recent memoirs as context.
+
+Location + format — one compact `.md` per interactive omp session, in a per-day folder:
+
+```
+~/notes/logs/sessions/YYYY-MM-DD/<HHMM>-<slug>.md
+```
+
 ```markdown
-# Session: YYYY-MM-DD
+---
+title: <short topic>
+source: <absolute path to the omp session jsonl — REQUIRED>
+session_id: <omp session uuid — REQUIRED>
+project: <sessions subdir, e.g. - or -dev>
+date: YYYY-MM-DD
+---
+# Session: YYYY-MM-DD HH:MM — <title>
 **Topics:** comma-separated list
 **Decisions:**
 - decision 1
@@ -153,13 +172,26 @@ Write to `~/notes/logs/sessions/YYYY-MM-DD.md` using this exact format:
 **Context for next time:** 1-2 sentences a future agent should know
 ```
 
-Session memoirs are NOT formal notes — don't use `/note-save` or full frontmatter for them. They're quick context dumps for cross-session continuity. Formal reference notes use `/note-save` when the user explicitly asks.
+Agents writing a memoir during a session MUST include `source:` and `session_id:` — read
+them from the session jsonl header (the `{"type":"session"}` line in
+`~/.omp/agent/sessions/<project>/<ts>_<uuid>.jsonl`). That's how the steward matches
+sessions and judges existing memoirs. Keep the body compact: the source transcript is the
+source of truth, the memoir is the pointer + durable context.
+
+**Session dirs:** interactive omp sessions live in `~/.omp/agent/sessions/<project>/`
+(project-scoped subdirs). Headless invocations MUST pass
+`--session-dir ~/.omp/agent/sessions-automated/` — the steward's session-memory filter
+relies on this separation and misses sessions that leak into the wrong dir.
+
+Session memoirs are NOT formal notes — don't use `/note-save` or full frontmatter for them.
+They're quick context dumps for cross-session continuity. Formal reference notes use
+`/note-save` when the user explicitly asks.
 
 ### Vault structure
 
 - `~/notes/INDEX.md` — index of all formal reference notes (maintained by `/note-save`)
 - `~/notes/docs/` — maintained reference docs (subsystem architecture and runbooks)
-- `~/notes/logs/sessions/` — session memoirs (YYYY-MM-DD.md)
+- `~/notes/logs/sessions/` — session memory bank (YYYY-MM-DD/ folders, one compact .md per interactive omp session, frontmatter `source:` pointer; maintained by the steward P0b)
 - `~/notes/journal/` — research notes and project records (not maintained)
 - The vault is a standalone git repo (not the dotfiles bare repo) — `/note-save` handles commits
 ## Gaming Rig (Windows 11)
