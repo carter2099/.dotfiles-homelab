@@ -4652,107 +4652,332 @@ def _html_usage(usage_data):
     return "".join(out)
 
 
-def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str, session_memory=""):
-    """Build the TL;DR LLM summary with deterministic fallback.
-    Returns HTML-safe paragraph."""
-    # Build facts dict
-    n_failed_apply = sum(1 for s in applied.get("steps", []) if s.get("status") == "failed")
-    n_audit_drift = sum(1 for s in audit.get("sections", []) if s.get("verdict") in ("DRIFT", "ATTENTION"))
-    n_audit_failed = sum(1 for s in audit.get("sections", []) if s.get("verdict", "").endswith("-failed"))
-    n_ideas = queue.get("ideas", {}).get("total_outstanding", 0)
-    n_plans_approved = len(queue.get("plans", {}).get("approved", []))
-    n_fixes = sum(len(s.get("fixes_applied", [])) for s in fixes.get("sections", []))
-
-    # Count real changes only (bumped steps or upgrades with count>0)
+def _tldr_collect_updates(applied):
+    """Real package/image changes only (not already-current skips)."""
     updates = []
-    for s in applied.get("steps", []):
+    n_failed = 0
+    for s in applied.get("steps", []) or []:
         step = s.get("step", "")
         status = s.get("status", "")
+        if status == "failed":
+            n_failed += 1
+            updates.append(f"{step} failed: {str(s.get('error', ''))[:80]}")
+            continue
         if step == "apt_upgrade" and s.get("upgraded_count", 0) > 0:
             updates.append(f"apt: {s['upgraded_count']} packages upgraded")
         elif step.startswith("auto_") and status == "ok":
+            pre, post = s.get("pre_version", "?"), s.get("post_version", "?")
             pkg = step.replace("auto_", "")
-            updates.append(f"{pkg}: {s.get('pre_version','?')} -> {s.get('post_version','?')}")
+            if pre != post:
+                updates.append(f"{pkg}: {pre} -> {post}")
         elif step == "openwebui" and status == "bumped":
             updates.append(f"open-webui: {s.get('current_tag')} -> {s.get('latest_tag')}")
         elif step == "freshrss" and status == "bumped":
             updates.append(f"freshrss: {s.get('current_tag')} -> {s.get('latest_tag')}")
-        elif status == "failed":
-            updates.append(f"{step} failed: {s.get('error','')[:80]}")
+    return updates, n_failed
 
-    health_issues = []
+
+def _tldr_collect_health(heartbeat, validation=None):
+    """End-state host issues (empty list = healthy)."""
+    issues = []
     if heartbeat.get("phase_failed"):
-        health_issues.append(f"heartbeat failed: {heartbeat.get('error','')[:80]}")
+        issues.append(f"heartbeat failed: {str(heartbeat.get('error', ''))[:80]}")
     rb = heartbeat.get("reboot", {}) or {}
     if rb.get("needed"):
-        health_issues.append("reboot needed")
-    llm = (heartbeat.get("llm_stack", {}) or {}).get("falling_back", False)
-    if llm:
-        health_issues.append("LLM on cloud fallback")
+        issues.append("reboot needed")
+    if (heartbeat.get("llm_stack", {}) or {}).get("falling_back", False):
+        issues.append("LLM on cloud fallback")
+    for c in (validation or {}).get("checks", []) or []:
+        if not isinstance(c, dict):
+            continue
+        st = str(c.get("status") or "ok")
+        if st in ("ok", "pass", "skipped", "dry-run"):
+            continue
+        name = c.get("name") or c.get("endpoint") or "check"
+        issues.append(f"{name}: {st}")
+    return issues
 
-    facts = {
-        "date": date_str,
-        "updates": updates,
-        "n_failed_apply": n_failed_apply,
-        "n_applied": len(updates),
-        "audit_drift": n_audit_drift,
-        "audit_failed": n_audit_failed,
-        "n_fixes": n_fixes,
-        "ideas": n_ideas,
-        "plans_approved": n_plans_approved,
-        "health_issues": health_issues,
+
+def _tldr_audit_end_state(audit, fixes):
+    """Classify each audit section by post-P7b end state.
+
+    Returns dict with open / cleared / failed / deferred_only lists of
+    short human labels — not P7 pre-fix verdict counts.
+    """
+    fix_by = {}
+    for s in (fixes or {}).get("sections", []) or []:
+        name = s.get("section") or ""
+        if name:
+            fix_by[name] = s
+
+    open_items = []
+    cleared = []
+    failed = []
+    deferred_only = []
+
+    for sec in (audit or {}).get("sections", []) or []:
+        name = sec.get("name") or "unknown"
+        display = name.replace("_", " ")
+        verdict = str(sec.get("verdict") or "")
+        base = verdict.removeprefix("cached-")
+
+        if verdict.endswith("-failed") or base in ("collector-failed", "worker-failed"):
+            err = (sec.get("error") or sec.get("worker_error") or "")[:120]
+            failed.append({
+                "section": name,
+                "label": display,
+                "note": err or verdict,
+            })
+            continue
+
+        if base in ("PASS",) or verdict in ("PASS", "cached-PASS", "dry-run-collector-only"):
+            # Clean section — only mention if P7b still ran (shouldn't) 
+            continue
+
+        fx = fix_by.get(name)
+        if not fx:
+            # Non-PASS audit with no fix pass (nothing_to_fix gap or skipped)
+            if base in ("DRIFT", "ATTENTION", "UNVERIFIABLE"):
+                open_items.append({
+                    "section": name,
+                    "label": display,
+                    "note": f"audit {base.lower()}; no auto-fix result",
+                })
+            continue
+
+        jv = str(fx.get("judge_verdict") or "").lower()
+        rem = int(fx.get("remaining_unfixed") or 0)
+        real = _real_fixes(fx.get("fixes_applied") or [])
+        n_fixed = sum(1 for f in real if f.get("status") == "fixed")
+        n_failed_fx = sum(1 for f in real if f.get("status") == "failed")
+        n_def = sum(1 for f in real if f.get("status") == "deferred")
+        note = (fx.get("judge_summary") or fx.get("fix_summary") or "")[:180]
+        iters = fx.get("iteration_count") or len(fx.get("iterations") or []) or 0
+
+        if jv == "pass" and rem <= 0 and n_failed_fx == 0:
+            if n_fixed == 0 and n_def > 0:
+                deferred_only.append({
+                    "section": name,
+                    "label": display,
+                    "note": note or f"{n_def} deferred",
+                })
+            else:
+                entry = {"section": name, "label": display, "fixed": n_fixed}
+                if iters > 1:
+                    entry["iterations"] = iters
+                cleared.append(entry)
+            continue
+
+        # partial / fail / remaining / failed fixes → still open for Carter
+        if jv in ("partial", "fail", "failed", "unknown") or rem > 0 or n_failed_fx:
+            why = jv or "open"
+            if rem > 0:
+                why = f"{why}, {rem} unfixed"
+            open_items.append({
+                "section": name,
+                "label": display,
+                "note": note or why,
+                "judge": jv,
+                "remaining_unfixed": rem,
+            })
+            continue
+
+        # dry-run / skipped / odd statuses
+        if jv in ("dry-run", "skipped"):
+            continue
+        if n_fixed or base in ("DRIFT", "ATTENTION"):
+            cleared.append({"section": name, "label": display, "fixed": n_fixed})
+
+    return {
+        "open": open_items,
+        "cleared": cleared,
+        "failed": failed,
+        "deferred_only": deferred_only,
     }
 
-    # Try LLM summary
+
+def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
+    """End-state facts for TL;DR (LLM + deterministic)."""
+    updates, n_failed_apply = _tldr_collect_updates(applied)
+    health_issues = _tldr_collect_health(heartbeat, validation)
+    audit_state = _tldr_audit_end_state(audit, fixes)
+
+    n_real_fixes = 0
+    for s in (fixes or {}).get("sections", []) or []:
+        n_real_fixes += sum(
+            1 for f in _real_fixes(s.get("fixes_applied") or [])
+            if f.get("status") == "fixed"
+        )
+
+    plans = (queue or {}).get("plans", {}) or {}
+    needs_carter = []
+    for item in plans.get("approved", []) or []:
+        needs_carter.append(
+            f"approved plan: {item.get('heading') or item.get('file') or '?'}"
+        )
+    for item in plans.get("implementing", []) or []:
+        age = item.get("age_days")
+        label = item.get("heading") or item.get("file") or "?"
+        if age is not None and age > 2:
+            needs_carter.append(f"stale implementing plan ({age}d): {label}")
+
+    for o in audit_state["open"]:
+        needs_carter.append(
+            f"audit still open — {o['label']}: {o.get('note') or o.get('judge') or 'needs review'}"
+        )
+    for f in audit_state["failed"]:
+        needs_carter.append(f"audit check failed — {f['label']}: {f.get('note') or ''}")
+
+    return {
+        "health_ok": not health_issues,
+        "health_issues": health_issues,
+        "updates": updates,
+        "n_failed_apply": n_failed_apply,
+        "audit_open": audit_state["open"],
+        "audit_cleared": audit_state["cleared"],
+        "audit_failed": audit_state["failed"],
+        "audit_deferred": audit_state["deferred_only"],
+        "n_sections_cleared": len(audit_state["cleared"]),
+        "n_sections_open": len(audit_state["open"]) + len(audit_state["failed"]),
+        "n_real_fixes": n_real_fixes,
+        "ideas_outstanding": (queue or {}).get("ideas", {}).get("total_outstanding", 0) or 0,
+        "plans_approved": len(plans.get("approved") or []),
+        "needs_carter": needs_carter,
+    }
+
+
+def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str, session_memory="",
+                validation=None):
+    """Build end-state TL;DR with LLM summary + deterministic fallback.
+
+    Facts describe how the host looks *after* the run (open vs cleared),
+    not pre-fix audit process counters.
+    Returns HTML-safe paragraph.
+    """
+    facts = _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation)
+
+    # Compact payload for the model — end state first
+    llm_facts = {
+        "date": date_str,
+        "health_ok": facts["health_ok"],
+        "health_issues": facts["health_issues"],
+        "needs_carter": facts["needs_carter"][:8],
+        "updates": facts["updates"][:6],
+        "audit_still_open": [
+            {"section": o["label"], "detail": (o.get("note") or "")[:160]}
+            for o in facts["audit_open"][:6]
+        ],
+        "audit_checks_failed": [
+            {"section": f["label"], "detail": (f.get("note") or "")[:120]}
+            for f in facts["audit_failed"][:4]
+        ],
+        "audit_cleared_sections": [
+            {
+                "section": c["label"],
+                "fixes": c.get("fixed", 0),
+                **({"retries": c["iterations"]} if c.get("iterations") else {}),
+            }
+            for c in facts["audit_cleared"][:8]
+        ],
+        "deferred_only_sections": [d["label"] for d in facts["audit_deferred"][:4]],
+        "n_real_fixes": facts["n_real_fixes"],
+        "ideas_outstanding": facts["ideas_outstanding"],
+        "plans_approved": facts["plans_approved"],
+    }
+
     try:
         prompt = (
-            f"You are the Homelab Steward, writing a nightly summary for {date_str}.\n\n"
-            f"Facts:\n{json.dumps(facts, indent=2)}\n\n"
-            f"Recent session memory (what Carter was working on lately — use to contextualize changes):\n{session_memory}\n\n"
-            "Write 3-5 short plain-English sentences. What actually changed tonight, "
-            "what is broken or needs Carter, what was auto-fixed. "
-            "No badge jargon (DRIFT, ATTENTION, artifact filenames). "
-            "No bullet soup. If nothing notable: one quiet-night sentence."
+            f"You are the Homelab Steward writing the top-of-email TL;DR for {date_str}.\n\n"
+            f"END-STATE FACTS (after tonight's run — not process counters):\n"
+            f"{json.dumps(llm_facts, indent=2)}\n\n"
+            f"Recent session memory (optional context only):\n{session_memory}\n\n"
+            "Write 2-4 short plain-English sentences about the END STATE:\n"
+            "1. Lead with what still needs Carter (open audit, failed checks, health, "
+            "approved plans). If nothing needs him, say the host is in good shape.\n"
+            "2. Then what changed or was cleared tonight (real package bumps, sections "
+            "auto-fixed). Mention a retry only if load-bearing.\n"
+            "3. Skip pre-fix drift counts, badge jargon (DRIFT/ATTENTION), artifact "
+            "names, and 'N audit items need attention' style process narration.\n"
+            "4. No bullet lists. If truly quiet: one calm sentence.\n"
+            "Return plain text only — no JSON, no markdown fences."
         )
         summary_text = _call_omp_p(prompt, model=SMALL_MODEL, timeout=90)
-        summary_text = summary_text.strip()
+        # Guard: reject NDJSON / session-header bleed and empty/process junk
+        summary_text = (summary_text or "").strip()
         if not summary_text:
             raise ValueError("empty summary")
+        if summary_text.lstrip().startswith("{") and '"type"' in summary_text[:80]:
+            raise ValueError("ndjson bleed")
+        # Strip accidental fences
+        if summary_text.startswith("```"):
+            summary_text = re.sub(r"^```(?:\w+)?\n?", "", summary_text)
+            summary_text = re.sub(r"\n?```$", "", summary_text).strip()
+        if len(summary_text) < 20:
+            raise ValueError("summary too short")
     except Exception:
         summary_text = _tldr_deterministic(facts)
 
-    # Escape - template already wraps in <p>, so use <br> for line breaks
     safe = html.escape(summary_text)
-    # Convert double newlines to <br><br>
-    safe = re.sub(r'\n\n+', '<br><br>', safe)
-    safe = safe.replace('\n', ' ')
+    safe = re.sub(r"\n\n+", "<br><br>", safe)
+    safe = safe.replace("\n", " ")
     return safe
 
 
 def _tldr_deterministic(facts):
-    """Deterministic fallback summary from facts dict."""
+    """End-state deterministic fallback — needs-you first, then changes/cleared."""
     parts = []
-    if facts["updates"]:
-        parts.append(" ".join(facts["updates"][:3]))
-        if facts["n_failed_apply"]:
-            parts.append(f"{facts['n_failed_apply']} update failed.")
+
+    if facts.get("health_issues"):
+        parts.append("Health issues: " + "; ".join(facts["health_issues"][:3]) + ".")
     else:
-        parts.append("No package changes applied.")
+        parts.append("Host healthy.")
 
-    if facts["health_issues"]:
-        parts.append("Health: " + "; ".join(facts["health_issues"][:3]))
+    open_labels = [o["label"] for o in facts.get("audit_open") or []]
+    failed_labels = [f["label"] for f in facts.get("audit_failed") or []]
+    if open_labels or failed_labels:
+        bits = []
+        if open_labels:
+            bits.append("still open: " + ", ".join(open_labels[:5]))
+    open_labels = [o["label"] for o in facts.get("audit_open") or []]
+    failed_labels = [f["label"] for f in facts.get("audit_failed") or []]
+    n_cleared = facts.get("n_sections_cleared") or 0
+    if open_labels or failed_labels:
+        bits = []
+        if open_labels:
+            bits.append("still open: " + ", ".join(open_labels[:5]))
+        if failed_labels:
+            bits.append("checks failed: " + ", ".join(failed_labels[:3]))
+        tail = ""
+        if n_cleared:
+            tail = f" ({n_cleared} other section{'s' if n_cleared != 1 else ''} cleared)"
+        parts.append("Audit " + "; ".join(bits) + tail + ".")
+    elif n_cleared:
+        parts.append(
+            f"All flagged audit sections cleared ({n_cleared} auto-fixed)."
+            if facts.get("n_real_fixes")
+            else f"Audit clear end-of-run ({n_cleared} sections resolved)."
+        )
     else:
-        parts.append("Health checks passed.")
+        parts.append("Audit clear.")
 
-    if facts["audit_drift"]:
-        parts.append(f"{facts['audit_drift']} audit items need attention.")
-    elif facts["audit_failed"]:
-        parts.append(f"{facts['audit_failed']} audit sections failed.")
+    if facts.get("plans_approved"):
+        parts.append(f"{facts['plans_approved']} approved plan(s) waiting.")
+    if facts.get("ideas_outstanding") and facts.get("n_sections_open"):
+        # only mention ideas when something else is already noisy
+        parts.append(f"{facts['ideas_outstanding']} ideas outstanding.")
 
-    if facts["n_fixes"]:
-        parts.append(f"{facts['n_fixes']} auto-fixes applied.")
+    # Quiet night compression
+    if (
+        facts.get("health_ok")
+        and not facts.get("n_sections_open")
+        and not facts.get("updates")
+        and not facts.get("plans_approved")
+        and not facts.get("n_sections_cleared")
+    ):
+        return "Quiet night — host healthy, nothing needs you."
 
     return " ".join(parts)
+
 
 
 def phase_8_render_send(run_dir, setup_data, dry_run=False):
@@ -4780,9 +5005,12 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         except Exception:
             pass
 
-    # Build TLDR
-    tldr = _build_tldr(applied, audit, queue, fixes, heartbeat, date_str,
-                              session_memory=_session_memory_context())
+    # Build TLDR (end-state after P7b, not pre-fix process counts)
+    tldr = _build_tldr(
+        applied, audit, queue, fixes, heartbeat, date_str,
+        session_memory=_session_memory_context(),
+        validation=validation,
+    )
 
     # Troubleshoot section
     troubleshoot_html = ""
