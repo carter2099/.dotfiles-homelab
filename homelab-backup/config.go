@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,10 +23,10 @@ type RetentionConfig struct {
 }
 
 type S3Config struct {
-	Endpoint       string `yaml:"endpoint"`
-	Bucket         string `yaml:"bucket"`
-	Region         string `yaml:"region"`
-	AccessKeyID    string `yaml:"access_key_id"`
+	Endpoint        string `yaml:"endpoint"`
+	Bucket          string `yaml:"bucket"`
+	Region          string `yaml:"region"`
+	AccessKeyID     string `yaml:"access_key_id"`
 	SecretAccessKey string `yaml:"secret_access_key"`
 }
 
@@ -58,6 +60,8 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
+	loadDotEnvIfAbsent()
+
 	if env := os.Getenv("R2_ACCESS_KEY_ID"); env != "" {
 		cfg.S3.AccessKeyID = env
 	}
@@ -66,4 +70,38 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// loadDotEnvIfAbsent sources R2 credentials from the .env file next to the
+// executable when the environment doesn't already provide them. The systemd
+// unit passes them via EnvironmentFile; manual/agent invocations (list,
+// latest, restore drill) otherwise fail with an Authorization error.
+func loadDotEnvIfAbsent() {
+	if os.Getenv("R2_ACCESS_KEY_ID") != "" && os.Getenv("R2_SECRET_ACCESS_KEY") != "" {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(exe), ".env"))
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if key = strings.TrimSpace(key); key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			os.Setenv(key, strings.TrimSpace(value))
+		}
+	}
 }
