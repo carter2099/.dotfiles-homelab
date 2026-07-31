@@ -61,14 +61,17 @@ Always use the `/create-skill` skill when creating a new user-level skill. Writi
 ## Dotfiles Management
 
 ```bash
-# The 'dotfiles' alias manages the bare repo
+# The 'dotfiles' command manages the bare repo
 dotfiles status
 dotfiles add <file>
 dotfiles commit -m "message"
 dotfiles push
 ```
 
-Alias defined in `.zshrc`: `dotfiles='/usr/bin/git --git-dir="$HOME/.dotfiles-homelab/" --work-tree="$HOME"'`
+`dotfiles` is a real command at `~/.local/bin/dotfiles` (tracked in the repo itself), so it
+works in any shell — no shell alias needed. In headless/bash sessions where `~/.local/bin` is
+not on PATH (e.g. agent tool shells), either `export PATH="$HOME/.local/bin:$PATH"` first or
+use the raw form: `/usr/bin/git --git-dir="$HOME/.dotfiles-homelab/" --work-tree="$HOME" ...`.
 
 **⚠️ Always use targeted `dotfiles add <path>` — never bare `dotfiles add -A` or `dotfiles add .`.** Since the work-tree is `$HOME`, an unqualified `add -A` would stage everything in `/home/carter/` that isn't gitignored. Scope adds to the specific file(s) being tracked.
 
