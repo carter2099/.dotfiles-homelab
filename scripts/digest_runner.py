@@ -54,8 +54,8 @@ SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL = "deepseek-v4-flash"                 # API-based primary
-MODEL_FALLBACK = "mimo-v2.5"               # API-based fallback via opencode-go
+MODEL = "mimo-v2.5"                       # API-based primary
+MODEL_FALLBACK = "deepseek-v4-flash"       # API-based fallback via opencode-go
 DEFAULT_TIMEOUT = 900
 RESEARCH_TIMEOUT = 1800
 FETCH_TIMEOUT = 900
@@ -159,7 +159,7 @@ def _detect_model_provider(model_id: str) -> dict:
 
     # Fallback: assume opencode-go (primary API provider for digest models)
     # Previously fell back to local-llm, which caused silent routing of API models
-    # (deepseek-v4-flash, mimo-v2.5) to the gaming rig's llama.cpp — resulting in
+    # (mimo-v2.5, deepseek-v4-flash) to the gaming rig's llama.cpp — resulting in
     # command failures when the local provider didn't have those models.
     if providers and "opencode-go" in providers:
         fb = {
@@ -2573,7 +2573,7 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true",
                         help="Test mode: isolate output in ~/digests/test/, copy prod SIF, write report")
     parser.add_argument("--model", type=str, default=None,
-                        help="Override the LLM model (e.g. ornith-1.0-9b-q6, deepseek-v4-flash)")
+                        help="Override the LLM model (e.g. mimo-v2.5, deepseek-v4-flash)")
     parser.add_argument("--test-label", type=str, default=None,
                         help="Label for test run directory (default: model name or 'test')")
     args = parser.parse_args()
