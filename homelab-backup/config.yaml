@@ -1,7 +1,7 @@
 schedule: "0 3 * * *"
 backup_dir: /home/carter/backups
 
-# 14 daily + 1 monthly + 1 yearly ≈ 168 MB max (well under R2 free 10 GB)
+# 14 daily + 1 monthly + 1 yearly; observed archive sizes 36.5–138.3 MB (recent ~50 MB/day), worst case ≈ 2.2 GB (well under R2 free 10 GB)
 retention:
   daily_days: 14
   monthly_count: 1
