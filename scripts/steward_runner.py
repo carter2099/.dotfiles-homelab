@@ -4934,12 +4934,6 @@ def _tldr_deterministic(facts):
 
     open_labels = [o["label"] for o in facts.get("audit_open") or []]
     failed_labels = [f["label"] for f in facts.get("audit_failed") or []]
-    if open_labels or failed_labels:
-        bits = []
-        if open_labels:
-            bits.append("still open: " + ", ".join(open_labels[:5]))
-    open_labels = [o["label"] for o in facts.get("audit_open") or []]
-    failed_labels = [f["label"] for f in facts.get("audit_failed") or []]
     n_cleared = facts.get("n_sections_cleared") or 0
     if open_labels or failed_labels:
         bits = []
@@ -4960,10 +4954,14 @@ def _tldr_deterministic(facts):
     else:
         parts.append("Audit clear.")
 
+    if facts.get("updates"):
+        parts.append("Updates: " + "; ".join(facts["updates"][:3]) + ".")
+    elif facts.get("n_failed_apply"):
+        parts.append(f"{facts['n_failed_apply']} update step(s) failed.")
+
     if facts.get("plans_approved"):
         parts.append(f"{facts['plans_approved']} approved plan(s) waiting.")
     if facts.get("ideas_outstanding") and facts.get("n_sections_open"):
-        # only mention ideas when something else is already noisy
         parts.append(f"{facts['ideas_outstanding']} ideas outstanding.")
 
     # Quiet night compression
