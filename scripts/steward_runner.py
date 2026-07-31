@@ -4955,6 +4955,21 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
             except ValueError:
                 pass
 
+    # Prune headless session dirs (sessions-automated/) older than 14 days.
+    # Headless transcripts are unbounded otherwise; interactive sessions are
+    # excluded here (steward's session-memory phase handles those read-only).
+    cutoff = datetime.now() - timedelta(days=14)
+    for d in SESSION_DIR.iterdir():
+        if d.is_dir():
+            try:
+                mtime = datetime.fromtimestamp(d.stat().st_mtime)
+                if mtime < cutoff:
+                    import shutil
+                    shutil.rmtree(d)
+                    print(f"  pruned session: {d.name}")
+            except OSError:
+                pass
+
     print(f"[P9] done -> {run_dir / 'summary.md'}")
 
 
