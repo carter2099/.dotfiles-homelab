@@ -514,12 +514,18 @@ def phase_0_setup(args):
 
     if "accounts" in proxy_health:
         for acct in proxy_health["accounts"]:
+            rolling = acct.get("rolling") or {}
+            weekly = acct.get("weekly") or {}
+            monthly = acct.get("monthly") or {}
             usage["accounts"].append({
                 "name": acct.get("name", "?"),
                 "tier": acct.get("tier", "unknown"),
-                "rolling_pct": acct.get("rolling", {}).get("pct", 0),
-                "weekly_pct": acct.get("weekly", {}).get("pct", 0),
-                "monthly_pct": acct.get("monthly", {}).get("pct", 0),
+                "rolling_pct": rolling.get("pct", 0),
+                "weekly_pct": weekly.get("pct", 0),
+                "monthly_pct": monthly.get("pct", 0),
+                "rolling_reset_in": rolling.get("reset_in") or "",
+                "weekly_reset_in": weekly.get("reset_in") or "",
+                "monthly_reset_in": monthly.get("reset_in") or "",
                 "payg_balance": acct.get("payg", {}).get("balance_usd"),
                 "payg_monthly_used": acct.get("payg", {}).get("monthly_usage_usd"),
                 "payg_monthly_limit": acct.get("payg", {}).get("monthly_limit_usd"),
@@ -562,9 +568,19 @@ def phase_0_setup(args):
         extra = ""
         if a["payg_balance"] is not None:
             extra = f", PAYG ${a['payg_balance']:.2f} remaining"
-        acct_lines.append(f"    {a['name']} ({a['tier']}): "
-                          f"rolling={a['rolling_pct']}%, weekly={a['weekly_pct']}%, "
-                          f"monthly={a['monthly_pct']}%{extra}")
+        resets = []
+        if a.get("rolling_reset_in"):
+            resets.append(f"5h→{a['rolling_reset_in']}")
+        if a.get("weekly_reset_in"):
+            resets.append(f"7d→{a['weekly_reset_in']}")
+        if a.get("monthly_reset_in"):
+            resets.append(f"30d→{a['monthly_reset_in']}")
+        reset_s = f" [{', '.join(resets)}]" if resets else ""
+        acct_lines.append(
+            f"    {a['name']} ({a['tier']}): "
+            f"5h={a['rolling_pct']}%, weekly={a['weekly_pct']}%, "
+            f"monthly={a['monthly_pct']}%{extra}{reset_s}"
+        )
     print(f"[P0] setup -> {artifact}")
     if usage["proxy_error"]:
         print(f"  proxy: UNREACHABLE ({usage['proxy_error']})")
@@ -957,15 +973,76 @@ def _p1_apt_upgrade():
     try:
         run(["sudo", "apt", "update"], capture_output=True, text=True)
         upgrade = run(["sudo", "apt", "upgrade", "-y"], capture_output=True, text=True)
-        stdout = upgrade.stdout
+        stdout = upgrade.stdout or ""
         m = re.search(r"(\d+)\s+upgraded", stdout)
-        if m:
-            upgraded = int(m.group(1))
-        return {"step": "apt_upgrade", "status": "ok", "upgraded_count": upgraded,
-                "output_tail": "\n".join(stdout.strip().splitlines()[-20:])}
+        upgraded = int(m.group(1)) if m else 0
+        # needrestart / apt may restart docker even when our auto_* steps later
+        # report "skipped" (versions already match post-upgrade).
+        docker_touched = bool(re.search(
+            r"(?im)^(setting up|unpacking)\s+docker-|"
+            r"^setting up\s+containerd\.io|"
+            r"restarting.*\bdocker\.service\b|"
+            r"\bdocker\.service\b.*restart",
+            stdout,
+        ))
+        return {
+            "step": "apt_upgrade",
+            "status": "ok",
+            "upgraded_count": upgraded,
+            "docker_touched": docker_touched,
+            "output_tail": "\n".join(stdout.strip().splitlines()[-20:]),
+        }
     except subprocess.CalledProcessError as e:
         return {"step": "apt_upgrade", "status": "failed", "error": str(e),
                 "output": e.stdout if e.stdout else ""}
+
+
+def _wait_docker_stack_ready(timeout_s=120):
+    """After docker daemon restart, wait until docker + key HTTP endpoints answer.
+
+    open-webui in particular can take >30s to leave 'health: starting' and bind
+    48100; a single immediate curl yields empty http_code and a false FAIL.
+    """
+    print(f"  [docker-settle] waiting up to {timeout_s}s for docker + endpoints")
+    deadline = time.time() + timeout_s
+    last = {"docker": "", "endpoints": {}}
+    while time.time() < deadline:
+        root = run_capture(
+            ["docker", "info", "--format", "{{.DockerRootDir}}"], timeout=15)
+        last["docker"] = root
+        if root != "/var/lib/docker":
+            time.sleep(3)
+            continue
+
+        endpoint_ok = {}
+        all_ok = True
+        for name, url in ENDPOINTS.items():
+            if name == "searxng":
+                # JSON content check is heavier; connectivity is enough here.
+                code = run_capture(
+                    ["curl", "-so", "/dev/null", "-w", "%{http_code}",
+                     "--connect-timeout", "3", "--max-time", "8",
+                     url.split("?")[0] if "?" in url else url],
+                    timeout=15,
+                )
+            else:
+                code = run_capture(
+                    ["curl", "-so", "/dev/null", "-w", "%{http_code}",
+                     "--connect-timeout", "3", "--max-time", "8", url],
+                    timeout=15,
+                )
+            ok = bool(code) and (code.startswith("2") or code.startswith("3"))
+            endpoint_ok[name] = code or "empty"
+            if not ok:
+                all_ok = False
+        last["endpoints"] = endpoint_ok
+        if all_ok:
+            print(f"  [docker-settle] ready: {endpoint_ok}")
+            return {"status": "ok", "endpoints": endpoint_ok}
+        time.sleep(3)
+
+    print(f"  [docker-settle] timed out: {last}")
+    return {"status": "timeout", **last}
 
 
 def _p1_auto_pkgs():
@@ -1173,15 +1250,22 @@ def phase_1_apply(run_dir, dry_run=False):
             write_json(run_dir / "01-applied.json", data)
             return data
 
-    # 1c: docker pause + assert if docker packages upgraded
+    # 1c: settle docker after apt/auto path restarts the daemon.
+    # apt needrestart may bounce docker even when auto_* later reports "skipped"
+    # (versions already match). open-webui takes >30s after daemon restart.
     docker_upgraded = any(
         s["step"].startswith("auto_docker") and s["status"] == "ok"
         for s in auto_results
     )
-    if docker_upgraded:
-        print("  [1c] docker daemon restart pause (10s)")
-        time.sleep(10)
-        steps.append({"step": "docker_pause", "status": "ok"})
+    docker_touched = bool(result.get("docker_touched")) or docker_upgraded
+    if docker_touched:
+        settle = _wait_docker_stack_ready(timeout_s=120)
+        steps.append({
+            "step": "docker_settle",
+            "status": settle.get("status", "ok"),
+            "endpoints": settle.get("endpoints", {}),
+            "reason": "apt_docker_touched" if result.get("docker_touched") else "auto_docker_upgrade",
+        })
         steps.append(_p1_docker_assert())
 
     # 1d: cloudflared restart if upgraded
@@ -1239,39 +1323,60 @@ def phase_2_validate(run_dir):
         "bad_pods": bad_lines, "output": bad_pods if bad_lines else "",
     })
 
-    # Endpoint curls
-    for name, url in ENDPOINTS.items():
-        if name == "searxng":
-            # SearXNG may return 200 with error content; validate JSON results array
-            resp = run_capture(["curl", "-s", "--connect-timeout", "10", url])
-            if resp:
-                try:
-                    data = json.loads(resp)
-                    healthy = isinstance(data.get("results"), list)
-                    checks.append({
+    # Endpoint curls — retry briefly; containers may still be binding after an
+    # apt-triggered docker restart (open-webui especially).
+    def _probe_endpoint(name, url, attempts=8, delay_s=5):
+        last = None
+        for i in range(attempts):
+            if name == "searxng":
+                resp = run_capture(
+                    ["curl", "-s", "--connect-timeout", "10", "--max-time", "20", url],
+                    timeout=25,
+                )
+                if resp:
+                    try:
+                        data = json.loads(resp)
+                        healthy = isinstance(data.get("results"), list)
+                        last = {
+                            "name": f"endpoint_{name}", "url": url,
+                            "http_code": "200", "status": "ok" if healthy else "fail",
+                            "content_valid": healthy,
+                        }
+                        if healthy:
+                            return last
+                    except json.JSONDecodeError:
+                        last = {
+                            "name": f"endpoint_{name}", "url": url,
+                            "http_code": "??", "status": "fail",
+                            "error": "invalid JSON response",
+                        }
+                else:
+                    last = {
                         "name": f"endpoint_{name}", "url": url,
-                        "http_code": "200", "status": "ok" if healthy else "fail",
-                        "content_valid": healthy,
-                    })
-                except json.JSONDecodeError:
-                    checks.append({
-                        "name": f"endpoint_{name}", "url": url,
-                        "http_code": "??", "status": "fail",
-                        "error": "invalid JSON response",
-                    })
+                        "http_code": "", "status": "fail",
+                        "error": "empty response",
+                    }
             else:
-                checks.append({
+                code = run_capture(
+                    ["curl", "-so", "/dev/null", "-w", "%{http_code}",
+                     "--connect-timeout", "5", "--max-time", "15", url],
+                    timeout=20,
+                )
+                healthy = bool(code) and (code.startswith("2") or code.startswith("3"))
+                last = {
                     "name": f"endpoint_{name}", "url": url,
-                    "http_code": "??", "status": "fail",
-                    "error": "empty response",
-                })
-        else:
-            code = run_capture(["curl", "-so", "/dev/null", "-w", "%{http_code}", url])
-            healthy = code.startswith("2") or code.startswith("3")
-            checks.append({
-                "name": f"endpoint_{name}", "url": url,
-                "http_code": code, "status": "ok" if healthy else "fail",
-            })
+                    "http_code": code, "status": "ok" if healthy else "fail",
+                }
+                if not code:
+                    last["error"] = "empty response / connect failed"
+                if healthy:
+                    return last
+            if i + 1 < attempts:
+                time.sleep(delay_s)
+        return last
+
+    for name, url in ENDPOINTS.items():
+        checks.append(_probe_endpoint(name, url))
 
     # LLM proxy X-Fallback header
     fallback = run_capture(["curl", "-sI", "http://127.0.0.1:8081/health"])
@@ -1711,14 +1816,139 @@ def phase_3a_remediation(run_dir, dry_run=False):
 
 # ── P4: heartbeat ────────────────────────────────────────────────────
 
+
+def _systemctl_unit_name(token):
+    """Normalize a systemctl list/failed token to a unit name.
+
+    Non-plain list-units prefixes failed/not-found rows with a glyph (often '●'),
+    so naive split()[0] returns the glyph and drops the real unit from the set —
+    which then falsely flags oneshot units like hyperliquid-sdk.service as missing.
+    Prefer --plain when collecting; this helper still defends mixed inputs.
+    """
+    if not token:
+        return ""
+    tok = token.strip()
+    if tok in {"●", "○", "×", "*"}:
+        return ""
+    # Strip leading non-unit junk (UTF-8 bullet etc.)
+    tok = re.sub(r"^[^\w@.\\-]+", "", tok)
+    return tok
+
+
+def _parse_systemctl_unit_names(output, suffixes=(".service", ".timer")):
+    """Extract unit names from systemctl list-units / --failed output."""
+    names = set()
+    for line in (output or "").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        unit = ""
+        for tok in parts[:3]:
+            cand = _systemctl_unit_name(tok)
+            if cand.endswith(suffixes):
+                unit = cand
+                break
+        if unit:
+            names.add(unit)
+    return names
+
+
+def _parse_failed_unit_lines(output):
+    """Return structured failed-unit rows from systemctl --failed --no-legend."""
+    rows = []
+    for line in (output or "").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        parts = raw.split()
+        unit = ""
+        for tok in parts[:3]:
+            cand = _systemctl_unit_name(tok)
+            if cand.endswith((".service", ".timer", ".socket", ".target", ".path", ".mount")):
+                unit = cand
+                break
+        if not unit:
+            continue
+        rows.append({"unit": unit, "raw": raw})
+    return rows
+
+
+def _clear_stale_oneshot_failures(failed_rows, env):
+    """Reset oneshot units stuck failed after a later successful run.
+
+    systemd leaves Type=oneshot units in failed until reset-failed. If the
+    hyperliquid state file records a Last run newer than the unit's last exit,
+    clear the stale failure so heartbeat/email stop alarming.
+    """
+    cleared = []
+    kept = []
+    for row in failed_rows:
+        unit = row.get("unit") or ""
+        if unit != "hyperliquid-sdk.service":
+            kept.append(row)
+            continue
+        state_path = HOME / "agent-state" / "hyperliquid-sdk.md"
+        if not state_path.exists():
+            kept.append(row)
+            continue
+        try:
+            text = state_path.read_text(errors="replace")
+        except OSError:
+            kept.append(row)
+            continue
+        m = re.search(r"\*\*Last run:\*\*\s*(\d{4}-\d{2}-\d{2})", text)
+        if not m:
+            kept.append(row)
+            continue
+        try:
+            last_run = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            kept.append(row)
+            continue
+        exit_ts = run_capture(
+            ["systemctl", "--user", "show", unit,
+             "-p", "ExecMainExitTimestamp", "--value"],
+            env=env,
+        ).strip()
+        exit_date = None
+        if exit_ts and exit_ts not in ("", "n/a", "0"):
+            dm = re.search(r"(\d{4}-\d{2}-\d{2})", exit_ts)
+            if dm:
+                try:
+                    exit_date = datetime.strptime(dm.group(1), "%Y-%m-%d").date()
+                except ValueError:
+                    exit_date = None
+        if exit_date is None or not (last_run > exit_date):
+            kept.append(row)
+            continue
+        run_capture(["systemctl", "--user", "reset-failed", unit], env=env)
+        still = run_capture(
+            ["systemctl", "--user", "is-failed", unit], env=env).strip()
+        if still == "failed":
+            kept.append(row)
+            continue
+        cleared.append({
+            "unit": unit,
+            "reason": f"state Last run {last_run} > unit exit {exit_date}",
+        })
+        print(f"  cleared stale failed unit {unit} (Last run {last_run} > exit {exit_date})")
+    return kept, cleared
+
+
 def phase_4_heartbeat(run_dir):
     """Phase 4: extended heartbeat block."""
     print("[P4] heartbeat checks")
     env = user_env()
 
-    # Failed systemd units
-    failed_user = run_capture(["systemctl", "--user", "--failed", "--no-legend"], env=env)
-    failed_system = run_capture(["systemctl", "--failed", "--no-legend"])
+    # Failed systemd units (plain output avoids ● glyph prefix)
+    failed_user = run_capture(
+        ["systemctl", "--user", "--failed", "--no-legend", "--plain"], env=env)
+    failed_system = run_capture(
+        ["systemctl", "--failed", "--no-legend", "--plain"])
+    failed_user_rows = _parse_failed_unit_lines(failed_user)
+    failed_system_rows = _parse_failed_unit_lines(failed_system)
+    failed_user_rows, cleared_failed = _clear_stale_oneshot_failures(
+        failed_user_rows, env)
 
     # LLM stack health
     llm_health = run_capture(["curl", "-s", "http://127.0.0.1:8081/health"])
@@ -1835,16 +2065,17 @@ def phase_4_heartbeat(run_dir):
         "homelab-backup-restore-drill.service", "homelab-backup-restore-drill.timer",
     }
     all_user_units = run_capture(
-        ["systemctl", "--user", "list-units", "--all", "--no-legend"],
+        ["systemctl", "--user", "list-units", "--all", "--no-legend", "--plain"],
         env=env,
     )
-    active_units = set()
-    for line in all_user_units.splitlines():
-        parts = line.split()
-        if parts:
-            name = parts[0]
-            if name.endswith(".service") or name.endswith(".timer"):
-                active_units.add(name)
+    # Prefer unit-files for "installed"; list-units can miss inactive oneshots.
+    # Union both so documented oneshots aren't false-missing.
+    user_unit_files_out = run_capture(
+        ["systemctl", "--user", "list-unit-files", "--no-legend", "--plain"],
+        env=env,
+    )
+    active_units = _parse_systemctl_unit_names(all_user_units)
+    active_units |= _parse_systemctl_unit_names(user_unit_files_out)
     extra_units = active_units - documented_units
     missing_units = documented_units - active_units
 
@@ -1854,14 +2085,12 @@ def phase_4_heartbeat(run_dir):
         "ufw.service", "cron.service", "containerd.service", "docker.service",
         "apparmor.service", "fstrim.timer",
     }
-    all_system_units = run_capture(["systemctl", "list-units", "--all", "--no-legend"])
-    active_system_units = set()
-    for line in all_system_units.splitlines():
-        parts = line.split()
-        if parts:
-            name = parts[0]
-            if name.endswith(".service") or name.endswith(".timer"):
-                active_system_units.add(name)
+    all_system_units = run_capture(
+        ["systemctl", "list-units", "--all", "--no-legend", "--plain"])
+    system_unit_files_out = run_capture(
+        ["systemctl", "list-unit-files", "--no-legend", "--plain"])
+    active_system_units = _parse_systemctl_unit_names(all_system_units)
+    active_system_units |= _parse_systemctl_unit_names(system_unit_files_out)
     extra_system_units = active_system_units - documented_system_units
     missing_system_units = documented_system_units - active_system_units
 
@@ -1931,17 +2160,7 @@ def phase_4_heartbeat(run_dir):
     missing_endpoints_drift = sorted(endpoint_ports - exposed_ports)
 
     # Unit drift: installed user units vs documented
-    installed_user_units = set()
-    user_unit_files = run_capture(
-        ["systemctl", "--user", "list-unit-files", "--no-legend"],
-        env=env,
-    )
-    for line in user_unit_files.splitlines():
-        parts = line.split()
-        if parts:
-            name = parts[0]
-            if name.endswith(".service") or name.endswith(".timer"):
-                installed_user_units.add(name)
+    installed_user_units = _parse_systemctl_unit_names(user_unit_files_out)
     extra_installed_units = sorted(installed_user_units - documented_units)
     stale_documented_units = sorted(documented_units - installed_user_units)
 
@@ -2006,8 +2225,11 @@ def phase_4_heartbeat(run_dir):
 
     data = {
         "failed_units": {
-            "user": failed_user.splitlines() if failed_user else [],
-            "system": failed_system.splitlines() if failed_system else [],
+            "user": [r["unit"] for r in failed_user_rows],
+            "system": [r["unit"] for r in failed_system_rows],
+            "user_raw": [r["raw"] for r in failed_user_rows],
+            "system_raw": [r["raw"] for r in failed_system_rows],
+            "cleared": cleared_failed,
         },
         "llm_stack": {"health": llm_health, "falling_back": falling_back},
         "backup": {"last_run": backup_ts},
@@ -3720,17 +3942,24 @@ def _html_health(validation_data, hb_data):
 
     # Failed systemd units
     uf = hb_data.get("failed_units", {}) or {}
-    user_f = [x for x in uf.get("user", []) if x and x.strip()]
-    sys_f = [x for x in uf.get("system", []) if x and x.strip()]
+    user_f = [x for x in uf.get("user", []) if x and str(x).strip()]
+    sys_f = [x for x in uf.get("system", []) if x and str(x).strip()]
+    cleared = [c for c in (uf.get("cleared") or []) if c]
     missing = (hb_data.get("units", {}) or {}).get("missing", [])
-    if user_f or sys_f or missing:
+    if user_f or sys_f or missing or cleared:
         parts = []
         for u in user_f:
-            parts.append(_dot("danger") + u.strip())
+            parts.append(_dot("danger") + html.escape(str(u).strip()))
         for u in sys_f:
-            parts.append(_dot("danger") + u.strip())
+            parts.append(_dot("danger") + html.escape(str(u).strip()))
         if missing:
-            parts.append(_dot("warn") + ", ".join(missing))
+            parts.append(_dot("warn") + "missing: " + html.escape(", ".join(map(str, missing))))
+        if cleared and not (user_f or sys_f):
+            # Only mention clears when nothing is still failed — avoids noise
+            clr = ", ".join(
+                html.escape(str(c.get("unit") or c)) for c in cleared[:4]
+            )
+            parts.append(_dot("ok") + f"cleared stale: {clr}")
         sys_rows.append(("Systemd units", " ".join(parts)))
 
     # Reboot
@@ -4102,7 +4331,11 @@ def _html_queue(queue_data):
 
 
 def _html_usage(usage_data):
-    """Render OpenCode Go usage report with higher contrast bars."""
+    """Render OpenCode Go usage report with higher contrast bars.
+
+    Windows match opencode-go-proxy / ocusage: rolling is 5h (not 24h).
+    Each row shows reset_in when the proxy provides it.
+    """
     accounts = usage_data.get("accounts", []) or []
     out = []
     for acct in accounts:
@@ -4114,32 +4347,39 @@ def _html_usage(usage_data):
         extra = " · ".join(extra_parts)
         out.append(
             f'<p style="margin:0 0 3px; font-size:13px;">'
-            f'<strong style="color:#1a1a2e;">{name}</strong> '
-            f'<span style="color:#9aa0b2; font-size:12px;">{extra}</span></p>'
+            f'<strong style="color:#1a1a2e;">{html.escape(str(name))}</strong> '
+            f'<span style="color:#9aa0b2; font-size:12px;">{html.escape(extra)}</span></p>'
         )
         rows = (
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             'style="font-size:12px; border-collapse:collapse; margin-bottom:10px;">'
         )
-        for label, key, color in [
-            ("Rolling 24h", "rolling_pct", "#1a1a2e"),
-            ("Weekly", "weekly_pct", "#0d47a1"),
-            ("Monthly", "monthly_pct", "#4a148c"),
+        for label, pct_key, reset_key, color in [
+            ("5h", "rolling_pct", "rolling_reset_in", "#1a1a2e"),
+            ("7d", "weekly_pct", "weekly_reset_in", "#0d47a1"),
+            ("30d", "monthly_pct", "monthly_reset_in", "#4a148c"),
         ]:
-            pct = acct.get(key, 0)
+            pct = acct.get(pct_key, 0)
             try:
                 pct = float(pct)
             except (TypeError, ValueError):
                 pct = 0.0
             fill_color = "#c62828" if pct >= 90 else color
+            reset_in = (acct.get(reset_key) or "").strip()
+            pct_cell = f"{pct:.0f}%"
+            if reset_in:
+                pct_cell += (
+                    f' <span style="color:#9aa0b2; font-weight:400; font-size:11px;">'
+                    f'· reset {html.escape(reset_in)}</span>'
+                )
             rows += (
                 '<tr>'
-                f'<td width="35%" style="padding:3px 0; color:#7b7b8a; font-size:12px; '
+                f'<td width="18%" style="padding:3px 0; color:#7b7b8a; font-size:12px; '
                 f'vertical-align:middle;">{label}</td>'
-                f'<td width="45%" style="padding:3px 0; vertical-align:middle;">'
+                f'<td width="42%" style="padding:3px 0; vertical-align:middle;">'
                 f'{_mini_bar(pct, fill_color)}</td>'
-                f'<td align="right" width="20%" style="padding:3px 0; color:#2a2a36; '
-                f'font-weight:600; vertical-align:middle;">{pct:.0f}%</td>'
+                f'<td align="right" width="40%" style="padding:3px 0; color:#2a2a36; '
+                f'font-weight:600; vertical-align:middle; white-space:nowrap;">{pct_cell}</td>'
                 '</tr>'
             )
         rows += '</table>'
@@ -4147,7 +4387,8 @@ def _html_usage(usage_data):
     if usage_data.get("proxy_error"):
         out.append(
             f'<p style="margin:6px 0 0; color:#c62828; font-size:12px;">'
-            f'{_dot("danger")}Proxy unreachable: {usage_data["proxy_error"]}</p>'
+            f'{_dot("danger")}Proxy unreachable: '
+            f'{html.escape(str(usage_data["proxy_error"]))}</p>'
         )
     if not out:
         out.append('<p style="margin:0; color:#9aa0b2; font-size:13px;">No usage data.</p>')
