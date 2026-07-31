@@ -60,6 +60,8 @@ if _FNM_NODE_DIRS:
 SMALL_MODEL = "opencode-go/deepseek-v4-flash"
 PROXY_HEALTH = "http://localhost:8082/health"
 MAX_WORKERS = 3
+# P7b fix↔judge loop: re-fix judge-not-ok items up to N times (env override).
+FIX_MAX_ITERS = max(1, int(os.environ.get("STEWARD_FIX_MAX_ITERS", "3")))
 
 # Timeout and model for headless omp JSON calls
 OMP_JSON_TIMEOUT = 2700
@@ -3620,8 +3622,131 @@ def _parse_fix_markdown_table(raw_text, section_name, original_error):
     return {"fixes_applied": [], "summary": original_error, "error": original_error}
 
 
+def _finding_key(item):
+    """Stable key across worker findings, fix rows, and judge reviews."""
+    if not isinstance(item, dict):
+        return re.sub(r"\s+", " ", str(item or "").strip().lower())[:200]
+    raw = (
+        item.get("claim")
+        or item.get("finding")
+        or item.get("evidence")
+        or item.get("action")
+        or ""
+    )
+    return re.sub(r"\s+", " ", str(raw).strip().lower())[:200]
+
+
+def _is_unfixable_note(note):
+    """True when judge/fix text says human/deferred/unfixable — don't retry."""
+    return bool(re.search(
+        r"(?i)\b(unfixable|cannot fix|can't fix|needs? human|manual(ly)?|"
+        r"deferred|out of scope|not actionable|unverifiable|"
+        r"requires? (carter|human|manual)|correctly deferred)\b",
+        note or "",
+    ))
+
+
+def _index_by_finding_key(items):
+    """Map finding_key -> item (last write wins). Skips empty keys."""
+    out = {}
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        k = _finding_key(it)
+        if k:
+            out[k] = it
+    return out
+
+
+def _remaining_after_judge(findings, judge_packet, fixes_applied):
+    """Findings still needing work after a judge pass.
+
+    Keeps only items the judge marked ok=false (or failed fixes with no
+    positive review). Drops pass/deferred/unfixable. Unmatched judge
+    reviews are returned separately for artifact logging.
+    """
+    reviewed = judge_packet.get("reviewed") or []
+    if not isinstance(reviewed, list):
+        reviewed = []
+    verdict = str(judge_packet.get("verdict") or "").lower()
+    if verdict == "pass":
+        return [], [r for r in reviewed if isinstance(r, dict)]
+
+    review_by_key = _index_by_finding_key(reviewed)
+    fix_by_key = _index_by_finding_key(fixes_applied)
+    matched_review_keys = set()
+    remaining = []
+
+    for f in findings or []:
+        if not isinstance(f, dict):
+            continue
+        key = _finding_key(f)
+        if not key:
+            continue
+        rev = review_by_key.get(key)
+        fix = fix_by_key.get(key)
+        if rev is not None:
+            matched_review_keys.add(key)
+            ok = rev.get("ok")
+            note = str(rev.get("note") or "")
+            if ok is True or str(ok).lower() in ("true", "yes", "pass"):
+                continue
+            if _is_unfixable_note(note):
+                continue
+            # ok=false (or missing/ambiguous) → retry with judge note
+            retry = dict(f)
+            retry["prior_judge_note"] = note[:400]
+            if fix and fix.get("action"):
+                retry["prior_fix_action"] = str(fix.get("action"))[:400]
+            if fix and fix.get("status"):
+                retry["prior_fix_status"] = fix.get("status")
+            remaining.append(retry)
+            continue
+
+        # No matching review row — use fix status + overall verdict.
+        status = str((fix or {}).get("status") or "").lower()
+        if status == "deferred" or _is_unfixable_note(str((fix or {}).get("action") or "")):
+            continue
+        if status == "fixed" and verdict in ("partial", ""):
+            # Judge didn't call this one out; treat as accepted on partial.
+            continue
+        if status == "failed" or verdict == "fail":
+            retry = dict(f)
+            if fix and fix.get("action"):
+                retry["prior_fix_action"] = str(fix.get("action"))[:400]
+            retry["prior_fix_status"] = status or "unknown"
+            retry["prior_judge_note"] = str(judge_packet.get("summary") or "judge fail / fix failed")[:400]
+            remaining.append(retry)
+
+    unmatched_reviews = [
+        r for k, r in review_by_key.items() if k not in matched_review_keys
+    ]
+    return remaining, unmatched_reviews
+
+
+def _merge_fixes_applied(iterations):
+    """Collapse per-iteration fixes; last write wins per finding key."""
+    merged = {}
+    order = []
+    for it in iterations:
+        for fix in it.get("fixes_applied") or []:
+            if not isinstance(fix, dict):
+                continue
+            k = _finding_key(fix) or f"anon-{len(order)}"
+            if k not in merged:
+                order.append(k)
+            row = dict(fix)
+            row["iteration"] = it.get("n")
+            merged[k] = row
+    return [merged[k] for k in order]
+
+
 def _fix_one_section(section_name, confirmed_findings, dry_run):
-    """Fix all confirmed findings for one audit section. Returns fix result dict."""
+    """Fix confirmed findings for one audit section; loop until judge pass or cap.
+
+    Each iteration: fix agent on *remaining* findings only → judge → drop ok/
+    unfixable items. Cap via FIX_MAX_ITERS / STEWARD_FIX_MAX_ITERS (default 3).
+    """
     if dry_run:
         return {
             "section": section_name,
@@ -3629,106 +3754,202 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
             "findings_count": len(confirmed_findings),
             "fixes_applied": [],
             "judge_verdict": "dry-run",
+            "iterations": [],
+            "iteration_count": 0,
+            "max_iters": FIX_MAX_ITERS,
         }
 
-    # Skip if no findings or none are actionable
-    actionable = confirmed_findings  # all confirmed findings are actionable
-    if not actionable:
+    if not confirmed_findings:
         return {
             "section": section_name,
             "status": "skipped",
             "reason": "no actionable findings",
-            "findings_count": len(confirmed_findings),
+            "findings_count": 0,
             "fixes_applied": [],
+            "iterations": [],
+            "iteration_count": 0,
+            "max_iters": FIX_MAX_ITERS,
         }
 
-    # Build fix prompt with all findings for this section
-    findings_text = json.dumps(actionable, indent=2)
-    fix_prompt = (
-        f"Fix the following homelab issues found by the steward audit "
-        f"for section '{section_name}'.\n\n"
-        f"You are a homelab maintenance agent. For each finding below, apply "
-        f"the fix described. Work in ~/dev/ clones for code changes, commit + push, "
-        f"and update AGENTS.md if needed.\n\n"
-        f"RULES:\n"
-        f"- Fix ONLY what the finding describes — don't go beyond scope.\n"
-        f"- For AGENTS.md edits: apply the exact OLD_TEXT to NEW_TEXT replacement.\n"
-        f"- For config drift (k3s, dotfiles, notes): sync the live config to tracked copies.\n"
-        f"- For resource issues: prune old files, clean up disk.\n"
-        f"- For agent fleet issues: restart failed services, fix timers.\n"
-        f"- Skip findings that would require upgrading production infrastructure "
-        f"(k3s, Docker daemon, etc.) — mark those as 'deferred'.\n"
-        f"- Commit each fix with a clear message referencing the audit section.\n"
-        f"- CRITICAL: Return ONLY a fenced ```json code block. No surrounding text, "
-        f"no markdown tables, no explanations outside the JSON. The JSON is the ONLY output.\n\n"
-        f"FINDINGS:\n{findings_text}\n\n"
-        f'Return ONLY this JSON (no other text):\n'
-        f'```json\n'
-        f'{{"fixes_applied": [{{"finding": "...", "action": "...", '
-        f'"commit": "hash or N/A", "status": "fixed"|"deferred"|"failed"}}], '
-        f'"summary": "one sentence"}}\n'
-        f'```'
-    )
-    fix_output = ""
-    try:
-        fix_output = _call_omp_p(fix_prompt, model=SMALL_MODEL, timeout=600, mode="json")
-        fix_packet = _extract_json(fix_output, f"fix-{section_name}")
-    except Exception as e:
-        # Fallback: try to parse markdown table if JSON extraction failed
-        fix_packet = _parse_fix_markdown_table(fix_output, section_name, str(e))
+    remaining = [dict(f) for f in confirmed_findings if isinstance(f, dict)]
+    iterations = []
+    stop_reason = "max_iters"
+    final_judge = {"verdict": "unknown", "summary": "", "reviewed": []}
 
-    # Judge review of all fixes
-    fixes_json = json.dumps(fix_packet.get("fixes_applied", []), indent=2)
-    judge_prompt = (
-        f"Review these automated fixes for audit section '{section_name}'.\n\n"
-        f"For each fix, verify it was applied correctly by checking the actual "
-        f"files/state. Flag any fix that was incorrect, incomplete, or overreaching.\n\n"
-        f"FIXES APPLIED:\n{fixes_json}\n\n"
-        f"CRITICAL: Return ONLY a fenced ```json code block. No surrounding text.\n"
-        f'```json\n'
-        f'{{\n'
-        f'  "verdict": "pass"|"partial"|"fail",\n'
-        f'  "reviewed": [{{"finding": "...", "ok": true|false, "note": "..."}}],\n'
-        f'  "summary": "one sentence"\n'
-        f'}}\n'
-        f'```'
-    )
-    try:
-        judge_output = _call_omp_p(judge_prompt, model=SMALL_MODEL, timeout=600, mode="json")
-        judge_packet = _extract_json(judge_output, f"judge-fix-{section_name}")
-    except Exception as e:
-        # Sometimes the judge returns plain text instead of JSON.
-        # Detect positive signals and treat as implicit pass.
-        positive_indicators = [
-            "no flags", "acknowledged", "all.*ok", "looks good",
-            "no issues", "verified", "pass", "confirmed", "correctly",
-            "applied correctly", "fixes confirmed", "no action needed",
-            "^correct", "no drift", "no changes needed", "all current",
-        ]
-        if any(re.search(p, judge_output, re.IGNORECASE) for p in positive_indicators):
-            judge_packet = {
-                "verdict": "pass",
-                "reviewed": [],
-                "summary": "Implicit pass — judge returned plain text with positive signals"
-            }
-        else:
-            judge_packet = {"verdict": "fail", "reviewed": [], "summary": str(e)}
+    for n in range(1, FIX_MAX_ITERS + 1):
+        findings_text = json.dumps(remaining, indent=2)
+        retry_blurb = ""
+        if n > 1:
+            retry_blurb = (
+                f"This is retry iteration {n}/{FIX_MAX_ITERS}. Prior attempt(s) were "
+                f"judged incomplete. Fix ONLY the findings listed below. Each may "
+                f"include prior_judge_note / prior_fix_action — address those notes "
+                f"with NEW evidence of the fix. Do NOT re-touch findings not listed. "
+                f"Do NOT expand scope.\n\n"
+            )
+        fix_prompt = (
+            f"Fix the following homelab issues found by the steward audit "
+            f"for section '{section_name}'.\n\n"
+            f"{retry_blurb}"
+            f"You are a homelab maintenance agent. For each finding below, apply "
+            f"the fix described. Work in ~/dev/ clones for code changes, commit + push, "
+            f"and update AGENTS.md if needed.\n\n"
+            f"RULES:\n"
+            f"- Fix ONLY what the finding describes — don't go beyond scope.\n"
+            f"- For AGENTS.md edits: apply the exact OLD_TEXT to NEW_TEXT replacement.\n"
+            f"- For config drift (k3s, dotfiles, notes): sync the live config to tracked copies.\n"
+            f"- For resource issues: prune old files, clean up disk.\n"
+            f"- For agent fleet issues: restart failed services, fix timers.\n"
+            f"- Skip findings that would require upgrading production infrastructure "
+            f"(k3s, Docker daemon, etc.) — mark those as 'deferred'.\n"
+            f"- Commit each fix with a clear message referencing the audit section.\n"
+            f"- CRITICAL: Return ONLY a fenced ```json code block. No surrounding text, "
+            f"no markdown tables, no explanations outside the JSON. The JSON is the ONLY output.\n\n"
+            f"FINDINGS:\n{findings_text}\n\n"
+            f'Return ONLY this JSON (no other text):\n'
+            f'```json\n'
+            f'{{"fixes_applied": [{{"finding": "...", "action": "...", '
+            f'"commit": "hash or N/A", "status": "fixed"|"deferred"|"failed"}}], '
+            f'"summary": "one sentence"}}\n'
+            f'```'
+        )
+        fix_output = ""
+        try:
+            fix_output = _call_omp_p(fix_prompt, model=SMALL_MODEL, timeout=600, mode="json")
+            fix_packet = _extract_json(fix_output, f"fix-{section_name}-i{n}")
+        except Exception as e:
+            fix_packet = _parse_fix_markdown_table(fix_output, section_name, str(e))
 
+        fixes_applied = fix_packet.get("fixes_applied") or []
+        if not isinstance(fixes_applied, list):
+            fixes_applied = []
+
+        fixes_json = json.dumps(fixes_applied, indent=2)
+        remaining_json = json.dumps(
+            [{"claim": f.get("claim") or f.get("finding") or f.get("evidence") or "",
+              "prior_judge_note": f.get("prior_judge_note", "")}
+             for f in remaining],
+            indent=2,
+        )
+        judge_prompt = (
+            f"Review these automated fixes for audit section '{section_name}' "
+            f"(iteration {n}/{FIX_MAX_ITERS}).\n\n"
+            f"For each fix, verify it was applied correctly by checking the actual "
+            f"files/state. Flag any fix that was incorrect, incomplete, or overreaching.\n"
+            f"Findings still in scope this iteration:\n{remaining_json}\n\n"
+            f"FIXES APPLIED:\n{fixes_json}\n\n"
+            f"CRITICAL: Return ONLY a fenced ```json code block. No surrounding text.\n"
+            f"Use the same finding text as in FIXES APPLIED / scope list so items match.\n"
+            f'```json\n'
+            f'{{\n'
+            f'  "verdict": "pass"|"partial"|"fail",\n'
+            f'  "reviewed": [{{"finding": "...", "ok": true|false, "note": "..."}}],\n'
+            f'  "summary": "one sentence"\n'
+            f'}}\n'
+            f'```'
+        )
+        judge_output = ""
+        try:
+            judge_output = _call_omp_p(judge_prompt, model=SMALL_MODEL, timeout=600, mode="json")
+            judge_packet = _extract_json(judge_output, f"judge-fix-{section_name}-i{n}")
+        except Exception as e:
+            positive_indicators = [
+                "no flags", "acknowledged", "all.*ok", "looks good",
+                "no issues", "verified", "pass", "confirmed", "correctly",
+                "applied correctly", "fixes confirmed", "no action needed",
+                "^correct", "no drift", "no changes needed", "all current",
+            ]
+            if judge_output and any(
+                re.search(p, judge_output, re.IGNORECASE) for p in positive_indicators
+            ):
+                judge_packet = {
+                    "verdict": "pass",
+                    "reviewed": [],
+                    "summary": "Implicit pass — judge returned plain text with positive signals",
+                }
+            else:
+                judge_packet = {
+                    "verdict": "fail",
+                    "reviewed": [],
+                    "summary": str(e),
+                }
+
+        if not isinstance(judge_packet, dict):
+            judge_packet = {"verdict": "fail", "reviewed": [], "summary": "invalid judge packet"}
+
+        next_remaining, unmatched_reviews = _remaining_after_judge(
+            remaining, judge_packet, fixes_applied
+        )
+        iter_rec = {
+            "n": n,
+            "input_findings_count": len(remaining),
+            "fixes_applied": fixes_applied,
+            "fix_summary": fix_packet.get("summary", ""),
+            "judge_verdict": judge_packet.get("verdict", "unknown"),
+            "judge_summary": judge_packet.get("summary", ""),
+            "judge_reviewed": judge_packet.get("reviewed") or [],
+            "remaining_after": len(next_remaining),
+        }
+        if unmatched_reviews:
+            iter_rec["unmatched_judge_reviews"] = unmatched_reviews
+        iterations.append(iter_rec)
+        final_judge = judge_packet
+
+        print(
+            f"    {section_name} iter {n}/{FIX_MAX_ITERS}: "
+            f"judge={iter_rec['judge_verdict']} "
+            f"fixes={len(fixes_applied)} remaining={len(next_remaining)}"
+        )
+
+        if str(judge_packet.get("verdict") or "").lower() == "pass":
+            stop_reason = "pass"
+            remaining = []
+            break
+        if not next_remaining:
+            stop_reason = "no_remaining"
+            remaining = []
+            break
+
+        prev_keys = sorted(_finding_key(f) for f in remaining)
+        next_keys = sorted(_finding_key(f) for f in next_remaining)
+        if next_keys == prev_keys and n > 1:
+            # No progress on which items remain — stop spinning.
+            stop_reason = "no_progress"
+            remaining = next_remaining
+            break
+        # Also stop if fix agent applied nothing actionable on a retry
+        if n > 1 and not fixes_applied:
+            stop_reason = "empty_fix"
+            remaining = next_remaining
+            break
+
+        remaining = next_remaining
+    else:
+        # exhausted for-loop without break
+        stop_reason = "max_iters"
+
+    merged_fixes = _merge_fixes_applied(iterations)
+    last = iterations[-1] if iterations else {}
     return {
         "section": section_name,
         "status": "fixed",
         "findings_count": len(confirmed_findings),
-        "actionable_count": len(actionable),
-        "fixes_applied": fix_packet.get("fixes_applied", []),
-        "fix_summary": fix_packet.get("summary", ""),
-        "judge_verdict": judge_packet.get("verdict", "unknown"),
-        "judge_summary": judge_packet.get("summary", ""),
-        "judge_reviewed": judge_packet.get("reviewed", []),
+        "actionable_count": len(confirmed_findings),
+        "fixes_applied": merged_fixes,
+        "fix_summary": last.get("fix_summary", ""),
+        "judge_verdict": last.get("judge_verdict", final_judge.get("verdict", "unknown")),
+        "judge_summary": last.get("judge_summary", final_judge.get("summary", "")),
+        "judge_reviewed": last.get("judge_reviewed", final_judge.get("reviewed") or []),
+        "iterations": iterations,
+        "iteration_count": len(iterations),
+        "max_iters": FIX_MAX_ITERS,
+        "stop_reason": stop_reason,
+        "remaining_unfixed": len(remaining),
     }
 
 
 def phase_7b_fix(run_dir, dry_run=False):
-    """Phase 7b: auto-fix confirmed audit findings, with judge review."""
+    """Phase 7b: auto-fix confirmed findings with fix↔judge loop (capped)."""
     print("[P7b] auto-fix")
     audit_path = run_dir / "07-audit.json"
     if not audit_path.exists():
@@ -3755,7 +3976,8 @@ def phase_7b_fix(run_dir, dry_run=False):
         write_json(run_dir / "07b-fixes.json", {"sections": [], "status": "nothing_to_fix"})
         return
 
-    print(f"  fixing {len(to_fix)} sections (max_workers={MAX_WORKERS})")
+    print(f"  fixing {len(to_fix)} sections (max_workers={MAX_WORKERS}, "
+          f"max_iters={FIX_MAX_ITERS})")
     fix_results = []
 
     if dry_run:
@@ -3778,7 +4000,11 @@ def phase_7b_fix(run_dir, dry_run=False):
                 fix_results.append(r)
                 applied = len(r.get("fixes_applied", []))
                 jv = r.get("judge_verdict", "?")
-                print(f"    {name}: {r['status']} — {applied} fixes, judge: {jv}")
+                iters = r.get("iteration_count") or len(r.get("iterations") or []) or 1
+                stop = r.get("stop_reason", "")
+                jv_disp = f"{jv}@{iters}" if iters else jv
+                extra = f", stop={stop}" if stop and stop not in ("pass", "") else ""
+                print(f"    {name}: {r['status']} — {applied} fixes, judge: {jv_disp}{extra}")
 
     # Sort to canonical section order
     order = {s["name"]: i for i, s in enumerate(AUDIT_SECTIONS)}
@@ -3789,8 +4015,10 @@ def phase_7b_fix(run_dir, dry_run=False):
 
     total_fixes = sum(len(r.get("fixes_applied", [])) for r in fix_results)
     judge_oks = sum(1 for r in fix_results if r.get("judge_verdict") == "pass")
+    multi = sum(1 for r in fix_results if (r.get("iteration_count") or 0) > 1)
     print(f"[P7b] done -> {run_dir / '07b-fixes.json'} "
-          f"({total_fixes} fixes across {len(fix_results)} sections, {judge_oks} judge-pass)")
+          f"({total_fixes} fixes across {len(fix_results)} sections, "
+          f"{judge_oks} judge-pass, {multi} multi-iter)")
     return master
 
 def _html_updates(applied_data):
@@ -4106,7 +4334,7 @@ def _summarize_audit_sections(section_payloads):
 
     compact = []
     for p in section_payloads:
-        compact.append({
+        row = {
             "name": p["name"],
             "verdict": p["verdict"],
             "findings": p["findings"][:12],
@@ -4120,12 +4348,24 @@ def _summarize_audit_sections(section_payloads):
             ],
             "fix_summary": (p.get("fix_summary") or "")[:300],
             "judge_summary": (p.get("judge_summary") or "")[:300],
-        })
+        }
+        iters = p.get("iteration_count") or 0
+        if iters > 1:
+            row["fix_iterations"] = iters
+            row["fix_stop_reason"] = p.get("stop_reason") or ""
+            if p.get("remaining_unfixed"):
+                row["remaining_unfixed"] = p.get("remaining_unfixed")
+        jv = p.get("judge_verdict") or ""
+        if jv:
+            row["fix_judge_verdict"] = jv
+        compact.append(row)
 
     prompt = (
         "You summarize Homelab Steward audit+fix results for a nightly email.\n\n"
         "For EACH section below, write 1-3 plain-English sentences a human can skim.\n"
         "Cover: what was wrong (if anything), what got fixed, what remains / was deferred.\n"
+        "If fix_iterations > 1, briefly note that the fix needed a retry (e.g. 'cleared on "
+        "second try') — don't dwell on loop mechanics.\n"
         "No badge jargon (DRIFT/ATTENTION). No bullet lists. No filenames unless load-bearing.\n"
         "If findings are all 'already current' noise and fixes are empty, say versions/state "
         "were verified current.\n\n"
@@ -4179,6 +4419,9 @@ def _html_audit(audit_data, fixes_data=None):
                 "fix_summary": s.get("fix_summary", ""),
                 "judge_summary": s.get("judge_summary", ""),
                 "judge_verdict": s.get("judge_verdict", ""),
+                "iteration_count": s.get("iteration_count") or len(s.get("iterations") or []) or 0,
+                "stop_reason": s.get("stop_reason", ""),
+                "remaining_unfixed": s.get("remaining_unfixed", 0),
             }
 
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -4200,6 +4443,10 @@ def _html_audit(audit_data, fixes_data=None):
             "fixes": fixes,
             "fix_summary": meta.get("fix_summary", ""),
             "judge_summary": meta.get("judge_summary", ""),
+            "judge_verdict": meta.get("judge_verdict", ""),
+            "iteration_count": meta.get("iteration_count") or 0,
+            "stop_reason": meta.get("stop_reason", ""),
+            "remaining_unfixed": meta.get("remaining_unfixed") or 0,
             "error": (sec.get("error") or sec.get("worker_error") or "").strip(),
             "sec": sec,
         })
