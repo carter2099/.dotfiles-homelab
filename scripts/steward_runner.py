@@ -2819,6 +2819,16 @@ def _audit_collector_3_digest_quality():
                 for hf in html_files:
                     html = (d / hf).read_text()
                     placeholder_count += len(re.findall(r"\{\{[A-Z_]+\}\}", html))
+                # Phase 9 archival copy (top-level YYYY-MM-DD.md, digest_md_path) lives
+                # outside the run dir and was never scanned — it has hidden fabricated
+                # example.com stories and raw prompt echoes (digest-quality audit gap).
+                top_md = topic_dir / f"{d.name}.md"
+                if top_md.exists():
+                    top_text = top_md.read_text()
+                    placeholder_count += len(re.findall(r"\{\{[A-Z_]+\}\}", top_text))
+                    placeholder_count += len(re.findall(r"https?://example\.com\b", top_text))
+                    placeholder_count += len(re.findall(
+                        r"Any notable stories or angles that were missed today", top_text))
                 tev["runs"].append({
                     "date": d.name,
                     "artifacts": artifacts,
