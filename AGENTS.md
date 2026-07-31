@@ -22,11 +22,8 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Single-node homelab running on Ubuntu Server (ThinkPad L14 Gen 3, AMD Ryzen 5 PRO 5675U, 16GB RAM, 512 GB NVMe SSD). A k3s Kubernetes cluster routes traffic via Traefik ingress to apps running in Docker Compose on the host machine. The server uses wired ethernet (`enp3s0f0`) as its primary uplink, with static IP `192.168.4.92` (k3s node IP; blog + delta_neutral ingress) and a DHCP-assigned secondary `192.168.4.100` (default-route source) — all on the same physical interface. WiFi (`wlp6s0`) is disabled.
+Single-node homelab: Ubuntu Server on a ThinkPad L14 Gen 3 (16GB RAM, 512GB NVMe), k3s routing via Traefik to apps in Docker Compose. Hardware/network facts (NICs, IPs, WiFi): [`hardware.md`](notes/docs/homelab/hardware.md); k3s architecture + node IP: [`k3s.md`](notes/docs/homelab/k3s.md).
 
-## Hardware
-
-**ThinkPad L14 Gen 3 (AMD)** — Ryzen 5 PRO 5675U, 16GB RAM, 512 GB NVMe. Wired NIC `enp3s0f0` (primary), static IP `192.168.4.92` for k3s ingress + DHCP secondary IP `192.168.4.100`. Full specs at [`~/notes/docs/homelab/hardware.md`](notes/docs/homelab/hardware.md).
 ## Repository Structure
 
 Home directory managed as a bare git repo for dotfiles. Key dirs:
@@ -108,77 +105,24 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **OMP Web** (agent web UI, localhost:30141) → [`omp-web.md`](notes/docs/homelab/omp-web.md)
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
-- **OpenCode Go Proxy** (localhost:8082) → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
+- **OpenCode Go Proxy** (localhost:8082) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
 - **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
 - **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 ## Email Digests
 
-Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) via 9-phase Python workflow. Full architecture at [`~/notes/docs/homelab/email-digests.md`](notes/docs/homelab/email-digests.md).
+Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) at 08:00 UTC via `digests-daily.timer`. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
 
-All five run sequentially at 08:00 UTC via `digests-daily.timer`. Key files: `~/scripts/digest_runner.py`, `~/scripts/run_all_digests.sh`, `~/scripts/send_digest.py`.
 ## Homelab Steward
 
-Daily maintenance at 5:00 PM ET via `homelab-steward.timer`. Multi-phase Python orchestrator (Phases P0–P9 with sub-phases) (`~/scripts/steward_runner.py`). Full architecture at [`~/notes/docs/homelab/homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
+Daily maintenance at 5:00 PM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, stop on first failure. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
 
-**Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, stop on first failure.
 ## Agent CLI: omp
 
-The sole agent CLI on this host is **omp** (`@oh-my-pi/pi-coding-agent`, installed via bun). The legacy `pi` agent and pi-web have been removed — all automated and interactive agent sessions use omp.
-
-| | omp |
-|---|---|
-| **Package** | `@oh-my-pi/pi-coding-agent` |
-| **Binary** | `omp` (at `~/.bun/bin/omp`) |
-| **Config dir** | `~/.omp/agent/` |
-| **Skills** | `~/.omp/agent/skills/` (user-level, tracked in dotfiles) |
-| **Extension API** | `@oh-my-pi/pi-coding-agent` ExtensionAPI (same import path as pi) |
-
-### What uses omp
-
-| System | Invocation | Notes |
-|---|---|---|
-| **Steward** (`steward_runner.py`) | `omp -p` | Headless subprocess |
-| **Digests** (`digest_runner.py`) | `omp -p` | Headless with `@file` prompt loading |
-| **Hyperliquid SDK** (`run_hyperliquid_sdk.sh`) | `omp -p` | Headless on systemd timer |
-| **Dependabot webhook** | Go binary (`dependabot-webhook`) | Sandbox via `OMP_SANDBOX_EXT` env var in service unit, pointed at `~/.config/dependabot-webhook/omp-sandbox.ts` |
-| **Interactive sessions** | `omp` | SSH into the homelab; run `omp` directly |
-
-### Auth & models
-
-omp shares the same model providers (opencode-go-proxy, llm-proxy). Provider config lives in `~/.omp/agent/models.yml` (providers + local model definitions) and `~/.omp/agent/config.yml` (model roles, extensions). Auth for opencode-go is `--api-key proxy` (the opencode-go-proxy on localhost:8082 owns the real keys; clients send the placeholder `proxy`).
-
-### Headless config overlay (`headless-override.yml`)
-
-Every headless `omp -p` invocation (steward, digests, hyperliquid SDK, dependabot) passes `--config ~/.omp/agent/headless-override.yml`, which deep-merges over the global config. This decouples automated-agent settings from interactive sessions. The overlay currently pins:
-- `advisor.enabled: true` — interactive `/advisor off` does not disable it for scheduled runs
-- `advisor.syncBacklog: off` — advisor never blocks the primary in batch processing
+The sole agent CLI on this host is **omp** (`@oh-my-pi/pi-coding-agent`, via bun; binary at `~/.bun/bin/omp`, config in `~/.omp/agent/`). Headless runs (`omp -p`) pass `--config ~/.omp/agent/headless-override.yml`. What uses omp, auth/models, remote ops, reboot protocol: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
 
 ## Remote Agent Operations
 
-**Remote access is via SSH + omp.** Carter uses Termius (iOS) + SSH to connect to the homelab and runs `omp` interactively. The previous web-based agents (pi-web, Paseo) have been removed.
-
-- **SSH access:** `ssh carter@<host>` — key auth (`~/.ssh/id_ed25519`). Also available via CF tunnel at `ssh.carter2099.com` (SSH-over-tunnel through `cloudflared access ssh` / CF Access).
-- **Interactive omp:** once SSH'd in, run `omp` to start an interactive agent session in the current directory. Headless mode: `omp -p "prompt"`.
-- **XDG_RUNTIME_DIR:** before any `systemctl --user ...` commands, set `export XDG_RUNTIME_DIR=/run/user/$(id -u)` (required for systemctl --user to reach the user bus).
-
-### Reboot protocol
-
-Never `sudo reboot` directly. Use the `homelab-reboot` skill, which:
-1. Writes `~/agent-state/pending.md` with timestamp, reason, and a one-paragraph summary of the current in-flight work.
-2. Only then issues `sudo systemctl reboot`.
-
-This guarantees the next session has context for what happened. If the skill isn't available for some reason, do the two steps manually in that order.
-
-### Startup check (cross-reboot continuity)
-
-At the start of every interactive session, check `~/agent-state/pending.md`. If it exists:
-1. Read it.
-2. If `mtime` is within the last 30 minutes, summarize its contents to the user up front ("Last reboot was at X for reason Y; in-flight task was Z").
-3. Delete the file (`rm ~/agent-state/pending.md`) once acknowledged so it doesn't re-surface next session.
-4. If mtime is older than 30 min, the file is stale — surface it briefly and delete.
-
-This is the mechanism by which tasks survive reboots. It is the *only* expectation of cross-reboot continuity.
-
+Carter connects via SSH (Termius on iOS) and runs `omp` interactively. His agent web UI is the **pi-web fork** ("OMP Web", English, rebuilt on omp) at `omp.carter2099.com` → [`omp-web.md`](notes/docs/homelab/omp-web.md). SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
 
 ## Persistent Memory (`~/notes/`)
 
@@ -217,19 +161,11 @@ Session memoirs are NOT formal notes — don't use `/note-save` or full frontmat
 - The vault is a standalone git repo (not the dotfiles bare repo) — `/note-save` handles commits
 ## Gaming Rig (Windows 11)
 
-Windows 11 gaming PC at `192.168.4.103` (`ssh gamingrig`). Hosts the local LLM stack (llama-swap + llm-proxy). Full operational runbook at [`~/notes/docs/homelab/local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
+Windows 11 gaming PC at `192.168.4.103` (`ssh gamingrig`); hosts the local LLM stack (llama-swap + llm-proxy). Runbook: [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
-**OpenCode Go Proxy** (`localhost:8082`) — routes `opencode-go/*` models across 2 subscriptions. If opencode-go models fail, check this first. Full doc at [`~/notes/docs/homelab/opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md).
 ## Environment
 
-- **Shell:** zsh with vim keybindings
-- **Editor:** neovim (built from source in `build/neovim/`)
-- **Ruby:** managed via rbenv (`rbenv versions`)
-- **Node:** managed via fnm (`node -v`)
-- **Tmux prefix:** Ctrl+Space
-- **Git user:** carter2099 <carter2099@pm.me>
-- **GitHub CLI:** `gh` authenticated as carter2099 (HTTPS, broad scopes)
-- **Client topology:** Carter develops from a Mac and SSHs into the homelab. When he mentions file paths like `/Users/carterbrown/...`, those are on his Mac and **not reachable** from this session. Don't try to read Mac paths directly — they'll 404. For screenshots or files on his Mac, suggest `scp`-ing to the homelab first, or ask him to describe the content in words. Everything under `/home/carter/` is local and readable.
+Shell zsh (vim bindings), nvim, rbenv, fnm, tmux (Ctrl+Space), git carter2099, `gh` authed: [`environment.md`](notes/docs/homelab/environment.md). **Client topology:** Carter develops from a Mac — `/Users/carterbrown/...` paths are NOT reachable from this session (see doc for details).
 
 ## Where the deep dives live
 
@@ -237,6 +173,8 @@ Verbose architecture for subsystems an agent only needs when actively working on
 
 - [`hardware.md`](notes/docs/homelab/hardware.md) — hardware specs, network config
 - [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md) — llm-proxy / llama-swap topology, models, env vars, troubleshooting
+- [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md) — omp CLI facts, what uses omp, auth/models, remote ops, reboot protocol
+- [`environment.md`](notes/docs/homelab/environment.md) — shell/editor tooling, git/gh, client topology
 - [`deployment.md`](notes/docs/homelab/deployment.md) — deploy flow, port-in-use, exit 255, aa-remove-unknown
 - [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules
 - [`email-digests.md`](notes/docs/homelab/email-digests.md) — 9-phase digest workflow, stories-in-flight, audit/debug
