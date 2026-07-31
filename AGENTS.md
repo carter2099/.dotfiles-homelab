@@ -108,7 +108,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **OMP Web** (agent web UI, localhost:30141) → [`omp-web.md`](notes/docs/homelab/omp-web.md)
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
-- **OpenCode Go Proxy** (localhost:8082) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
+- **OpenCode Go Proxy** (0.0.0.0:8082, UFW-gated to Docker bridges) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
 - **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
 - **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 ## Email Digests
@@ -117,7 +117,7 @@ Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) 
 
 ## Homelab Steward
 
-Daily maintenance at 5:00 PM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, stop on first failure. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
+Daily maintenance at 5:00 PM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
 
 ## Agent CLI: omp
 
