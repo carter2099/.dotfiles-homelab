@@ -4,12 +4,12 @@ theme:
 setupVersion: 1
 modelRoles: 
   default: opencode-go/mimo-v2.5:high
-  plan: opencode-go/grok-4.5:high
+  plan: opencode-go/deepseek-v4-pro:high
   designer: opencode-go/glm-5.2:high
   advisor: opencode-go/deepseek-v4-pro:high
   smol: opencode-go/mimo-v2.5:high
   tiny: opencode-go/mimo-v2.5:high
-  slow: opencode-go/grok-4.5:high
+  slow: opencode-go/deepseek-v4-pro:high
   task: opencode-go/mimo-v2.5:high
 advisor: 
   enabled: true

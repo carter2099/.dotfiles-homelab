@@ -1,12 +1,13 @@
 return {
     "nvim-treesitter/nvim-treesitter",
+    branch = "main",
     build = ":TSUpdate",
     config = function()
-        local configs = require("nvim-treesitter.configs")
-        configs.setup({
-            ensure_installed = { "lua", "ruby", "go", "json", "yaml", "markdown" },
-            sync_install = false,
-            highlight = { enable = true },
+        require("nvim-treesitter").install({ "lua", "ruby", "go", "json", "yaml", "markdown" })
+
+        vim.api.nvim_create_autocmd("FileType", {
+            pattern = { "lua", "ruby", "go", "json", "yaml", "markdown" },
+            callback = function() vim.treesitter.start() end,
         })
-    end
+    end,
 }
