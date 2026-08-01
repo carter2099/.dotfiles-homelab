@@ -14,15 +14,18 @@ Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/bes
 - **Say "I don't know."** Uncertainty is fine and useful; confident bullshit is not. If a recommendation rests on something unverified, say so explicitly rather than smoothing it over.
 - **Never blame the computer.** "Flaky test," "weird cache," "probably a transient issue" are hypotheses, not conclusions. Bugs have causes — keep investigating until the cause is named, even if the fix is a retry.
 - **Keep it simple.** Prefer the smallest change that solves the problem. This reinforces the existing "no gratuitous abstractions / no speculative features" guidance further down in this file.
-- **Have patience.** Don't rush to a conclusion or a fix. Re-read, re-check, confirm before acting — especially for anything irreversible.
 
 ## Scope
 
-Carter wants this agent framed as a **homelab assistant and general personal assistant**, not narrowly as a coding tool. Software engineering is a large part of the work, but non-code help (planning, notes, research, life admin, digests, correspondence drafting, scheduling) is equally in scope and should be treated as first-class. The same tenets about rigor, not-guessing, and admitting uncertainty apply regardless of domain.
+Carter wants this agent framed as a **homelab assistant and general personal assistant**, not narrowly as a coding tool. Software engineering is a large part of the work, but non-code help (planning, notes, research, life admin, digests, correspondence drafting, scheduling) is equally in scope and should be treated as first-class.
 
 ## Overview
 
-Single-node homelab: Ubuntu Server on a ThinkPad L14 Gen 3 (16GB RAM, 512GB NVMe), k3s routing via Traefik to apps in Docker Compose. Hardware/network facts (NICs, IPs, WiFi): [`hardware.md`](notes/docs/homelab/hardware.md); k3s architecture + node IP: [`k3s.md`](notes/docs/homelab/k3s.md).
+Single-node homelab: Ubuntu Server on a ThinkPad L14 Gen 3 (16GB RAM, 512GB NVMe), k3s routing via Traefik to apps in Docker Compose.
+
+## Key Practice
+
+Use `notes/` as a knowledge base. You will see this referenced throughout this AGENTS.md.
 
 ## Repository Structure
 
@@ -111,6 +114,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **OpenCode Go Proxy** (0.0.0.0:8082, UFW-gated to Docker bridges) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
 - **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
 - **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
+
 ## Email Digests
 
 Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) at 08:00 UTC via `digests-daily.timer`. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
@@ -125,7 +129,7 @@ The sole agent CLI on this host is **omp** (`@oh-my-pi/pi-coding-agent`, via bun
 
 ## Remote Agent Operations
 
-Carter connects via SSH (Termius on iOS) and runs `omp` interactively. His agent web UI is the **pi-web fork** ("OMP Web", English — his fork of `best-linux-code/pi-web`, the in-progress omp port) at `omp.carter2099.com` → [`omp-web.md`](notes/docs/homelab/omp-web.md). SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
+Carter's omp agent web UI is the **pi-web fork** ("OMP Web", English — his fork of `best-linux-code/pi-web`, the in-progress omp port) at `omp.carter2099.com` → [`omp-web.md`](notes/docs/homelab/omp-web.md). SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
 
 ## Persistent Memory (`~/notes/`)
 
@@ -194,9 +198,12 @@ They're quick context dumps for cross-session continuity. Formal reference notes
 - `~/notes/logs/sessions/` — session memory bank (YYYY-MM-DD/ folders, one compact .md per interactive omp session, frontmatter `source:` pointer; maintained by the steward P0b)
 - `~/notes/journal/` — research notes and project records (not maintained)
 - The vault is a standalone git repo (not the dotfiles bare repo) — `/note-save` handles commits
+
 ## Gaming Rig (Windows 11)
 
-Windows 11 gaming PC at `192.168.4.103` (`ssh gamingrig`); hosts the local LLM stack (llama-swap + llm-proxy). Runbook: [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
+Windows 11 gaming PC at `192.168.4.103` (`ssh gamingrig`); hosts the local LLM stack (llama-swap + llama.cpp). Runbook: [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
+
+The rig is mostly accessed via local llm proxy running on this homelab.
 
 ## Environment
 
