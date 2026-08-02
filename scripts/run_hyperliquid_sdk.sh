@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runs the Hyperliquid Ruby SDK autonomous maintenance cycle via omp + Qwen 3.7 Max.
-# Scheduled via systemd timer (hyperliquid-sdk.timer) daily at 4am.
+# Scheduled via systemd timer (hyperliquid-sdk.timer) Mon/Thu at 4am ET.
 # Provider-agnostic: change the --model id to switch providers/models.
 
 set -euo pipefail
