@@ -110,6 +110,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **Open WebUI** (chat frontend, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)
 - **OMP Web** (agent web UI, localhost:30141) → [`omp-web.md`](notes/docs/homelab/omp-web.md)
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
+- **FreshRSS** (RSS reader, k3s Deployment, freshrss.carter2099.com) → [`k3s.md`](notes/docs/homelab/k3s.md) (covered as third-party k3s service)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
 - **OpenCode Go Proxy** (0.0.0.0:8082, UFW-gated to Docker bridges) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
 - **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
@@ -218,7 +219,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md) — omp CLI facts, what uses omp, auth/models, remote ops, reboot protocol
 - [`environment.md`](notes/docs/homelab/environment.md) — shell/editor tooling, git/gh, client topology
 - [`deployment.md`](notes/docs/homelab/deployment.md) — deploy flow, port-in-use, exit 255, aa-remove-unknown
-- [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules
+- [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules; also covers FreshRSS as a third-party k3s deployment
 - [`email-digests.md`](notes/docs/homelab/email-digests.md) — 9-phase digest workflow, stories-in-flight, audit/debug
 - [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, work queue, executor, budget guard, debugging
 - [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 23-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
