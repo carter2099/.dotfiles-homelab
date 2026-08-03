@@ -1207,6 +1207,9 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             result = _extract_json(raw, f"judge_research batch {batch_idx + 1}")
             batch_approved = result.get("approved", [])
             batch_rejected = result.get("rejected", [])
+            # Normalize: LLM sometimes returns bare strings instead of dicts
+            batch_approved = [f if isinstance(f, dict) else {"title": str(f)} for f in batch_approved]
+            batch_rejected = [r if isinstance(r, dict) else {"finding": {"title": str(r)}, "reason": "unknown"} for r in batch_rejected]
             all_approved.extend(batch_approved)
             all_rejected.extend(batch_rejected)
             print(f"  Batch {batch_idx + 1}: {len(batch_approved)} approved, {len(batch_rejected)} rejected")
@@ -1239,9 +1242,10 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     print(f"  [done] judge_research — {len(fresh)} fresh, {len(ongoing)} ongoing, "
           f"{len(all_rejected) + len(dedup_rejected)} rejected ({elapsed:.0f}s)")
     for r in all_rejected[:5]:
-        finding = r.get("finding", {})
-        reason = r.get("reason", "unspecified")
-        print(f"    ✗ {finding.get('title', '?')[:60]}: {reason}")
+        finding = r.get("finding", {}) if isinstance(r, dict) else {}
+        reason = r.get("reason", "unspecified") if isinstance(r, dict) else "unknown"
+        title = finding.get('title', '?') if isinstance(finding, dict) else str(finding)[:60]
+        print(f"    ✗ {title[:60]}: {reason}")
     if len(all_rejected) > 5:
         print(f"    ... and {len(all_rejected) - 5} more rejected")
 
