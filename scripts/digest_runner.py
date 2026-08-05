@@ -66,9 +66,10 @@ TEST_LABEL: str | None = None
 MODEL_OVERRIDE: str | None = None
 
 # ── Upstream outage tracking ──────────────────────────────────────────────
-# Set by phase_1_research when ALL research angles fail due to API
-# connectivity errors. Checked in run_digest Phase 7 to annotate empty
-# digests with an outage explanation instead of "No stories found today."
+# Set by phase_1_research when ALL research angles fail — either API
+# connectivity errors or HTTP 200 calls that return empty findings (degraded
+# LLM stage). Checked in run_digest Phase 7 to annotate empty digests with
+# an explanation instead of "No stories found today."
 _UPSTREAM_OUTAGE: bool = False
 _RESEARCH_FAILURES: list[str] = []
 _RESEARCH_SUCCESSES: int = 0
@@ -1054,7 +1055,15 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
             h = check_search_health(f"after-{angle['id']}")
             if h.get("recommendation") == "halt":
                 print(f"  *** HALT during {label}: search health critical ***")
-            _RESEARCH_SUCCESSES += 1
+            if findings:
+                _RESEARCH_SUCCESSES += 1
+            else:
+                # HTTP 200 but empty result — the LLM stage degraded rather than
+                # finding nothing. Count as a failure so an all-empty run trips
+                # the _UPSTREAM_OUTAGE annotation below instead of emailing a
+                # misleading "No stories found today" digest.
+                _RESEARCH_FAILURES.append(
+                    "empty research results (LLM returned no findings)")
             return findings
         except Exception as e:
             elapsed = time.time() - t0
@@ -1075,15 +1084,17 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
     if artifacts:
         print(f"  Filtered {len(artifacts)} non-dict artifact(s): {artifacts}")
 
-    # Detect upstream outage: all angles failed with connectivity errors
+    # Detect upstream outage: all angles failed with connectivity errors,
+    # OR all HTTP 200 calls returned empty findings (degraded LLM stage).
     if not findings and _RESEARCH_FAILURES and _RESEARCH_SUCCESSES == 0:
         err_msg = " ".join(_RESEARCH_FAILURES).lower()
         if any(kw in err_msg for kw in ["502", "503", "connection refused",
                                          "connection reset", "upstream",
-                                         "timeout", "econnrefused"]):
+                                         "timeout", "econnrefused",
+                                         "empty research results"]):
             _UPSTREAM_OUTAGE = True
             print(f"  *** UPSTREAM OUTAGE: All {len(_RESEARCH_FAILURES)} research angle(s) "
-                  f"failed with API connectivity errors")
+                  f"failed (connectivity errors or empty LLM results)")
 
     output_path.write_text(json.dumps(findings, indent=2))
     print(f"  Phase 1 done: {len(findings)} total findings")
@@ -2340,7 +2351,11 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 ranked = json.loads(phase_3_path.read_text())
                 phase_4_queue = ranked.get("phase_4_queue", [])
                 sif_candidates = ranked.get("sif_candidates", [])
-            elif fresh_findings or ongoing_findings:
+            elif fresh_findings or ongoing_findings or any(
+                    s.get("status") == "active"
+                    for s in stories_in_flight.get("stories", [])):
+                # Run ranking even with zero findings so active stories-in-flight
+                # still flow to Phase 6 as Ongoing candidates (SIF injection).
                 phase_4_queue, sif_candidates = phase_3_rank(
                     topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir)
             else:
@@ -2390,7 +2405,9 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                             print(f"  [phase6-cache] Re-cooled {re_cooled} stale, "
                                   f"re-pruned {re_pruned} expired stories")
                             stories_in_flight["stories"] = kept
-            elif judged:
+            elif judged or sif_candidates:
+                # Curation runs on SIF candidates alone (judged empty) so ongoing
+                # stories from previous days are reported instead of a blank digest.
                 fresh, stories_in_flight, ongoing = phase_6_curate(
                     topic, judged, sif_candidates, stories_in_flight, run_dir)
             else:
@@ -2421,7 +2438,18 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         curated_data = json.loads((run_dir / "06-curated.json").read_text()) \
             if (run_dir / "06-curated.json").exists() else {}
         intro_hook = curated_data.get("intro_hook", "")
-        if fresh:
+        if fresh or ongoing:
+            if _UPSTREAM_OUTAGE:
+                # Research stage degraded (all-empty LLM results) but SIF has
+                # active stories to report — annotate the digest rather than
+                # hiding the degradation.
+                degraded_note = (
+                    "NOTE: Today's research stage was degraded — the research API "
+                    "returned no fresh findings. The stories below are ongoing "
+                    "coverage carried over from previous days."
+                )
+                intro_hook = (f"{degraded_note}\n\n{intro_hook}"
+                              if intro_hook else degraded_note)
             html = phase_7_write(topic, fresh, ongoing, intro_hook, run_dir)
         else:
             if _UPSTREAM_OUTAGE:
@@ -2432,7 +2460,8 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                     f'<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:1em 1.2em;margin:1em 0;">'
                     f'<p style="margin:0;color:#856404;font-weight:600;">Digest unavailable — upstream API outage</p>'
                     f'<p style="margin:0.5em 0 0;color:#856404;font-size:14px;">'
-                    f'The research API (opencode-go-proxy) was unreachable during today\'s run. '
+                    f'The research API (opencode-go-proxy) was unreachable or returned no '
+                    f'results during today\'s run. '
                     f'This is a transient infrastructure issue, not a news drought. '
                     f'Stories will resume when the API is available.</p></div></body></html>'
                 )
