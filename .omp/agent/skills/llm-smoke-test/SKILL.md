@@ -22,7 +22,7 @@ Two model variants are registered in llama-swap config (`C:\llm\config.yaml` on 
 
 Key config flags: `-c 262144` (256K ctx), `--n-cpu-moe 33`, `-t 8`, `--flash-attn on`, `--no-mmap`, `-ctk q4_0 -ctv q4_0`, `--cache-ram 2048`, `--prio 2`, `--temp 0.5 --top-k 20 --min-p 0.1`.
 
-Switching models triggers a ~60s reload (unload one, load the other).
+Switching between the tuned finalists takes roughly 8–32s in the measured model-swap test.
 
 ## Quick Run
 
@@ -68,19 +68,21 @@ echo "What's the latest on the US team in the world cup?" | \
 
 The test prompt should be a **current events question with no explicit search instruction** — the model must decide to search on its own. The user supplies the test case and correctness criteria interactively.
 
-**Known behavior:** Both models proactively use web_search for current events. The no-thinking model produces cleaner, more accurate results. The thinking model sometimes overcomplicates and hallucinates details.
+**Known behavior:** Both variants proactively use web_search for current events. Prefer the no-thinking entry for efficiency, but validate its source extraction and calendar interpretation; proactive search alone did not produce reliable dates in the current OMP evaluation.
 
-## Memory Baseline (128K context, idle)
+## Memory Baseline (256K context under 200K load)
 
 | Metric | Value |
 |---|---|
-| Free RAM | ~2.2 GB (of 32 GB) |
-| VRAM used | ~6.1 GB (of 12.2 GB) |
-| Context | 131072 (128K) |
+| llama-server working set | ~29.68 GB |
+| Whole-GPU VRAM used | 11,498 MiB of 12,227 MiB |
+| Context / K/V | 262144, `q4_0` K and V |
+| 200K recall | 10/10, 1027.21s, 208.69 prompt tok/s |
 
-Context may be lazily allocated — memory grows as context fills.
+The K/V cache is lazily allocated. The full-context measurement, not idle startup memory,
+is the relevant capacity check.
 
-## Key Findings (as of 2026-07-05)
+## Key Findings (as of 2026-08-05)
 
 1. **`--reasoning-budget` is the critical tuning knob.** The thinking model is not broken — the budget was just too loose. At 4096, the model finishes reasoning naturally before the budget triggers, so it's effectively unlimited. At 1024, the budget triggers early, cuts reasoning cleanly, and the model transitions to content. **Optimal budget: 1024 tokens.** This allows enough thinking for complex tasks (bat+ball puzzle solved correctly) while forcing transition on simple Qs and long-context tasks.
 
@@ -94,15 +96,15 @@ Context may be lazily allocated — memory grows as context fills.
 
 2. **No-thinking model is 96% more token-efficient** for simple Q&A (8 tokens vs 191). Use for chat, facts, context recall, and tool use.
 
-3. **Qwen is eager enough with tool calls.** Both variants proactively use web_search without explicit prompting. No tuning needed — behavior is comparable to DeepSeek. If more aggressiveness is desired, use a system prompt ("Always search before answering factual questions") or the `tool_choice` API parameter (`{"type": "any"}` forces a tool call on every message — overkill for normal chat). llama.cpp supports `tool_choice` but omp doesn't expose it directly in config.
+3. **Qwen is eager enough with tool calls, but tool use is not correctness.** Both variants proactively use web_search without explicit prompting. In the Aug 5 five-run OMP golf evaluation, the no-thinking model called tools in 5/5 runs but resolved the required date window correctly in 0/5; advisor feedback sometimes made the final answer worse. No tuning is needed merely to trigger search, but ambiguous calendar prompts need explicit date resolution and sourced verification.
 
 4. **System prompts can't reduce reasoning verbosity.** Tested "be brief" prompts — they made it worse (model reasons about being brief). The only control is binary: thinking on or off.
 
-5. **128K context is the safe ceiling.** 256K was borderline — prompt processing at 200K+ caused OOM on 32 GB RAM. 128K leaves comfortable headroom for both variants.
+5. **256K is validated with the tuned placement.** Qwen Q8 uses 33 CPU MoE layers and a `q4_0` K/V cache. It recalled 10/10 planted facts from a 201,031-token prompt in 1027.21s without OOM. The earlier 128K ceiling applied to the old all-GPU/Q8-cache placement.
 
-6. **Thinking model works at 100K with budget=1024.** At budget=1024, the thinking model scores 10/10 on 100K context recall (~9 min). At budget=4096, it fails 0/10 (burns all tokens on reasoning). The budget knob is make-or-break.
+6. **The proxy must not impose an absolute response write deadline.** A 1002.62s 200K request completed on llama.cpp but was disconnected by llm-proxy's former 10-minute `WriteTimeout`. Commit `8eae500` disables that deadline; after release, a fresh 201,031-token run returned through the deployed proxy in 970.91s with HTTP 200, no fallback, and 10/10 recall.
 
-7. **100K context benchmark reference:** No-thinking scores 10/10 in ~8 min. Thinking scores 10/10 in ~9 min. Prompt processing dominates, generation is fast.
+7. **Current warm API baseline:** 1.71s TTFT and 29.73 generation tok/s across five runs. Measured model-swap TTFT is 33.06s. A two-slot 128K smoke test completed both simultaneous requests at 45.16 aggregate tok/s; production stays at one 256K slot.
 
 ## Restarting llama-swap
 
@@ -133,3 +135,4 @@ scp /tmp/llama-swap-config.yaml gamingrig:C:/llm/config.yaml
 - `~/benchmarks/context-window/README.md` — benchmark methodology and scoring
 - `/tmp/llama-swap-config.yaml` — working copy of gaming rig config (push via scp)
 - `~/dev/llm-proxy/` — llm-proxy source (runs on homelab, routes to gaming rig)
+- `~/benchmarks/local-llm-research-2026-08-05/` — full five-model quant/context, performance, concurrency, recall, and OMP quality corpus
