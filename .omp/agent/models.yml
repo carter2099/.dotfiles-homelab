@@ -21,18 +21,32 @@ providers:
       - id: agents-a1-4b-q8
         name: agents-a1-4b-q8
         reasoning: true
-      - id: ornith-1.0-35b-q5
-        name: ornith-1.0-35b-q5
+        contextWindow: 262144
+      - id: ornith-1.0-35b-q8
+        name: ornith-1.0-35b-q8
         reasoning: true
+        contextWindow: 262144
       - id: qwen-3.5-4b-q8
         name: qwen-3.5-4b-q8
         reasoning: true
-      - id: qwen-3.6-35b-q5
-        name: qwen-3.6-35b-q5
+        contextWindow: 262144
+      - id: qwen-3.6-35b-q8
+        name: qwen-3.6-35b-q8
         reasoning: true
+        contextWindow: 262144
+      - id: qwen-3.6-35b-q8-fast
+        name: qwen-3.6-35b-q8-fast
+        reasoning: false
+        contextWindow: 262144
       - id: ornith-1.0-9b-q6
         name: ornith-1.0-9b-q6
         reasoning: true
-      - id: qwythos-9b-v2-q6
-        name: qwythos-9b-v2-q6
+        contextWindow: 262144
+      - id: gemma-4-12b-q5
+        name: gemma-4-12b-q5
         reasoning: true
+        contextWindow: 262144
+      - id: gemma-4-26b-q8
+        name: gemma-4-26b-q8
+        reasoning: true
+        contextWindow: 262144
