@@ -3518,9 +3518,11 @@ AUDIT_SECTIONS = [
         "artifact": "07-audit-2-versions.json",
         "timeout": 600,
         "guidance": (
-            "Compare current versions (in evidence) against latest upstream stable: k3s, Go, Node, Ruby (rbenv), "
-            "neovim, omp (npm), docker images (searxng, freshrss, traefik, open-webui), "
-            "llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
+            "Compare current versions (in evidence) against latest upstream stable for components NOT "
+            "auto-updated by P1: k3s, Go, Node, Ruby (rbenv), neovim, omp (npm), docker images "
+            "(searxng, traefik), llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
+            "Do NOT report freshrss, open-webui, or herdr — those are auto-bumped to latest during P1 "
+            "(the update phase) earlier this run. "
             "Report per component: current / latest / status (current | behind | behind-major). "
             "Do NOT exec into containers — the docker images evidence IS the current version. "
             "Checking upstream (GitHub releases, npm registry, go.dev) is allowed; mutations are not."
