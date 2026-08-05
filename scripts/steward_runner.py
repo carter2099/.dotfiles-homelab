@@ -1526,6 +1526,71 @@ def _p1_herdr_update():
             "error": out[-500:] or f"exit {code}"}
 
 
+def _p1_deploy_step_ok(step):
+    """True when a P1 step actually mutated state (status ok/bumped)."""
+    name = step.get("step", "")
+    status = step.get("status", "")
+    if name.startswith("auto_") and status == "ok":
+        return True
+    if name in ("openwebui", "freshrss") and status == "bumped":
+        return True
+    if name in ("herdr_update", "omp_update", "searxng") and status == "ok":
+        return True
+    return False
+
+
+def _p1_searxng_update():
+    """Pull latest searxng image and recreate if a newer image was pulled.
+
+    Compose tracks `searxng/searxng:latest` (no pinned tag to bump), so 'update'
+    means pull + up -d; a change is detected by the image id.
+    """
+    print("  [1h] searxng update")
+    compose = HOME / "searxng" / "docker-compose.yml"
+    if not compose.exists():
+        return {"step": "searxng", "status": "skipped",
+                "reason": f"compose file not found: {compose}"}
+    pre_id = run_capture(["docker", "image", "inspect", "searxng/searxng:latest",
+                          "--format", "{{.Id}}"], timeout=30)
+    try:
+        run(["docker", "compose", "-f", str(compose), "pull"],
+            cwd=compose.parent, capture_output=True, text=True, timeout=300)
+        run(["docker", "compose", "-f", str(compose), "up", "-d"],
+            cwd=compose.parent, capture_output=True, text=True, timeout=120)
+    except subprocess.CalledProcessError as e:
+        return {"step": "searxng", "status": "failed",
+                "pre_id": pre_id, "error": str(e)[-500:]}
+    post_id = run_capture(["docker", "image", "inspect", "searxng/searxng:latest",
+                           "--format", "{{.Id}}"], timeout=30)
+    if post_id and post_id != pre_id:
+        return {"step": "searxng", "status": "ok",
+                "pre_id": pre_id, "post_id": post_id,
+                "reason": "pulled newer image"}
+    return {"step": "searxng", "status": "skipped",
+            "pre_id": pre_id, "post_id": post_id, "reason": "already current"}
+
+
+def _p1_omp_update():
+    """Self-update the omp CLI via `omp update` (npm global install)."""
+    print("  [1i] omp update")
+    env = user_env()
+    pre_ver = run_capture(["omp", "--version"], env=env, timeout=30)
+    stdout, stderr, code = run_capture_ok(["omp", "update"], env=env, timeout=600)
+    out = f"{stdout}\n{stderr}".strip()
+    post_ver = run_capture(["omp", "--version"], env=env, timeout=30)
+    if post_ver and post_ver != pre_ver:
+        return {"step": "omp_update", "status": "ok",
+                "pre_version": pre_ver, "post_version": post_ver,
+                "output_tail": out[-500:]}
+    if code == 0:
+        return {"step": "omp_update", "status": "skipped",
+                "pre_version": pre_ver, "post_version": post_ver,
+                "reason": "already current", "output_tail": out[-500:]}
+    return {"step": "omp_update", "status": "failed",
+            "pre_version": pre_ver, "post_version": post_ver,
+            "error": out[-500:] or f"exit {code}"}
+
+
 def phase_1_apply(run_dir, dry_run=False):
     """Phase 1: apply safe updates. Skip if --dry-run."""
     if dry_run:
@@ -1596,6 +1661,12 @@ def phase_1_apply(run_dir, dry_run=False):
 
     # 1g: herdr self-update (refuses inside a herdr session → skipped, not failed)
     steps.append(_p1_herdr_update())
+
+    # 1h: searxng — pull latest :latest image, recreate if changed
+    steps.append(_p1_searxng_update())
+
+    # 1i: omp self-update (last — swaps the binary the steward's own agents use)
+    steps.append(_p1_omp_update())
 
     data = {"steps": steps}
     write_json(run_dir / "01-applied.json", data)
@@ -1787,12 +1858,10 @@ def phase_3_troubleshoot(run_dir, dry_run=False):
     validation = read_json(validation_path)
     applied = read_json(applied_path)
 
-    # Check for P1 mutations
-    auto_steps = [s for s in applied.get("steps", [])
-                  if s.get("step", "").startswith("auto_") and s.get("status") == "ok"]
-    owu_step = [s for s in applied.get("steps", [])
-                if s.get("step") == "openwebui" and s.get("status") == "bumped"]
-    mutations = len(auto_steps) + len(owu_step)
+    # Check for P1 mutations — any update step that actually changed state.
+    # Covers apt auto-pkgs, freshrss/open-webui tag bumps, and the herdr/omp/searxng
+    # self-updates so the troubleshooting fallback fires if one of them regresses.
+    mutations = sum(1 for s in applied.get("steps", []) if _p1_deploy_step_ok(s))
     if not mutations:
         print("[P3] skipped — no packages were actually upgraded")
         write_json(run_dir / "03-troubleshoot.json",
@@ -3519,10 +3588,10 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Compare current versions (in evidence) against latest upstream stable for components NOT "
-            "auto-updated by P1: k3s, Go, Node, Ruby (rbenv), neovim, omp (npm), docker images "
-            "(searxng, traefik), llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
-            "Do NOT report freshrss, open-webui, or herdr — those are auto-bumped to latest during P1 "
-            "(the update phase) earlier this run. "
+            "auto-updated by P1: k3s, Go, Node, Ruby (rbenv), neovim, the traefik docker image, "
+            "llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
+            "Do NOT report freshrss, open-webui, herdr, omp, or searxng — those are auto-updated "
+            "during P1 (the update phase) earlier this run. "
             "Report per component: current / latest / status (current | behind | behind-major). "
             "Do NOT exec into containers — the docker images evidence IS the current version. "
             "Checking upstream (GitHub releases, npm registry, go.dev) is allowed; mutations are not."
@@ -4388,6 +4457,26 @@ def _html_updates(applied_data):
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
                              f'herdr: {status} — {s.get("error",s.get("reason",""))}</p>')
 
+        # omp: show only updated or failed/error
+        elif name == "omp_update":
+            pre = str(s.get("pre_version", "?")).replace("omp/", "")
+            post = str(s.get("post_version", "?")).replace("omp/", "")
+            if status == "ok":
+                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
+                             f'omp: {pre} -> {post}</p>')
+            elif status in ("failed", "error"):
+                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                             f'omp: {status} — {s.get("error",s.get("reason",""))}</p>')
+
+        # searxng: show only updated or failed/error
+        elif name == "searxng":
+            if status == "ok":
+                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
+                             f'searxng: pulled latest :latest image</p>')
+            elif status in ("failed", "error"):
+                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                             f'searxng: {status} — {s.get("error",s.get("reason",""))}</p>')
+
         # Generic fallback: show any step with real change/failure
         else:
             if status in ("ok", "bumped"):
@@ -4985,6 +5074,13 @@ def _tldr_collect_updates(applied):
             post = str(s.get("post_version", "")).replace("herdr ", "")
             if pre and post and pre != post:
                 updates.append(f"herdr: {pre} -> {post}")
+        elif step == "omp_update" and status == "ok":
+            pre = str(s.get("pre_version", "")).replace("omp/", "")
+            post = str(s.get("post_version", "")).replace("omp/", "")
+            if pre and post and pre != post:
+                updates.append(f"omp: {pre} -> {post}")
+        elif step == "searxng" and status == "ok":
+            updates.append("searxng: pulled latest image")
     return updates, n_failed
 
 
