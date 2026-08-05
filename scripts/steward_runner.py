@@ -1570,25 +1570,64 @@ def _p1_searxng_update():
             "pre_id": pre_id, "post_id": post_id, "reason": "already current"}
 
 
+_OMP_PKG = "@oh-my-pi/pi-coding-agent"   # bun global package backing ~/.bun/bin/omp
+
+
+def _omp_smoke_ok(env):
+    """Cheap deterministic binary check: `omp -p` with empty input.
+
+    An empty headless prompt has nothing to run, so it exits 0 in ~1s without
+    any LLM call — it only fails on a broken/partial install, not on API
+    outages (which must not trigger a revert).
+    """
+    o, _, c = run_capture_ok(["omp", "-p"], env=env, timeout=60, input="")
+    return c == 0
+
+
 def _p1_omp_update():
-    """Self-update the omp CLI via `omp update` (npm global install)."""
+    """Self-update the omp CLI; verify the binary still works; revert on breakage.
+
+    omp is the steward's own engine (P5/P7/P7b/P9b spawn `omp -p`), so a bad
+    `omp update` is caught here deterministically — snapshot version -> upgrade
+    -> `omp -p` smoke check -> if broken, `bun add -g` back to the snapshot —
+    rather than surfacing later as failed agent phases with no working fallback.
+    """
     print("  [1i] omp update")
     env = user_env()
     pre_ver = run_capture(["omp", "--version"], env=env, timeout=30)
+    pre_tag = pre_ver.replace("omp/", "").strip() if pre_ver else ""
+    if not pre_tag:
+        return {"step": "omp_update", "status": "failed",
+                "pre_version": pre_ver, "post_version": pre_ver,
+                "error": "could not snapshot pre-update version"}
+
     stdout, stderr, code = run_capture_ok(["omp", "update"], env=env, timeout=600)
     out = f"{stdout}\n{stderr}".strip()
     post_ver = run_capture(["omp", "--version"], env=env, timeout=30)
-    if post_ver and post_ver != pre_ver:
+    works = _omp_smoke_ok(env)
+
+    if works and post_ver and post_ver != pre_ver:
         return {"step": "omp_update", "status": "ok",
                 "pre_version": pre_ver, "post_version": post_ver,
                 "output_tail": out[-500:]}
-    if code == 0:
+    if works and code == 0:
         return {"step": "omp_update", "status": "skipped",
                 "pre_version": pre_ver, "post_version": post_ver,
                 "reason": "already current", "output_tail": out[-500:]}
-    return {"step": "omp_update", "status": "failed",
+
+    # install failed or the new binary is broken — revert to the snapshot
+    msg = f"post-update check failed; reverting to {pre_tag}" if not works \
+        else (out[-500:] or f"exit {code}")
+    r_stdout, r_stderr, r_code = run_capture_ok(
+        ["bun", "add", "-g", f"{_OMP_PKG}@{pre_tag}"], env=env, timeout=300)
+    r_out = f"{r_stdout}\n{r_stderr}".strip()
+    rev_ver = run_capture(["omp", "--version"], env=env, timeout=30)
+    reverted = bool(rev_ver) and rev_ver == pre_ver and _omp_smoke_ok(env)
+    return {"step": "omp_update",
+            "status": "reverted" if reverted else "failed",
             "pre_version": pre_ver, "post_version": post_ver,
-            "error": out[-500:] or f"exit {code}"}
+            "reverted_to": rev_ver, "error": msg,
+            "revert_detail": r_out[-500:]}
 
 
 def phase_1_apply(run_dir, dry_run=False):
@@ -4457,13 +4496,17 @@ def _html_updates(applied_data):
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
                              f'herdr: {status} — {s.get("error",s.get("reason",""))}</p>')
 
-        # omp: show only updated or failed/error
+        # omp: show only updated, reverted, or failed/error
         elif name == "omp_update":
             pre = str(s.get("pre_version", "?")).replace("omp/", "")
             post = str(s.get("post_version", "?")).replace("omp/", "")
             if status == "ok":
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'omp: {pre} -> {post}</p>')
+            elif status == "reverted":
+                lines.append(f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
+                             f'omp: update rolled back to {s.get("reverted_to","?")} '
+                             f'(post-update check failed)</p>')
             elif status in ("failed", "error"):
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
                              f'omp: {status} — {s.get("error",s.get("reason",""))}</p>')
@@ -5079,6 +5122,9 @@ def _tldr_collect_updates(applied):
             post = str(s.get("post_version", "")).replace("omp/", "")
             if pre and post and pre != post:
                 updates.append(f"omp: {pre} -> {post}")
+        elif step == "omp_update" and status == "reverted":
+            updates.append(f"omp update rolled back to {s.get('reverted_to','?')} "
+                           f"(post-update check failed)")
         elif step == "searxng" and status == "ok":
             updates.append("searxng: pulled latest image")
     return updates, n_failed
