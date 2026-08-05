@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs the Hyperliquid Ruby SDK autonomous maintenance cycle via omp + Qwen 3.7 Max.
+# Runs the Hyperliquid Ruby SDK autonomous maintenance cycle via omp + opencode-go/glm-5.2.
 # Scheduled via systemd timer (hyperliquid-sdk.timer) Mon/Thu at 4am ET.
 # Provider-agnostic: change the --model id to switch providers/models.
 
