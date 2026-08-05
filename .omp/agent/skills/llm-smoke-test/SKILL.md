@@ -1,11 +1,11 @@
 ---
 name: llm-smoke-test
-description: Run the local LLM smoke test suite against Qwen Q6 on the gaming rig — benchmarks TPS, context recall, memory, and tool-calling eagerness. Use when user says "test the LLM", "smoke test Qwen", "benchmark the local model", or after changing llama-swap/llama.cpp config.
+description: Run the local LLM smoke test suite against Qwen 3.6 35B Q8 on the gaming rig — benchmarks TPS, context recall, memory, and tool-calling eagerness. Use when user says "test the LLM", "smoke test Qwen", "benchmark the local model", or after changing llama-swap/llama.cpp config.
 ---
 
 # LLM Smoke Test
 
-Comprehensive smoke test for the local Qwen Q6 model served via llama-swap on the gaming rig (192.168.4.103), accessed through llm-proxy on the homelab (localhost:8081).
+Comprehensive smoke test for the local Qwen 3.6 35B Q8 model served via llama-swap on the gaming rig (192.168.4.103), accessed through llm-proxy on the homelab (localhost:8081).
 
 ## Architecture
 
@@ -17,10 +17,10 @@ Two model variants are registered in llama-swap config (`C:\llm\config.yaml` on 
 
 | Model ID | Alias | Thinking | Use |
 |---|---|---|---|
-| `qwen-3.6-35b-q6` | `qwen-3.6-35b-q6` | ON (budget 1024) | **General use** — default for most tasks |
-| `qwen-3.6-35b-q6-fast` | `qwen-3.6-35b-q6-fast` | OFF | **Fallback** — when reasoning eats token budget or breaks tool calling |
+| `qwen-3.6-35b-q8` | `qwen-3.6-35b-q8` | ON (budget 1024) | **General use** — default for most tasks |
+| `qwen-3.6-35b-q8-fast` | `qwen-3.6-35b-q8-fast` | OFF | **Fallback** — when reasoning eats token budget or breaks tool calling |
 
-Key config flags: `-c 131072` (128K ctx), `-t 8`, `--flash-attn on`, `--no-mmap`, `-ctk q8_0 -ctv q8_0`, `--cache-ram 2048`, `--prio 2`, `--temp 0.5 --top-k 20 --min-p 0.1`.
+Key config flags: `-c 262144` (256K ctx), `--n-cpu-moe 33`, `-t 8`, `--flash-attn on`, `--no-mmap`, `-ctk q4_0 -ctv q4_0`, `--cache-ram 2048`, `--prio 2`, `--temp 0.5 --top-k 20 --min-p 0.1`.
 
 Switching models triggers a ~60s reload (unload one, load the other).
 
@@ -31,7 +31,7 @@ Switching models triggers a ~60s reload (unload one, load the other).
 bash ~/scripts/smoke-test-llm.sh
 
 # Custom models or benchmark file
-bash ~/scripts/smoke-test-llm.sh qwen-3.6-35b-q6 qwen-3.6-35b-q6-fast ~/benchmarks/context-window/context_50_000.md
+bash ~/scripts/smoke-test-llm.sh qwen-3.6-35b-q8 qwen-3.6-35b-q8-fast ~/benchmarks/context-window/context_50_000.md
 ```
 
 ## What the Smoke Test Measures
@@ -59,11 +59,11 @@ Run through omp to test if the model proactively uses web_search:
 ```bash
 # No-thinking (recommended — more accurate with search results)
 echo "What's the latest on the US team in the world cup?" | \
-  omp -p --provider local-llm --model qwen-3.6-35b-q6-fast --api-key none
+  omp -p --provider local-llm --model qwen-3.6-35b-q8-fast --api-key none
 
 # Thinking (more verbose, may hallucinate details)
 echo "What's the latest on the US team in the world cup?" | \
-  omp -p --provider local-llm --model qwen-3.6-35b-q6 --api-key none
+  omp -p --provider local-llm --model qwen-3.6-35b-q8 --api-key none
 ```
 
 The test prompt should be a **current events question with no explicit search instruction** — the model must decide to search on its own. The user supplies the test case and correctness criteria interactively.

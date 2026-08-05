@@ -1,5 +1,5 @@
 #!/bin/bash
-# Smoke test for local LLM (Qwen Q6 via llm-proxy → gaming rig)
+# Smoke test for local LLM (Qwen 3.6 35B Q8 via llm-proxy → gaming rig)
 # Measures: content production, TPS, context recall, memory/VRAM
 # Usage: bash ~/scripts/smoke-test-llm.sh [model_id]
 #
@@ -11,8 +11,8 @@
 
 set -euo pipefail
 
-MODEL_THINK="${1:-qwen3.6-35b-q6}"
-MODEL_NOTHINK="${2:-qwen3.6-35b-q6-fast}"
+MODEL_THINK="${1:-qwen-3.6-35b-q8}"
+MODEL_NOTHINK="${2:-qwen-3.6-35b-q8-fast}"
 ENDPOINT="http://localhost:8081/v1/chat/completions"
 TIMEOUT=300
 BENCHMARK_FILE="${3:-$HOME/benchmarks/context-window/context_20_000.md}"
@@ -295,7 +295,7 @@ echo "============================================"
 if [ "$fail_count" -eq 0 ]; then
     echo -e "${GREEN}  TIER 1 PASSED ✓${NC}"
     echo ""
-    echo "  Next: Tier 2 — world digest with Qwen Q6"
+    echo "  Next: Tier 2 — world digest with Qwen 3.6 35B Q8"
     exit 0
 else
     echo -e "${RED}  TIER 1 FAILED ✗${NC}"
