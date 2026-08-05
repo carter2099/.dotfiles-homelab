@@ -57,7 +57,7 @@ _FNM_NODE_DIRS = sorted(
     reverse=True)
 if _FNM_NODE_DIRS:
     STEWARD_PATH = f"{_FNM_NODE_DIRS[0]}:{STEWARD_PATH}"
-SMALL_MODEL = "opencode-go/mimo-v2.5"
+SMALL_MODEL = "opencode-go/deepseek-v4-flash"
 PROXY_HEALTH = "http://localhost:8082/health"
 MAX_WORKERS = 3
 # P7b fix↔judge loop: re-fix judge-not-ok items up to N times (env override).
