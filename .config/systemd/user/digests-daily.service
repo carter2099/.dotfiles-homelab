@@ -7,4 +7,7 @@ After=network-online.target
 Type=oneshot
 Environment="PATH=/home/carter/.local/bin:/home/carter/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/home/carter/scripts/run_all_digests.sh
-TimeoutStartSec=32400
+# 20h: per-topic `timeout 14400` (4h) in run_all_digests.sh is the real cap;
+# a 9h service timeout killed the 2026-08-05 run mid-gaming with world never
+# started (ai-tech/agentic took ~3h each that day).
+TimeoutStartSec=72000
