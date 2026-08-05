@@ -1493,6 +1493,39 @@ def _p1_openwebui():
                 "current_tag": current_tag, "latest_tag": latest_tag, "error": str(e)}
 
 
+def _p1_herdr_update():
+    """Self-update herdr via `herdr update` (installs to ~/.local/bin/herdr).
+
+    `herdr update` refuses to run inside a herdr session (env-var detection) —
+    that only happens on a manual steward run launched from a herdr pane, so it
+    is reported as skipped rather than failing P1. The nightly timer runs
+    outside herdr (systemd user manager has no HERDR_* vars) and updates
+    normally.
+    """
+    print("  [1g] herdr update")
+    env = user_env()
+    pre_ver = run_capture(["herdr", "--version"], env=env, timeout=30)
+    stdout, stderr, code = run_capture_ok(["herdr", "update"], env=env, timeout=300)
+    out = f"{stdout}\n{stderr}".strip()
+    post_ver = run_capture(["herdr", "--version"], env=env, timeout=30)
+
+    if "outside herdr" in out:
+        return {"step": "herdr_update", "status": "skipped",
+                "reason": "refused: run inside a herdr session (nightly timer runs outside)",
+                "pre_version": pre_ver, "output_tail": out[-500:]}
+    if post_ver and post_ver != pre_ver:
+        return {"step": "herdr_update", "status": "ok",
+                "pre_version": pre_ver, "post_version": post_ver,
+                "output_tail": out[-500:]}
+    if code == 0:
+        return {"step": "herdr_update", "status": "skipped",
+                "pre_version": pre_ver, "post_version": post_ver,
+                "reason": "already current", "output_tail": out[-500:]}
+    return {"step": "herdr_update", "status": "failed",
+            "pre_version": pre_ver, "post_version": post_ver,
+            "error": out[-500:] or f"exit {code}"}
+
+
 def phase_1_apply(run_dir, dry_run=False):
     """Phase 1: apply safe updates. Skip if --dry-run."""
     if dry_run:
@@ -1560,6 +1593,9 @@ def phase_1_apply(run_dir, dry_run=False):
 
     # 1f: open-webui
     steps.append(_p1_openwebui())
+
+    # 1g: herdr self-update (refuses inside a herdr session → skipped, not failed)
+    steps.append(_p1_herdr_update())
 
     data = {"steps": steps}
     write_json(run_dir / "01-applied.json", data)
@@ -4339,6 +4375,17 @@ def _html_updates(applied_data):
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
                              f'freshrss: {status} — {s.get("error",s.get("reason",""))}</p>')
 
+        # herdr: show only bumped or failed/error
+        elif name == "herdr_update":
+            pre = str(s.get("pre_version", "?")).replace("herdr ", "")
+            post = str(s.get("post_version", "?")).replace("herdr ", "")
+            if status == "ok":
+                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
+                             f'herdr: {pre} -> {post}</p>')
+            elif status in ("failed", "error"):
+                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                             f'herdr: {status} — {s.get("error",s.get("reason",""))}</p>')
+
         # Generic fallback: show any step with real change/failure
         else:
             if status in ("ok", "bumped"):
@@ -4931,6 +4978,11 @@ def _tldr_collect_updates(applied):
             updates.append(f"open-webui: {s.get('current_tag')} -> {s.get('latest_tag')}")
         elif step == "freshrss" and status == "bumped":
             updates.append(f"freshrss: {s.get('current_tag')} -> {s.get('latest_tag')}")
+        elif step == "herdr_update" and status == "ok":
+            pre = str(s.get("pre_version", "")).replace("herdr ", "")
+            post = str(s.get("post_version", "")).replace("herdr ", "")
+            if pre and post and pre != post:
+                updates.append(f"herdr: {pre} -> {post}")
     return updates, n_failed
 
 
