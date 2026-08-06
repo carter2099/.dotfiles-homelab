@@ -57,9 +57,9 @@ bundle exec rspec  # run tests
 
 Note: `.ruby-version` in cloned repos may request a Ruby not installed locally. Check `rbenv versions`; use `RBENV_VERSION=<installed-version>` to override for testing if the patch difference is minor, or `rbenv install <version>` for the exact one.
 
-## Skills
+## Slash commands
 
-Always use the `/create-skill` skill when creating a new user-level skill. Writing a skill file directly (under `~/.omp/agent/skills/*/SKILL.md`) skips the `dotfiles add` + commit + push step, leaving the skill untracked and at risk of being lost if homelab storage is wiped. The skill bakes in the VCS step.
+Always use the `/create-command` command when creating a new user-global slash command. User-global commands are file prompts in `~/.omp/agent/prompts/*.md`; the filename determines the slash-command name. The command handles the required VCS step so the prompt is tracked and survives a homelab storage wipe.
 
 ## Dotfiles Management
 
@@ -81,7 +81,8 @@ use the raw form: `/usr/bin/git --git-dir="$HOME/.dotfiles-homelab/" --work-tree
 ```bash
 dotfiles add .zshrc                                 # single file
 dotfiles add .config/systemd/user/homelab-backup.*  # glob pattern for related files
-dotfiles add -A .omp/agent/skills/                   # OK when scoped to a directory path
+dotfiles add .omp/agent/prompts/create-command.md       # command-creation prompt
+dotfiles add .omp/agent/prompts/hyperliquid-run.md      # scheduled command prompt
 ```
 
 ## App Deployment Pattern

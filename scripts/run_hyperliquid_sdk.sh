@@ -20,6 +20,6 @@ if ! command -v bun &>/dev/null; then
 fi
 echo "ok: omp at $(command -v omp), bun at $(command -v bun)"
 
-PROMPT='Read /home/carter/.omp/agent/skills/hyperliquid-run/SKILL.md using the read tool and follow its instructions exactly. This is an automated scheduled SDK maintenance run.'
+PROMPT='/hyperliquid-run'
 
 omp -p --model opencode-go/glm-5.2 --api-key proxy --allow-home --config ~/.omp/agent/headless-override.yml --session-dir ~/.omp/agent/sessions-automated "$PROMPT"
