@@ -10,7 +10,7 @@ modelRoles:
   smol: opencode-go/deepseek-v4-flash:high
   tiny: opencode-go/deepseek-v4-flash:high
   slow: opencode-go/glm-5.2:high
-  task: openai-codex/gpt-5.6-luna:high
+  task: opencode-go/deepseek-v4-flash:high
 advisor: 
   enabled: true
   syncBacklog: 1
