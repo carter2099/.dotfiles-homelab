@@ -42,10 +42,10 @@ providers:
         name: ornith-1.0-9b-q6
         reasoning: true
         contextWindow: 262144
-      - id: gemma-4-12b-q5
-        name: gemma-4-12b-q5
+      - id: gemma-4-12b-q6
+        name: gemma-4-12b-q6
         reasoning: true
-        contextWindow: 262144
+        contextWindow: 131072
       - id: gemma-4-26b-q8
         name: gemma-4-26b-q8
         reasoning: true
