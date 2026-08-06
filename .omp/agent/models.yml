@@ -34,10 +34,6 @@ providers:
         name: qwen-3.6-35b-q8
         reasoning: true
         contextWindow: 262144
-      - id: qwen-3.6-35b-q8-fast
-        name: qwen-3.6-35b-q8-fast
-        reasoning: false
-        contextWindow: 262144
       - id: ornith-1.0-9b-q6
         name: ornith-1.0-9b-q6
         reasoning: true

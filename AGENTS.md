@@ -108,13 +108,13 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **Delta Neutral** (Rails 8, port 43080) → [`delta-neutral.md`](notes/docs/homelab/delta-neutral.md)
 - **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
-- **Open WebUI** (chat frontend, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)
+- **Open WebUI** (chat frontend + native SearXNG + Weather v2, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)
 - **OMP Web** (agent web UI, localhost:30141) → [`omp-web.md`](notes/docs/homelab/omp-web.md)
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
 - **FreshRSS** (RSS reader, k3s Deployment, freshrss.carter2099.com) → [`k3s.md`](notes/docs/homelab/k3s.md) (covered as third-party k3s service)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
 - **OpenCode Go Proxy** (0.0.0.0:8082, UFW-gated to Docker bridges) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
-- **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
+- **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges; seven reasoning-enabled local entries) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
 - **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 
 ## Email Digests
@@ -227,7 +227,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`blog.md`](notes/docs/homelab/blog.md) — Rails 8 blog app
 - [`delta-neutral.md`](notes/docs/homelab/delta-neutral.md) — Rails 8 rebalancer + Hyperliquid SDK timer
 - [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md) — Go webhook + Prompt-Guard classifier
-- [`open-webui.md`](notes/docs/homelab/open-webui.md) — chat frontend, searxng integration
+- [`open-webui.md`](notes/docs/homelab/open-webui.md) — chat frontend, native SearXNG, Weather v2
 - [`omp-web.md`](notes/docs/homelab/omp-web.md) — agent web UI, next.js build quirks
 - [`searxng.md`](notes/docs/homelab/searxng.md) — metasearch backend, config
 - [`cloudflare.md`](notes/docs/homelab/cloudflare.md) — API token, tunnel ingress, DNS
