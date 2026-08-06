@@ -32,7 +32,7 @@ if [ -f "$LOGFILE" ]; then
     LAST_LINE=$(tail -1 "$LOGFILE" 2>/dev/null || true)
     if [ -n "$LAST_LINE" ] && echo "$LAST_LINE" | grep -qv "ALL DONE"; then
         # Extract topic from SCRIPT TERMINATED line if available
-        local topic_hint=""
+        topic_hint=""
         if echo "$LAST_LINE" | grep -q "topic="; then
             topic_hint=$(echo "$LAST_LINE" | sed 's/.*topic=\([^ ]*\).*/\1/')
             echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run interrupted during topic=$topic_hint (last: $LAST_LINE)" | tee -a "$LOGFILE"
