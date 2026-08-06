@@ -3527,8 +3527,11 @@ def _audit_collector_5_config_drift():
 
 def _audit_collector_6_notes_resources():
     """Collector: resource trends + OOM/exit-255 hunt."""
+    # Scan the whole current boot's kernel log, not a rolling 24h window:
+    # a daily steward run can otherwise miss an OOM event that happened
+    # >24h before it (e.g. Aug 05 17:52 UTC event unseen by Aug 06 21:00 run).
     oom_hunt = run_capture(
-        ["journalctl", "--since", "24 hours ago", "--no-pager", "-q"])
+        ["journalctl", "-k", "-b", "--no-pager", "-q"])
     oom_count = oom_hunt.lower().count("out of memory") if oom_hunt else 0
     exit_255 = run_capture(
         ["docker", "ps", "-a", "--filter", "status=exited",
