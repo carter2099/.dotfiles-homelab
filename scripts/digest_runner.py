@@ -1922,11 +1922,21 @@ def phase_7_write(topic: dict, fresh: list[dict], ongoing: list[dict],
         raise
 
 def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
-                         run_dir: Path, digest_dir: Path) -> None:
+                         run_dir: Path, digest_dir: Path,
+                         fresh: list[dict] | None = None,
+                         ongoing: list[dict] | None = None,
+                         send_on_empty: bool = False) -> None:
     """Phase 8: Send email, archive HTML, write stories-in-flight.
 
     No LLM call — pure Python. In test mode, email is sent with a [TEST]
     subject prefix and archived to the test run_dir.
+
+    Skip-send on empty: when there are no fresh and no ongoing stories the
+    email is NOT sent (a "<p>No stories found today.</p>" digest is a bug,
+    not content). The HTML is still archived so the run leaves a record.
+    send_on_empty=True forces the send regardless — used for the upstream
+    outage notification, which is a deliberate alert rather than an empty
+    digest.
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -1945,10 +1955,16 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     temp_html = digest_dir / ".daily_digest.html"
     temp_html.write_text(html)
 
-    # Only send email if archive doesn't already exist (idempotent resume guard)
+    # Only send email if archive doesn't already exist (idempotent resume
+    # guard) AND the digest has content (skip-send on empty: no fresh and no
+    # ongoing stories — unless send_on_empty, e.g. outage notification).
     archive_already_exists = archive_path.exists()
-    if archive_already_exists and not TEST_MODE:
-        print(f"  [skip] send_email — archive already exists: {archive_path}")
+    empty_digest = not (fresh or ongoing) and not send_on_empty
+    if (archive_already_exists and not TEST_MODE) or empty_digest:
+        if empty_digest:
+            print("  [skip] send_email — empty digest (no fresh/ongoing stories); archived only")
+        else:
+            print(f"  [skip] send_email — archive already exists: {archive_path}")
     else:
         recipients = topic["recipients"].copy()
 
@@ -2489,7 +2505,9 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             else:
                 print(f"  [WARN] 06-curated.json missing — curated_copy.json not written")
         else:
-            phase_8_send_archive(topic, html, stories_in_flight, run_dir, digest_dir)
+            phase_8_send_archive(topic, html, stories_in_flight, run_dir, digest_dir,
+                                 fresh=fresh, ongoing=ongoing,
+                                 send_on_empty=_UPSTREAM_OUTAGE)
         _phase_done("Phase 8: Send & Archive", t8)
 
         # Phase 9: Summary
