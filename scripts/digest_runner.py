@@ -1045,32 +1045,48 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
         label = f"research:{angle['id']}"
         print(f"  [run ] {label}")
         t0 = time.time()
-        try:
+        def _attempt() -> list[dict]:
             raw = _call_omp_p(angle["prompt"], model=MODEL, timeout=RESEARCH_TIMEOUT,
                              append_system=system_prompt)
-            findings = _extract_json(raw, f"{label} output")
-            elapsed = time.time() - t0
+            return _extract_json(raw, f"{label} output")
+
+        try:
+            findings = _attempt()
+            failure_msg = None
+        except Exception as e:
+            # Per-angle retry: a failed extraction must not silently drop this
+            # angle — previously the whole section was lost whenever a sibling
+            # angle produced findings (the run-level fallback retry at the
+            # digest level only fires when ALL angles yield zero findings).
+            # Retry once with the same model.
+            print(f"  [retry] {label} — attempt 1 failed: {e}; retrying once")
+            check_search_health(f"retry-{angle['id']}")
+            try:
+                findings = _attempt()
+                failure_msg = None
+            except Exception as e2:
+                findings = []
+                failure_msg = str(e2)
+
+        elapsed = time.time() - t0
+        if findings:
             print(f"  [done] {label} — {len(findings)} findings in {elapsed:.0f}s")
-            # Check search health after each angle
-            h = check_search_health(f"after-{angle['id']}")
-            if h.get("recommendation") == "halt":
-                print(f"  *** HALT during {label}: search health critical ***")
-            if findings:
-                _RESEARCH_SUCCESSES += 1
-            else:
+            _RESEARCH_SUCCESSES += 1
+        else:
+            if failure_msg is None:
                 # HTTP 200 but empty result — the LLM stage degraded rather than
                 # finding nothing. Count as a failure so an all-empty run trips
                 # the _UPSTREAM_OUTAGE annotation below instead of emailing a
                 # misleading "No stories found today" digest.
-                _RESEARCH_FAILURES.append(
-                    "empty research results (LLM returned no findings)")
-            return findings
-        except Exception as e:
-            elapsed = time.time() - t0
-            print(f"  [FAIL] {label} — {e} ({elapsed:.0f}s)")
+                failure_msg = "empty research results (LLM returned no findings)"
+            print(f"  [FAIL] {label} — {failure_msg} ({elapsed:.0f}s)")
             check_search_health(f"fail-{angle['id']}")
-            _RESEARCH_FAILURES.append(str(e))
-            return []
+            _RESEARCH_FAILURES.append(failure_msg)
+        # Check search health after each angle
+        h = check_search_health(f"after-{angle['id']}")
+        if h.get("recommendation") == "halt":
+            print(f"  *** HALT during {label}: search health critical ***")
+        return findings
 
     findings: list[dict] = []
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_RESEARCH) as pool:
@@ -1382,6 +1398,12 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
             raw = _call_omp_p(prompt, model=MODEL, timeout=FETCH_TIMEOUT,
                              append_system=system_prompt)
             result = _extract_json(raw, f"{label} output")
+            if not isinstance(result, dict):
+                # LLM returned a JSON array (or scalar) instead of the requested
+                # object — previously crashed with "'list' object has no
+                # attribute 'get'" and dropped the article. Treat as fetch failure.
+                raise ValueError(
+                    f"fetch output is not a JSON object (got {type(result).__name__})")
             elapsed = time.time() - t0
             status = "✓" if result.get("fetch_success", True) else "✗"
             print(f"  [done] {label} — {status} ({elapsed:.0f}s)")
@@ -2144,10 +2166,12 @@ def _prune_and_cool_stories(stories: list[dict], today: date | None = None) -> t
             auto_pruned += 1
             continue
 
-        # Rule 2: Auto-cool stale active stories — based on inactivity OR total age
-        # Using total_age prevents LLM curator from keeping stories active forever
-        # by updating last_updated daily (which resets inactive_age to 0).
-        if status == "active" and (inactive_age >= COOL_AFTER_DAYS or total_age >= COOL_AFTER_DAYS):
+        # Rule 2: Auto-cool stale active stories — inactivity only (no updates in
+        # COOL_AFTER_DAYS), matching the documented rule (COOL_AFTER_DAYS comment
+        # and load_and_prune_stories_in_flight docstring). Cooling on total_age
+        # wrongly culls stories that are still being actively updated; the 7-day
+        # auto-prune above already bounds how long any story stays in the tracker.
+        if status == "active" and inactive_age >= COOL_AFTER_DAYS:
             s["status"] = "cooled"
             auto_cooled += 1
             kept.append(s)
