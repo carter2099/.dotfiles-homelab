@@ -223,7 +223,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules; also covers FreshRSS as a third-party k3s deployment
 - [`email-digests.md`](notes/docs/homelab/email-digests.md) — 9-phase digest workflow, stories-in-flight, audit/debug
 - [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, work queue, executor, budget guard, debugging
-- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 23-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
+- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 24-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 - [`blog.md`](notes/docs/homelab/blog.md) — Rails 8 blog app
 - [`delta-neutral.md`](notes/docs/homelab/delta-neutral.md) — Rails 8 rebalancer + Hyperliquid SDK timer
 - [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md) — Go webhook + Prompt-Guard classifier
