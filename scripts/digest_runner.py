@@ -302,6 +302,10 @@ SIF_CAP = 3         # Pool C: max stories-in-flight passed directly to Phase 6
 COOL_AFTER_DAYS = 5     # auto-set status to "cooled" if no updates in 5 days
 PRUNE_AFTER_DAYS = 7    # remove stories entirely after 7 days since first_seen
 
+# ── Cross-day dedup constants ──────────────────────────────────────────────
+CROSS_DAY_DEDUP_DAYS = 5  # block URLs covered in the last N days' digests;
+                          # matches the ongoing research window (5 days)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Importance rubric — shared rules + per-topic specifics
@@ -945,6 +949,42 @@ def _normalize_url(url: str) -> str:
     return u
 
 
+def _load_recent_covered_urls(digest_dir: Path, today: date, days: int) -> set[str]:
+    """Collect URLs this digest already covered in the previous `days` days.
+
+    Two per-day sources:
+      1. <date>/06-curated.json — structured fresh+ongoing URLs from the run
+         dir (authoritative; run dirs are auto-cleaned after 14 days).
+      2. <date>.md — the archived Phase 9 summary, with URLs extracted from
+         markdown links (fallback when the run dir no longer exists).
+
+    Returns a set of normalized URLs. Phase 2 uses this to keep non-SIF stories
+    from re-entering the digest on consecutive days (cross-day dedup).
+    """
+    covered: set[str] = set()
+    for i in range(1, days + 1):
+        day = today - timedelta(days=i)
+        day_str = day.isoformat()
+        curated = digest_dir / day_str / "06-curated.json"
+        if curated.exists():
+            try:
+                data = json.loads(curated.read_text())
+                for story in data.get("fresh", []) + data.get("ongoing", []):
+                    url = _normalize_url(story.get("url", ""))
+                    if url:
+                        covered.add(url)
+                continue  # structured curated data is authoritative for this day
+            except (json.JSONDecodeError, ValueError):
+                pass
+        md_file = digest_dir / f"{day_str}.md"
+        if md_file.exists():
+            for m in re.finditer(r"\[[^\]]*\]\((https?://[^)\s]+)\)", md_file.read_text()):
+                url = _normalize_url(m.group(1))
+                if url:
+                    covered.add(url)
+    return covered
+
+
 def _refetch_article_date(url: str, title: str) -> str | None:
     """Re-fetch an article to independently extract its publication date.
 
@@ -1175,6 +1215,22 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         output_path.write_text(json.dumps(output, indent=2))
         return [], []
 
+    # Cross-day dedup: collect URLs this digest covered on previous days so the
+    # same story can't reappear in consecutive digests unless SIF-tracked.
+    cross_day_blocked = _load_recent_covered_urls(run_dir.parent, today, CROSS_DAY_DEDUP_DAYS)
+    cross_day_context = ""
+    if cross_day_blocked:
+        print(f"  Cross-day dedup: {len(cross_day_blocked)} URLs covered in previous "
+              f"{CROSS_DAY_DEDUP_DAYS} days")
+        cross_day_context = (
+            "## Stories Already Covered in Previous Digests (do NOT select these)\n"
+            "The following URLs were already covered in this digest on a previous "
+            "day. If a finding has the SAME URL as any of these, mark it as rejected "
+            "with reason 'already_covered_previous_day' — the same story should not "
+            "appear in consecutive digests.\n\n"
+            + "\n".join(f'  - "{u}"' for u in sorted(cross_day_blocked)) + "\n\n"
+        )
+
     # Build SIF context string for cross-run dedup
     sif_context = ""
     if stories_in_flight:
@@ -1220,6 +1276,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     for batch_idx, batch in enumerate(batches):
         batch_json = json.dumps(batch, indent=2)
         user = (
+            f"{cross_day_context}"
             f"{sif_context}"
             f"## Rules\n\n{topic['judgment_rules']}\n\n"
             f"## Importance Rubric\n\n{rubric}\n\n"
@@ -1244,7 +1301,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             print(f"  [FAIL] judge_research batch {batch_idx + 1} — {e}, treating all as approved")
             all_approved.extend(batch)
 
-    # ── Step 3: Python merge — cross-batch duplicate detection ──
+    # ── Step 3: Python merge — cross-batch + cross-day duplicate detection ──
     seen_urls: set[str] = set()
     deduped_approved: list[dict] = []
     dedup_rejected: list[dict] = []
@@ -1253,13 +1310,21 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         url = _normalize_url(f.get("url", ""))
         if url and url in seen_urls:
             dedup_rejected.append({"finding": f, "reason": "cross_batch_duplicate"})
+        elif url and url in cross_day_blocked:
+            dedup_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
         else:
             if url:
                 seen_urls.add(url)
             deduped_approved.append(f)
 
     if dedup_rejected:
-        print(f"  Cross-batch dedup: removed {len(dedup_rejected)} duplicates")
+        n_cross_day = sum(1 for r in dedup_rejected
+                          if r.get("reason") == "already_covered_previous_day")
+        n_batch = len(dedup_rejected) - n_cross_day
+        if n_batch:
+            print(f"  Cross-batch dedup: removed {n_batch} duplicates")
+        if n_cross_day:
+            print(f"  Cross-day dedup: removed {n_cross_day} stories already covered on previous days")
 
     # Split by date_tag
     fresh = [f for f in deduped_approved if f.get("date_tag") == "fresh"]
