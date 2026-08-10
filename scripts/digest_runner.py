@@ -51,6 +51,7 @@ import requests
 DIGESTS_DIR = Path.home() / "digests"
 TEMPLATE_PATH = DIGESTS_DIR / "template.html"
 SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
+DIGEST_OMP_SANDBOX = Path.home() / "scripts" / "digest-omp-sandbox.ts"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
@@ -843,6 +844,30 @@ def _call_llm_proxy(
     body = resp.json()
     return body["choices"][0]["message"]["content"]
 
+def _omp_agent_environment() -> dict[str, str]:
+    """Return the minimal environment needed by a network-only digest agent."""
+    allowed = {
+        "DBUS_SESSION_BUS_ADDRESS",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LOGNAME",
+        "NO_PROXY",
+        "PATH",
+        "SHELL",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TERM",
+        "TMPDIR",
+        "TZ",
+        "USER",
+        "XDG_RUNTIME_DIR",
+    }
+    env = {key: value for key, value in os.environ.items() if key in allowed}
+    env["HOME"] = str(Path.home())
+    return env
+
+
 def _call_omp_p(
     prompt: str,
     model: str = MODEL,
@@ -871,17 +896,28 @@ def _call_omp_p(
         prompt_file = tf.name
 
     try:
-        cmd = ["omp", "-p", "--model", omp_model,
-               "--session-dir", str(Path.home() / ".omp/agent/sessions-automated"),
-               "--config", str(Path.home() / ".omp/agent/headless-override.yml"),
-               "--append-system-prompt", full_system,
-               f"@{prompt_file}"]
+        cmd = [
+            "omp", "-p",
+            "--model", omp_model,
+            "--session-dir", str(Path.home() / ".omp/agent/sessions-automated"),
+            "--config", str(Path.home() / ".omp/agent/headless-override.yml"),
+            "--append-system-prompt", full_system,
+            "--tools", "read,web_search",
+            "--no-extensions",
+            "--extension", str(DIGEST_OMP_SANDBOX),
+            "--no-skills",
+            "--no-rules",
+            "--no-lsp",
+            "--no-pty",
+            f"@{prompt_file}",
+        ]
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "HOME": str(Path.home())},
+            cwd="/tmp",
+            env=_omp_agent_environment(),
         )
         if result.returncode != 0 and not result.stdout.strip():
             raise RuntimeError(f"omp -p failed (rc={result.returncode}): {result.stderr[:500]}")
