@@ -12,6 +12,13 @@ set -euo pipefail
 export HOME="/home/carter"
 export PATH="$HOME/.local/bin:$HOME/.rbenv/bin:$HOME/.rbenv/shims:$HOME/.fnm:$HOME/.bun/bin:$PATH"
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+# Timer/manual invocations share one maintenance workspace. Exit cleanly when
+# another run owns the lock rather than racing Git state and duplicate emails.
+exec 9>/tmp/hyperliquid-sdk.lock
+if ! flock -n 9; then
+    echo "skip: another Hyperliquid SDK maintenance run is active"
+    exit 0
+fi
 
 RECIPIENT="carter2099@pm.me"
 RUN_LOG="$(mktemp /tmp/hyperliquid-sdk-run.XXXXXX.log)"
