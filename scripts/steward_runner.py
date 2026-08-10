@@ -366,7 +366,10 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None, mo
     """
     if mode not in ("text", "json"):
         raise ValueError(f"unsupported omp mode: {mode!r}")
+    # Model-driven children may edit as Carter but cannot cross the host's
+    # passwordless-sudo boundary. Deterministic steward phases retain sudo.
     cmd = [
+        "/usr/bin/setpriv", "--no-new-privs",
         str(HOME / ".bun/bin/omp"), "-p", "--model", model,
         "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
@@ -663,7 +666,10 @@ def extract_from_ndjson(stdout):
 
 def _call_omp_p_json(prompt, timeout=OMP_JSON_TIMEOUT, extra_args=None):
     """Call omp -p in --mode json. Returns (accumulated_text, stats, packet, raw_stdout)."""
+    # Keep executor agents below the sudo boundary; the parent orchestrator
+    # alone performs privileged deterministic maintenance.
     cmd = [
+        "/usr/bin/setpriv", "--no-new-privs",
         str(HOME / ".bun/bin/omp"), "-p", "--model", OMP_JSON_MODEL, "--mode", "json",
         "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
