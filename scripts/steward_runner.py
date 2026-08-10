@@ -42,7 +42,6 @@ AUTO_PKGS = [
 ENDPOINTS = {
     "open-webui": "http://127.0.0.1:48100",
     "blog": "http://127.0.0.1:33099",
-    "delta_neutral": "http://127.0.0.1:43080",
     "llm-proxy": "http://127.0.0.1:8081/health",
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
@@ -1540,34 +1539,54 @@ def _p1_deploy_step_ok(step):
 
 
 def _p1_searxng_update():
-    """Pull latest searxng image and recreate if a newer image was pulled.
+    """Ensure the container runs the immutable image pinned in Compose.
 
-    Compose tracks `searxng/searxng:latest` (no pinned tag to bump), so 'update'
-    means pull + up -d; a change is detected by the image id.
+    Upstream updates are surfaced by the version audit for deliberate pin
+    changes; the nightly steward never advances this image implicitly.
     """
-    print("  [1h] searxng update")
+    print("  [1h] searxng pinned-image reconcile")
     compose = HOME / "searxng" / "docker-compose.yml"
     if not compose.exists():
         return {"step": "searxng", "status": "skipped",
                 "reason": f"compose file not found: {compose}"}
-    pre_id = run_capture(["docker", "image", "inspect", "searxng/searxng:latest",
-                          "--format", "{{.Id}}"], timeout=30)
+
+    image_ref = run_capture(
+        ["docker", "compose", "-f", str(compose), "config", "--images"],
+        timeout=30,
+    ).strip().splitlines()
+    if len(image_ref) != 1:
+        return {"step": "searxng", "status": "failed",
+                "reason": f"expected one compose image, got {image_ref}"}
+    image_ref = image_ref[0]
+    pre_id = run_capture(
+        ["docker", "inspect", "searxng", "--format", "{{.Image}}"], timeout=30)
+    expected_id = run_capture(
+        ["docker", "image", "inspect", image_ref, "--format", "{{.Id}}"], timeout=30)
+
     try:
-        run(["docker", "compose", "-f", str(compose), "pull"],
-            cwd=compose.parent, capture_output=True, text=True, timeout=300)
+        if not expected_id:
+            run(["docker", "compose", "-f", str(compose), "pull"],
+                cwd=compose.parent, capture_output=True, text=True, timeout=300)
+            expected_id = run_capture(
+                ["docker", "image", "inspect", image_ref, "--format", "{{.Id}}"],
+                timeout=30)
         run(["docker", "compose", "-f", str(compose), "up", "-d"],
             cwd=compose.parent, capture_output=True, text=True, timeout=120)
     except subprocess.CalledProcessError as e:
         return {"step": "searxng", "status": "failed",
-                "pre_id": pre_id, "error": str(e)[-500:]}
-    post_id = run_capture(["docker", "image", "inspect", "searxng/searxng:latest",
-                           "--format", "{{.Id}}"], timeout=30)
-    if post_id and post_id != pre_id:
-        return {"step": "searxng", "status": "ok",
-                "pre_id": pre_id, "post_id": post_id,
-                "reason": "pulled newer image"}
-    return {"step": "searxng", "status": "skipped",
-            "pre_id": pre_id, "post_id": post_id, "reason": "already current"}
+                "image_ref": image_ref, "pre_id": pre_id, "error": str(e)[-500:]}
+
+    post_id = run_capture(
+        ["docker", "inspect", "searxng", "--format", "{{.Image}}"], timeout=30)
+    if expected_id and post_id == expected_id:
+        changed = pre_id != post_id
+        return {"step": "searxng", "status": "ok" if changed else "skipped",
+                "image_ref": image_ref, "pre_id": pre_id, "post_id": post_id,
+                "reason": "reconciled pinned image" if changed
+                          else "pinned image already running"}
+    return {"step": "searxng", "status": "failed",
+            "image_ref": image_ref, "expected_id": expected_id,
+            "post_id": post_id, "reason": "running image does not match pin"}
 
 
 _OMP_PKG = "@oh-my-pi/pi-coding-agent"   # bun global package backing ~/.bun/bin/omp
@@ -1701,7 +1720,7 @@ def phase_1_apply(run_dir, dry_run=False):
     # 1g: herdr self-update (refuses inside a herdr session → skipped, not failed)
     steps.append(_p1_herdr_update())
 
-    # 1h: searxng — pull latest :latest image, recreate if changed
+    # 1h: searxng — reconcile the immutable Compose image pin
     steps.append(_p1_searxng_update())
 
     # 1i: omp self-update (last — swaps the binary the steward's own agents use)
@@ -2077,7 +2096,6 @@ def phase_3a_remediation(run_dir, dry_run=False):
 
     DOCUMENTED_PORTS = {
         33099: "blog",
-        43080: "delta_neutral",
         48100: "open-webui",
         8080: "searxng",
         8081: "llm-proxy",
@@ -2452,7 +2470,7 @@ def phase_4_heartbeat(run_dir):
     # DNS resolution of homelab hostnames
     dns_hostnames = [
         "blog.carter2099.com", "chat.carter2099.com",
-        "freshrss.carter2099.com", "deltaneutral.carter2099.com", "hooks.carter2099.com",
+        "freshrss.carter2099.com", "hooks.carter2099.com",
     ]
     dns_results = {}
     for host in dns_hostnames:
@@ -2524,8 +2542,10 @@ def phase_4_heartbeat(run_dir):
 
     # bundle-audit
     bundle_audit = {}
-    for app_name, gemfile_lock in [("blog", HOME / "blog" / "blog" / "Gemfile.lock"),
-                                     ("delta_neutral", HOME / "delta_neutral" / "delta_neutral" / "Gemfile.lock")]:
+    for app_name, gemfile_lock in [
+        ("blog", HOME / "blog" / "blog" / "Gemfile.lock"),
+        ("delta_neutral", HOME / "dev" / "delta_neutral" / "Gemfile.lock"),
+    ]:
         if gemfile_lock.exists():
             out = run_capture(["bundle-audit", "check", "--gemfile-lock", str(gemfile_lock)],
                              timeout=120)
@@ -3484,7 +3504,6 @@ def _audit_collector_5_config_drift():
     deploy_repos = {}
     for name, path in [
         ("blog", HOME / "blog" / "blog"),
-        ("delta_neutral", HOME / "delta_neutral" / "delta_neutral"),
         ("homelab-backup", HOME / "homelab-backup"),
     ]:
         if path.exists():
@@ -3615,7 +3634,7 @@ AUDIT_SECTIONS = [
         "guidance": (
             "Truth-check /home/carter/AGENTS.md against the live host. READ the file first. "
             "Verify (1) pointer targets still resolve (paths, commands it cites) and (2) structural/"
-            "semantic facts: IP roles (.100 DHCP/default, .92 k3s+blog/delta_neutral), "
+            "semantic facts: IP roles (.100 DHCP/default, .92 k3s+blog ingress), "
             "enp3s0f0 as primary + wlp6s0 down, flannel-iface=enp3s0f0, the two-pattern k3s deployment model, "
             "service+timer names and schedules, ufw cni0/flannel.1 rules, sole docker daemon at /var/lib/docker, "
             "documented ports. Do NOT re-add intentionally-removed version pins. "
@@ -3631,8 +3650,8 @@ AUDIT_SECTIONS = [
         "guidance": (
             "Compare current versions (in evidence) against latest upstream stable for components NOT "
             "auto-updated by P1: k3s, Go, Node, Ruby (rbenv), neovim, the traefik docker image, "
-            "llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
-            "Do NOT report freshrss, open-webui, herdr, omp, or searxng — those are auto-updated "
+            "the pinned searxng image, and llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
+            "Do NOT report freshrss, open-webui, herdr, or omp — those are auto-updated "
             "during P1 (the update phase) earlier this run. "
             "Report per component: current / latest / status (current | behind | behind-major). "
             "Do NOT exec into containers — the docker images evidence IS the current version. "
@@ -3659,9 +3678,9 @@ AUDIT_SECTIONS = [
         "guidance": (
             "Judge the security posture from the evidence: listening sockets vs the documented set "
             "(loopback-only: open-webui 48100, searxng 8080, prompt-guard 8090; ufw-gated: llm-proxy 8081, 8082; "
-            "LAN: blog 33099, delta 43080), ufw ruleset intact (cni0/flannel.1/docker bridges), unattended-upgrades "
+            "LAN: blog 33099), ufw ruleset intact (cni0/flannel.1/docker bridges), unattended-upgrades "
             "active, carter2099.com RDAP expiry (>30d out = ok), CF tunnel ingress vs expected hostnames "
-            "(chat, hooks, deltaneutral, freshrss, blog, omp, ssh), SSH failed-password volume. Flag anything unexpected. For repo_secrets: working_tree_issues means secret-pattern files are uncommitted in a repo \u2014 flag each as ATTENTION; commit_issues means a secret-pattern string appeared in recent diffs \u2014 flag as ATTENTION with the commit SHA. No findings = PASS for this sub-check."
+            "(chat, hooks, freshrss, blog, omp, ssh), SSH failed-password volume. Flag anything unexpected. For repo_secrets: working_tree_issues means secret-pattern files are uncommitted in a repo — flag each as ATTENTION; commit_issues means a secret-pattern string appeared in recent diffs — flag as ATTENTION with the commit SHA. No findings = PASS for this sub-check."
         ),
     },
     {
@@ -3672,7 +3691,7 @@ AUDIT_SECTIONS = [
         "guidance": (
             "Judge drift significance from the evidence: k3s live config vs tracked copy must be identical; "
             "dotfiles repo should be clean except files an interactive session is actively editing; notes repo "
-            "should be clean; deploy dirs (blog, delta_neutral, homelab-backup) should match origin/main "
+            "should be clean; deploy dirs (blog, homelab-backup) should match origin/main "
             "(commit-before-deploy rule). Distinguish real drift from in-flight session work — when unsure, "
             "mark ATTENTION with reasoning rather than DRIFT."
         ),
@@ -3714,7 +3733,7 @@ AUDIT_SECTIONS = [
             "For every DRIFT propose exact OLD_TEXT -> NEW_TEXT edits. "
             "Prefer UNVERIFIABLE over guessing. "
             "Files to check: docs/homelab/hardware.md, deployment.md, k3s.md, blog.md, "
-            "delta-neutral.md, dependabot-webhook.md, open-webui.md, omp-web.md, searxng.md, "
+            "hyperliquid-sdk.md, dependabot-webhook.md, open-webui.md, omp-web.md, searxng.md, "
             "cloudflare.md, opencode-go-proxy.md, local-llm-gaming-rig.md, email-digests.md, "
             "homelab-steward.md, homelab-backup.md."
         ),

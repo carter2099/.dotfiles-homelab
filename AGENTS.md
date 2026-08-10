@@ -30,7 +30,7 @@ Use `notes/` as a knowledge base. You will see this referenced throughout this A
 ## Repository Structure
 
 Home directory managed as a bare git repo for dotfiles. Key dirs:
-- `blog/` / `delta_neutral/` — Rails 8 apps (deploy wrappers, apps nested within)
+- `blog/` — Rails 8 deploy wrapper (app nested within)
 - `homelab-backup/` — Go backup service
 - `k3s/` — Kubernetes manifests
 - `dev/` — Scratch space for cloned repos, tests, development
@@ -41,7 +41,7 @@ Home directory managed as a bare git repo for dotfiles. Key dirs:
 - `.dotfiles-homelab/` — Bare git repo tracking dotfiles
 ## Dev Workflow (`dev/`)
 
-**Hard rule:** Always develop in `~/dev/<repo>/`. Never edit files in the prod deploy folders (`/home/carter/blog/`, `/home/carter/delta_neutral/`, etc.) — those are deployment artifacts only. If a dev/ clone doesn't exist for a repo, pull a fresh one with `git clone git@github.com:carter2099/<repo>.git ~/dev/<repo>` before making changes.
+**Hard rule:** Always develop in `~/dev/<repo>/`. Never edit files in prod deploy folders such as `/home/carter/blog/` — those are deployment artifacts only. If a dev/ clone doesn't exist for a repo, pull a fresh one with `git clone git@github.com:carter2099/<repo>.git ~/dev/<repo>` before making changes.
 
 The `dev/` directory is for cloning GitHub repos (via SSH: `git@github.com:carter2099/<repo>.git`), running their test suites, making changes, and pushing back. It is **not** tracked by the dotfiles bare repo.
 
@@ -105,7 +105,7 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 Each app has a reference doc in `~/notes/docs/homelab/`:
 
 - **Blog** (Rails 8, port 33099) → [`blog.md`](notes/docs/homelab/blog.md)
-- **Delta Neutral** (Rails 8, port 43080) → [`delta-neutral.md`](notes/docs/homelab/delta-neutral.md)
+- **Hyperliquid SDK maintenance** (automated dependency maintenance; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
 - **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 - **Open WebUI** (chat frontend + native SearXNG + Weather v2, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)
@@ -223,9 +223,9 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules; also covers FreshRSS as a third-party k3s deployment
 - [`email-digests.md`](notes/docs/homelab/email-digests.md) — 9-phase digest workflow, stories-in-flight, audit/debug
 - [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, work queue, executor, budget guard, debugging
-- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 24-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
+- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 22-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 - [`blog.md`](notes/docs/homelab/blog.md) — Rails 8 blog app
-- [`delta-neutral.md`](notes/docs/homelab/delta-neutral.md) — Rails 8 rebalancer + Hyperliquid SDK timer
+- [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md) — automated Hyperliquid SDK maintenance
 - [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md) — Go webhook + Prompt-Guard classifier
 - [`open-webui.md`](notes/docs/homelab/open-webui.md) — chat frontend, native SearXNG, Weather v2
 - [`omp-web.md`](notes/docs/homelab/omp-web.md) — agent web UI, next.js build quirks

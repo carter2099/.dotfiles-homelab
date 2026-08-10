@@ -1,5 +1,5 @@
 ---
-description: Tail logs for a k3s-hosted service (traefik, grafana, prometheus, freshrss, node-exporter). Thin wrapper around kubectl logs that handles namespace + label lookup so you don't have to remember them on mobile.
+description: Tail logs for a k3s-hosted service (Traefik or FreshRSS). Thin wrapper around kubectl logs that handles namespace + label lookup so you don't have to remember them on mobile.
 ---
 
 # k-logs
@@ -8,7 +8,7 @@ Tail logs from a k3s service. Saves typing `kubectl logs -n <ns> -l app=<x> --ta
 
 ## Required input
 
-- **service** (string): one of the third-party k3s services. Common: `traefik`, `grafana`, `prometheus`, `freshrss`, `node-exporter`.
+- **service** (string): one of the live third-party k3s services: `traefik` or `freshrss`.
 - **lines** (int, optional): how many lines to tail. Default 100. Cap at 500 for mobile readability.
 
 ## Steps
@@ -19,5 +19,5 @@ Tail logs from a k3s service. Saves typing `kubectl logs -n <ns> -l app=<x> --ta
 
 ## When to not use this
 
-- Host-Docker apps (blog, hub, stickies, delta_neutral, tbitt) — those are in Docker Compose, not k3s. Use `docker logs <container>` instead.
+- Host-Docker apps (blog, hub, stickies, tbitt) — those are in Docker Compose, not k3s. Use `docker logs <container>` instead.
 - When you need to follow logs indefinitely. This slash command is for a one-shot tail. For `-f` follow mode, just call `k logs ... -f` directly; don't invoke `/k-logs`.

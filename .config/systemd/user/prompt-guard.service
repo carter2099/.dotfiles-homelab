@@ -10,6 +10,9 @@ WorkingDirectory=%h/dev/prompt-guard
 Restart=on-failure
 RestartSec=5
 EnvironmentFile=%h/dev/prompt-guard/.env
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=256
 
 [Install]
 WantedBy=default.target

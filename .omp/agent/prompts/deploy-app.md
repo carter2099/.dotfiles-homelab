@@ -1,5 +1,5 @@
 ---
-description: Deploy a homelab app (blog, hub, stickies, delta_neutral) by running its release.sh, then verify the container is healthy. Handles the orphaned docker-proxy recovery recipe automatically.
+description: Deploy a homelab app (blog, hub, stickies) by running its release.sh, then verify the container is healthy. Handles the orphaned docker-proxy recovery recipe automatically.
 ---
 
 # deploy-app
@@ -8,7 +8,7 @@ Deploy one of the self-hosted apps via its standard `release.sh` → `up.sh` pip
 
 ## Required input
 
-- **app** (string): one of `blog`, `hub`, `stickies`, `delta_neutral`. (Do not deploy `tbitt` — it's deprecated per `AGENTS.md`.)
+- **app** (string): one of `blog`, `hub`, `stickies`. (Do not deploy `tbitt` — it's deprecated per `AGENTS.md`.)
 
 ## Pre-flight: is a deploy actually warranted?
 
@@ -32,7 +32,6 @@ curl -s http://localhost:<port>/ | grep <feature>  # does origin have the featur
 | blog           | 33099        |
 | hub            | 13000 (client), 13001 (api) |
 | stickies       | check `~/stickies/docker-compose*.yml` |
-| delta_neutral  | 43080        |
 
 ## Steps
 
@@ -61,7 +60,7 @@ Do not chalk repeated exit-255s up to code unless you have evidence (crash logs,
 ## Failure modes to surface clearly
 
 - `git pull` fails: app has no remote configured (`git remote -v` empty). Tell the user; do not attempt to add a remote.
-- `RAILS_MASTER_KEY` missing (blog, hub, delta_neutral): `config/master.key` is required. Don't try to generate one — this is a credential.
+- `RAILS_MASTER_KEY` missing (blog, hub): `config/master.key` is required. Don't try to generate one — this is a credential.
 - `release.sh` exits non-zero mid-way: do NOT retry blindly. Surface the error, ask how to proceed.
 
 ## Non-goals

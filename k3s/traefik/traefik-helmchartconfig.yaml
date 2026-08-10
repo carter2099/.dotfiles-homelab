@@ -17,10 +17,6 @@ spec:
   set:
     global.systemDefaultRegistry: ""
   valuesContent: |-
-    deployment:
-      podAnnotations:
-        prometheus.io/port: "8082"
-        prometheus.io/scrape: "true"
     providers:
       kubernetesIngress:
         publishedService:

@@ -8,7 +8,7 @@ This slash command establishes the standard workflow for implementing and shippi
 
 ## Core principle
 
-**`~/dev/<repo>`** is the workspace. **`~/<app>/`** (e.g. `~/delta_neutral/`, `~/blog/`) is the deployment directory. Never do implementation work in the deployment directory.
+**`~/dev/<repo>`** is the workspace. **`~/<app>/`** (for example, `~/blog/`) is the deployment directory. Never do implementation work in the deployment directory.
 
 ---
 

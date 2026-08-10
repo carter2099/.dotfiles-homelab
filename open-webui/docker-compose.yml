@@ -3,6 +3,8 @@ services:
     image: ghcr.io/open-webui/open-webui:0.11.0
     container_name: open-webui
     restart: unless-stopped
+    mem_limit: 4g
+    pids_limit: 512
     # Loopback-only: reachable solely via the CF tunnel (cloudflared hits localhost), never the LAN.
     ports:
       - "127.0.0.1:48100:8080"
