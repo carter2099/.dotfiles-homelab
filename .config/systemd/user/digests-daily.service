@@ -11,3 +11,6 @@ ExecStart=/home/carter/scripts/run_all_digests.sh
 # a 9h service timeout killed the 2026-08-05 run mid-gaming with world never
 # started (ai-tech/agentic took ~3h each that day).
 TimeoutStartSec=72000
+MemoryHigh=4G
+MemoryMax=6G
+TasksMax=1024

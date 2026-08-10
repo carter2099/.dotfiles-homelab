@@ -9,6 +9,9 @@ EnvironmentFile=/home/carter/.config/dependabot-webhook/env
 Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=15s
+MemoryHigh=4G
+MemoryMax=6G
+TasksMax=512
 
 [Install]
 WantedBy=default.target

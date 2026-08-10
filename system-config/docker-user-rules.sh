@@ -1,8 +1,32 @@
 #!/bin/bash
-# Inject a DOCKER-USER rule to block LAN access to the blog
-# These survive Docker restarts because DOCKER-USER chain persists
+# Inject DOCKER-USER rules to block LAN access to Docker containers
+# Allows: localhost, k3s pod/service networks, Docker bridge networks
+# Drops: everything else (LAN devices on 192.168.x.x, external)
+#
+# DOCKER-USER sits first in FORWARD — before Docker's per-port ACCEPT rules.
+# RETURN = continue processing (let Docker's rules handle it). DROP = deny.
 
-# Blog (172.18.0.2:3099 on br-f8219785fa8f)
-if ! iptables -C DOCKER-USER -i enp3s0f0 -d 172.18.0.2 -p tcp --dport 3099 -j DROP 2>/dev/null; then
-    iptables -I DOCKER-USER 1 -i enp3s0f0 -d 172.18.0.2 -p tcp --dport 3099 -j DROP
-fi
+set -e
+
+CHAIN="DOCKER-USER"
+
+# Flush existing rules (idempotent across restarts)
+iptables -F "$CHAIN" 2>/dev/null || true
+
+# 1. Allow established/related connections (reply traffic for existing flows)
+iptables -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+
+# 2. Allow from localhost
+iptables -A "$CHAIN" -s 127.0.0.0/8 -j RETURN
+
+# 3. Allow from k3s pod network (Traefik reaches ExternalService endpoints via these)
+iptables -A "$CHAIN" -s 10.42.0.0/16 -j RETURN
+
+# 4. Allow from k3s service network (ClusterIPs)
+iptables -A "$CHAIN" -s 10.43.0.0/16 -j RETURN
+
+# 5. Allow from Docker bridge networks (inter-container communication, internet-bound replies)
+iptables -A "$CHAIN" -s 172.16.0.0/12 -j RETURN
+
+# 6. Drop everything else (LAN devices, external)
+iptables -A "$CHAIN" -j DROP

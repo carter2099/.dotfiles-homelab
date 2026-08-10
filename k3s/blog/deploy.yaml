@@ -13,19 +13,23 @@ spec:
   type: ClusterIP
 
 ---
-# endpoints.yaml
-apiVersion: v1
-kind: Endpoints
+# endpointslice.yaml
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
 metadata:
   name: blog-external-service
   namespace: default
-subsets:
+  labels:
+    kubernetes.io/service-name: blog-external-service
+    endpointslice.kubernetes.io/managed-by: homelab
+addressType: IPv4
+endpoints:
   - addresses:
-      - ip: 192.168.4.92
-    ports:
-      - name: web
-        port: 33099
-        protocol: TCP
+      - 192.168.4.92
+ports:
+  - name: web
+    port: 33099
+    protocol: TCP
 
 ---
 # ingress.yaml

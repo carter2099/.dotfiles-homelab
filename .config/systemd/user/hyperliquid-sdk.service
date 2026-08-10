@@ -6,3 +6,6 @@ Type=oneshot
 Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/bin:/bin
 ExecStart=/home/carter/scripts/run_hyperliquid_sdk.sh
 TimeoutStartSec=3600
+MemoryHigh=2G
+MemoryMax=4G
+TasksMax=512

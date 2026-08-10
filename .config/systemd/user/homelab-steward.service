@@ -10,3 +10,6 @@ Environment="PATH=/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/b
 Environment="KUBECONFIG=/home/carter/.kube/config"
 ExecStart=/usr/bin/python3 /home/carter/scripts/steward_runner.py
 TimeoutStartSec=7200
+MemoryHigh=6G
+MemoryMax=8G
+TasksMax=1024
