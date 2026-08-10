@@ -14,11 +14,11 @@ tar tzf homelab-backup-*.tar.gz | awk -F/ '{print $1}' | sort -u
 
 | Group | Targets |
 |---|---|
-| App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `delta_neutral-db`, `agent-state` |
+| App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `agent-state` |
 | FreshRSS | `freshrss-db`, `freshrss-config` |
 | Open WebUI | `open-webui-db` |
 | Config/code | `homelab-backup-config`, `k3s-manifests`, `host-etc`, `pkg-manifest` |
-| Secrets (unencrypted) | `secrets-blog-master`, `secrets-delta-master`, `secrets-open-webui-env`, `secrets-cloudflare`, `secrets-dependabot`, `secrets-llm-proxy`, `secrets-pi-web`, `secrets-searxng`, `secrets-smtp-and-staged` |
+| Secrets (unencrypted) | `secrets-blog-master`, `secrets-open-webui-env`, `secrets-cloudflare`, `secrets-dependabot`, `secrets-llm-proxy`, `secrets-pi-web`, `secrets-searxng`, `secrets-smtp-and-staged` |
 
 DBs were captured with `sqlite3 .backup` + passed `PRAGMA integrity_check` at
 backup time, and the restore drill re-checks integrity after download.
@@ -67,7 +67,7 @@ then app data, then DBs.
 sudo cp /tmp/restore/host-etc/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml
 sudo netplan apply          # brings up enp3s0f0 with .100/.92/.102
 ```
-Without the static `.92` IP, k3s node-IP and blog/delta_neutral ingress break.
+Without the static `.92` IP, k3s node-IP and blog ingress break.
 
 ### 3b. k3s config (from `host-etc/`)
 ```bash
@@ -89,7 +89,6 @@ can't reach the host → Traefik loads no ingresses → 404 on every k3s host.**
 ### 3d. Secrets (from `secrets-*/`)
 ```bash
 cp /tmp/restore/secrets-blog-master/master.key      ~/blog/blog/config/master.key
-cp /tmp/restore/secrets-delta-master/master.key      ~/delta_neutral/delta_neutral/config/master.key
 cp /tmp/restore/secrets-open-webui-env/.env          ~/open-webui/.env
 cp -r /tmp/restore/secrets-cloudflare/*              ~/.config/cloudflare/
 cp /tmp/restore/secrets-dependabot/env               ~/.config/dependabot-webhook/env
@@ -99,7 +98,7 @@ cp /tmp/restore/secrets-searxng/settings.yml         ~/searxng/core-config/setti
 cp /tmp/restore/secrets-smtp-and-staged/smtp_config ~/scripts/.smtp_config
 chmod 600 ~/.config/cloudflare/* ~/.config/dependabot-webhook/env \
            ~/.config/llm-proxy/env ~/open-webui/.env ~/scripts/.smtp_config \
-           ~/blog/blog/config/master.key ~/delta_neutral/delta_neutral/config/master.key
+           ~/blog/blog/config/master.key
 ```
 Also restore `~/homelab-backup/.env` (R2 creds) from `homelab-backup-config/`
 **or** keep the fresh creds you made in step 0.
@@ -113,9 +112,6 @@ rsync -a /tmp/restore/blog-images/  ~/blog/blog/app/assets/images/
 
 # Blog DB — restore into the container's volume
 docker cp /tmp/restore/blog-db/production.sqlite3 blog-web-1:/rails/storage/production.sqlite3
-
-# Delta neutral DB
-docker cp /tmp/restore/delta_neutral-db/production.sqlite3 delta_neutral-web-1:/rails/storage/production.sqlite3
 
 # Open WebUI DB
 sudo cp /tmp/restore/open-webui-db/webui.db /var/lib/docker/volumes/open-webui_open-webui/_data/webui.db
@@ -144,7 +140,6 @@ cd ~/homelab-backup && go build -o homelab-backup .
 k get pods -A
 # host apps
 docker compose -f ~/blog/docker-compose.yml up -d
-docker compose -f ~/delta_neutral/docker-compose.yml up -d
 # timers
 systemctl --user start homelab-backup.timer llm-proxy.service pi-web.service
 ```

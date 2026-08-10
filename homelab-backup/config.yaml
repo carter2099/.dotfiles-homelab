@@ -64,11 +64,6 @@ targets:
       - cache
       - "*.log"
 
-  - name: delta_neutral-db
-    type: sqlite-docker
-    container: delta_neutral-web-1
-    db_path: /rails/storage/production.sqlite3
-
   # Open WebUI chat DB + admin account (apt docker volume; sudo sqlite3 .backup)
   - name: open-webui-db
     type: sqlite-host
@@ -102,12 +97,6 @@ targets:
   - name: secrets-blog-master
     type: directory
     source: /home/carter/blog/blog/config
-    excludes:
-      - "*.log"
-
-  - name: secrets-delta-master
-    type: directory
-    source: /home/carter/delta_neutral/delta_neutral/config
     excludes:
       - "*.log"
 
