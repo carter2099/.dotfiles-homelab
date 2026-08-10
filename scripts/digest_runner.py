@@ -1732,13 +1732,15 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
 
         print(f"  [run ] [{source}] {label}")
         started = time.time()
-        prompt = (
-            f"Fetch this article: {url}\n\n"
-            f"Title from research: {title}\n\n"
-            "Use web_fetch to read the article. Then output your summary as JSON "
-            "wrapped in ```json fences."
-        )
-        try:
+
+        def _attempt(extra: str = "") -> dict:
+            prompt = (
+                f"Fetch this article: {url}\n\n"
+                f"Title from research: {title}\n\n"
+                "Use web_fetch to read the article. Then output your summary as JSON "
+                "wrapped in ```json fences."
+                f"{extra}"
+            )
             raw = _call_omp_p(
                 prompt, model=MODEL, timeout=FETCH_TIMEOUT,
                 append_system=system_prompt,
@@ -1748,26 +1750,43 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
                 raise ValueError(
                     f"fetch output is not a JSON object (got {type(result).__name__})")
             result["url"] = url
+            return result
+
+        try:
+            result = _attempt()
+        except Exception as first_error:
+            # Retry once: model output sometimes truncates mid-JSON (no closing
+            # fence) or comes back empty, which previously dropped the story
+            # from the digest entirely. A fresh attempt with explicit brevity
+            # instructions usually completes within the output limit.
+            print(f"  [retry] {label} — attempt 1 failed: {first_error}; retrying once")
             try:
-                _save_article_cache(url, result, model=MODEL)
-            except OSError as cache_error:
-                print(f"  [cache warn] {label} — {cache_error}")
-            elapsed = time.time() - started
-            status = "✓" if result.get("fetch_success", True) else "✗"
-            print(f"  [done] {label} — {status} ({elapsed:.0f}s)")
-            return {**finding, **result, "url": url, "cache_hit": False}
-        except Exception as error:
-            elapsed = time.time() - started
-            print(f"  [FAIL] {label} — {error} ({elapsed:.0f}s)")
-            return {
-                **finding,
-                "fetch_success": False,
-                "summary": f"Fetch failed: {str(error)[:100]}",
-                "key_details": [],
-                "date_confirmed": "",
-                "author": "",
-                "cache_hit": False,
-            }
+                result = _attempt(
+                    "\n\nIMPORTANT: your previous response was truncated or invalid. "
+                    "Output ONLY the complete JSON object in ```json fences, closed "
+                    "properly. Keep the summary to 2-3 sentences and key_details to "
+                    "at most 4 short bullets so the response is short enough to finish."
+                )
+            except Exception as error:
+                elapsed = time.time() - started
+                print(f"  [FAIL] {label} — {error} ({elapsed:.0f}s)")
+                return {
+                    **finding,
+                    "fetch_success": False,
+                    "summary": f"Fetch failed: {str(error)[:100]}",
+                    "key_details": [],
+                    "date_confirmed": "",
+                    "author": "",
+                    "cache_hit": False,
+                }
+        try:
+            _save_article_cache(url, result, model=MODEL)
+        except OSError as cache_error:
+            print(f"  [cache warn] {label} — {cache_error}")
+        elapsed = time.time() - started
+        status = "✓" if result.get("fetch_success", True) else "✗"
+        print(f"  [done] {label} — {status} ({elapsed:.0f}s)")
+        return {**finding, **result, "url": url, "cache_hit": False}
 
     workers = min(MAX_PARALLEL_FETCH, max(1, len(findings)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -2232,17 +2251,18 @@ def _raw_editorial_proposal(
     sif_candidates: list[dict],
 ) -> dict:
     """Build a source-only last-resort proposal after both curation models fail."""
+    selected_fresh = [
+        {
+            "candidate_id": candidate["candidate_id"],
+            "rank": index,
+            "editorial_summary": candidate.get("summary", ""),
+            "selection_reason": "deterministic fallback",
+            "related_story_url": None,
+        }
+        for index, candidate in enumerate(candidates[:7], 1)
+    ]
     return {
-        "selected_fresh": [
-            {
-                "candidate_id": candidate["candidate_id"],
-                "rank": index,
-                "editorial_summary": candidate.get("summary", ""),
-                "selection_reason": "deterministic fallback",
-                "related_story_url": None,
-            }
-            for index, candidate in enumerate(candidates[:7], 1)
-        ],
+        "selected_fresh": selected_fresh,
         "selected_ongoing": [
             {
                 "story_url": story.get("url", ""),
@@ -2252,7 +2272,22 @@ def _raw_editorial_proposal(
             }
             for index, story in enumerate(sif_candidates[:3], 1)
         ],
-        "story_state_proposals": [],
+        # Record today's selected stories in the tracker even on the degraded
+        # path. Without this a curation-model outage silently freezes
+        # stories-in-flight: every story covered during the outage is missing
+        # from future ongoing coverage (audit: world SIF lost all six fresh
+        # stories on the 2026-08-10 fallback run).
+        "story_state_proposals": [
+            {
+                "operation": "add",
+                "candidate_id": selection["candidate_id"],
+                "evidence_candidate_ids": [selection["candidate_id"]],
+                "latest_dev": candidate.get("summary", ""),
+                "importance": candidate.get("importance", "medium"),
+                "status": "active",
+            }
+            for selection, candidate in zip(selected_fresh, candidates[:7])
+        ],
         "rejected": [],
         "gaps": "Curation models unavailable; source-ranked fallback used.",
         "balance_summary": "",

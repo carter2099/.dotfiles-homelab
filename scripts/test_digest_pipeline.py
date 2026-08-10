@@ -366,7 +366,27 @@ def test_critic_rejection_fails_closed() -> None:
             )
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(len(fresh) == 2, "critic rejection did not use source-ranked fallback")
-        check(updated == tracker, "rejected state proposals were applied")
+        # The rejected model proposal's state change must not be applied, but the
+        # source-ranked fallback now records today's selected stories in the
+        # tracker so a curation-model outage no longer freezes stories-in-flight
+        # (digest-quality audit fix).
+        check(
+            not any(
+                story.get("latest_dev") == "Proposed summary."
+                for story in updated["stories"]
+            ),
+            "rejected state proposal was applied",
+        )
+        added = {
+            story.get("url"): story
+            for story in updated["stories"]
+            if story.get("first_seen") == "2026-08-10"
+        }
+        check(len(added) == 2, f"fallback did not track both fresh stories: {added}")
+        check(
+            all(story.get("last_updated") == "2026-08-10" for story in added.values()),
+            added,
+        )
         check(
             artifact["editorial"]["review_status"] == "rejected_fallback",
             artifact,
