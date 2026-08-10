@@ -45,7 +45,7 @@ ENDPOINTS = {
     "llm-proxy": "http://127.0.0.1:8081/health",
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
 }
-STEWARD_MODEL = "opencode-go/deepseek-v4-pro"
+STEWARD_MODEL = "openai-codex/gpt-5.6-luna:high"
 STEWARD_PATH = "/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Resolve fnm default node bin for PATH (if available)
@@ -64,7 +64,7 @@ FIX_MAX_ITERS = max(1, int(os.environ.get("STEWARD_FIX_MAX_ITERS", "3")))
 
 # Timeout and model for headless omp JSON calls
 OMP_JSON_TIMEOUT = 2700
-OMP_JSON_MODEL = "opencode-go/deepseek-v4-pro"
+OMP_JSON_MODEL = "openai-codex/gpt-5.6-luna:high"
 PENDING_PATH = HOME / "agent-state" / "pending.md"
 DEPENDABOT_UNIT = "dependabot-webhook.service"
 
@@ -371,7 +371,6 @@ def _call_omp_p(prompt, model=STEWARD_MODEL, timeout=600, append_system=None, mo
     cmd = [
         "/usr/bin/setpriv", "--no-new-privs",
         str(HOME / ".bun/bin/omp"), "-p", "--model", model,
-        "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
         "--allow-home",
         "--config", str(HOME / ".omp/agent/headless-override.yml"),
@@ -671,7 +670,6 @@ def _call_omp_p_json(prompt, timeout=OMP_JSON_TIMEOUT, extra_args=None):
     cmd = [
         "/usr/bin/setpriv", "--no-new-privs",
         str(HOME / ".bun/bin/omp"), "-p", "--model", OMP_JSON_MODEL, "--mode", "json",
-        "--api-key", "proxy",
         "--session-dir", str(SESSION_DIR),
         "--allow-home",
         "--config", str(HOME / ".omp/agent/headless-override.yml"),

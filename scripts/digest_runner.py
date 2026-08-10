@@ -55,8 +55,8 @@ DIGEST_OMP_SANDBOX = Path.home() / "scripts" / "digest-omp-sandbox.ts"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL = "deepseek-v4-flash"                 # API-based primary
-MODEL_FALLBACK = "mimo-v2.5"               # API-based fallback via opencode-go
+MODEL = "openai-codex/gpt-5.6-luna:high"    # OMP-based primary
+MODEL_FALLBACK = "mimo-v2.5"                # API fallback via opencode-go
 DEFAULT_TIMEOUT = 900
 RESEARCH_TIMEOUT = 1800
 FETCH_TIMEOUT = 900
@@ -827,8 +827,10 @@ def _call_llm_proxy(
     temperature: float = 0.3,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
-    """Call the LLM model via its provider's chat-completions endpoint."""
+    """Call Luna through OMP, or an API fallback through chat completions."""
     eff_model = _effective_model(model)
+    if eff_model.startswith("openai-codex/"):
+        return _call_omp_no_tools(system, user, eff_model, timeout)
     provider_info = _detect_model_provider(eff_model)
     date_prefix = _date_context()
     payload: dict[str, Any] = {
@@ -868,6 +870,57 @@ def _omp_agent_environment() -> dict[str, str]:
     return env
 
 
+def _call_omp_no_tools(
+    system: str,
+    user: str,
+    model: str,
+    timeout: int,
+) -> str:
+    """Run a transformation-only OMP call without host or web tools."""
+    import tempfile
+
+    full_system = f"{_date_context()}\n\n{system}"
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", prefix="omp_digest_transform_", delete=False
+    ) as tf:
+        tf.write(user)
+        prompt_file = tf.name
+
+    try:
+        cmd = [
+            "omp", "-p",
+            "--model", model,
+            "--system-prompt", full_system,
+            "--config", str(Path.home() / ".omp/agent/headless-override.yml"),
+            "--no-session",
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-rules",
+            "--no-lsp",
+            "--no-pty",
+            f"@{prompt_file}",
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd="/tmp",
+            env=_omp_agent_environment(),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"omp -p failed (rc={result.returncode}): {result.stderr[:500]}"
+            )
+        return result.stdout
+    finally:
+        try:
+            Path(prompt_file).unlink()
+        except OSError:
+            pass
+
+
 def _call_omp_p(
     prompt: str,
     model: str = MODEL,
@@ -882,8 +935,11 @@ def _call_omp_p(
     """
     import tempfile
     eff_model = _effective_model(model)
-    provider_info = _detect_model_provider(eff_model)
-    omp_model = f"{provider_info['provider']}/{eff_model}"
+    if "/" in eff_model:
+        omp_model = eff_model
+    else:
+        provider_info = _detect_model_provider(eff_model)
+        omp_model = f"{provider_info['provider']}/{eff_model}"
     date_prefix = _date_context()
     full_system = f"{date_prefix}\n\n{append_system}" if append_system else date_prefix
 
@@ -2749,7 +2805,7 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true",
                         help="Test mode: isolate output in ~/digests/test/, copy prod SIF, write report")
     parser.add_argument("--model", type=str, default=None,
-                        help="Override the LLM model (e.g. ornith-1.0-9b-q6, deepseek-v4-flash)")
+                        help="Override the LLM model (e.g. openai-codex/gpt-5.6-luna:high)")
     parser.add_argument("--test-label", type=str, default=None,
                         help="Label for test run directory (default: model name or 'test')")
     args = parser.parse_args()
