@@ -2234,15 +2234,41 @@ def _validate_editorial_proposal(
     if candidates and not fresh:
         warnings.append("proposal selected no valid fresh stories")
 
+    selected_sources = [
+        candidate_by_id[item["candidate_id"]]
+        for item in fresh
+    ] + [
+        ongoing_by_url[_normalize_url(item["story_url"])]
+        for item in ongoing
+    ]
+    selected_domains = sorted({
+        source.get("source_domain")
+        or urlsplit(source.get("url", "")).hostname
+        or "unknown"
+        for source in selected_sources
+    })
+    selected_categories = sorted({
+        source.get("category", "Uncategorized")
+        for source in selected_sources
+    })
+    if selected_sources:
+        balance_summary = (
+            f"Validated selection: {len(fresh)} fresh, {len(ongoing)} ongoing; "
+            f"{len(selected_domains)} source domain(s); categories: "
+            f"{', '.join(selected_categories)}."
+        )
+    else:
+        balance_summary = (
+            "Validated selection: no publishable fresh or ongoing stories."
+        )
+
     return {
         "selected_fresh": fresh,
         "selected_ongoing": ongoing,
         "story_state_proposals": state_proposals,
         "rejected": proposal.get("rejected", []),
         "gaps": _clean_editorial_text(proposal.get("gaps"), limit=800),
-        "balance_summary": _clean_editorial_text(
-            proposal.get("balance_summary"), limit=600
-        ),
+        "balance_summary": balance_summary,
     }, warnings
 
 

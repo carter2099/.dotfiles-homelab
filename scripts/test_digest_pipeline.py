@@ -236,6 +236,12 @@ def test_editorial_validation_and_state_application() -> None:
     )
     check(len(validated["selected_fresh"]) == 1, validated)
     check(len(validated["story_state_proposals"]) == 1, validated)
+    check(
+        validated["balance_summary"]
+        == "Validated selection: 1 fresh, 1 ongoing; 1 source domain(s); "
+           "categories: Research.",
+        validated["balance_summary"],
+    )
     check(any("unknown candidate_id" in warning for warning in warnings), warnings)
     original = json.loads(json.dumps(tracker))
     updated = digest._apply_story_state_proposals(
