@@ -9,3 +9,5 @@ TimeoutStartSec=3600
 MemoryHigh=2G
 MemoryMax=4G
 TasksMax=512
+NoNewPrivileges=true
+UMask=0077

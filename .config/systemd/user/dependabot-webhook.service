@@ -12,6 +12,8 @@ RestartSec=15s
 MemoryHigh=4G
 MemoryMax=6G
 TasksMax=512
+NoNewPrivileges=true
+UMask=0077
 
 [Install]
 WantedBy=default.target
