@@ -1141,7 +1141,7 @@ def _save_article_cache(
     finally:
         try:
             temporary.unlink()
-        except FileNotFoundError:
+        except OSError:
             pass
 
 
