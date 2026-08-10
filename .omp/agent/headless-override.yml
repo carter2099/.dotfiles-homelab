@@ -2,7 +2,7 @@
 # Loaded via --config on every scheduled omp -p invocation.
 # Decouples automated-agent config from interactive sessions:
 # interactive toggles advisor via /advisor on/off in config.yml;
-# enable: true to force advisor on for headless runs
+# enabled: false keeps automated runs free of advisor output.
 advisor:
-  enabled: true
+  enabled: false
   syncBacklog: off

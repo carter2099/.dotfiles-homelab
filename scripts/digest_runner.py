@@ -2,12 +2,12 @@
 """
 Deterministic 9-phase email digest runner.
 
-Each phase is a narrow, self-contained LLM call or Python step so the
-local Qwen model can handle it reliably. Bounding caps prevent any one
-topic from starving the others within the systemd timeout.
+Independent model work is bounded and connected by deterministic Python contracts.
+Caps, caching, and two-worker concurrency prevent one topic from starving the others
+within the systemd timeout.
 
 Architecture, stories-in-flight mechanics, and debugging:
-  ~/notes/homelab/email-digests.md
+  ~/notes/docs/homelab/email-digests.md
 
 Usage:
     python3 ~/scripts/digest_runner.py ai-tech
@@ -15,19 +15,21 @@ Usage:
     python3 ~/scripts/digest_runner.py all
 
 Phases:
-    1. Research        — omp -p web_search (3 angles, sequential)
+    1. Research        — omp -p web_search (3 angles, concurrency 2)
     2. Judge Research  — batched LLM: Python date pre-tag + LLM quality filter
-    3. Rank URLs       — Python: Pool A (fresh, capped 12) + Pool B (ongoing, capped 5)
-                          + Pool C (stories-in-flight, capped 3, bypasses Phase 4)
-    4. Fetch + Summarize — omp -p web_fetch (fresh first, then ongoing, ≤17 total)
+    3. Rank URLs       — Python: early cross-topic dedup, rank, and caps
+    4. Fetch + Summarize — cached omp -p web_fetch (concurrency 2, ≤17 total)
     5. Judge Summaries — batched LLM: accuracy/fidelity check
-    6. Curate          — 6a Python prep → 6b LLM editorial → 6c Python validate
-    7. Write HTML      — one LLM call filling template
+    6. Curate          — proposal → Python validation → independent critic → state apply
+    7. Write HTML      — final intro call + deterministic escaped template rendering
     8. Send + Archive  — pure Python
     9. Summary         — one lightweight LLM call
 """
 
 import argparse
+import copy
+import hashlib
+import html
 import json
 import os
 import re
@@ -36,10 +38,11 @@ import subprocess
 import sys
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 try:
     import yaml
@@ -52,12 +55,16 @@ DIGESTS_DIR = Path.home() / "digests"
 TEMPLATE_PATH = DIGESTS_DIR / "template.html"
 SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 DIGEST_OMP_SANDBOX = Path.home() / "scripts" / "digest-omp-sandbox.ts"
+ARTICLE_CACHE_DIR = DIGESTS_DIR / ".article-cache"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL = "openai-codex/gpt-5.6-luna:high"    # OMP-based primary
-MODEL_FALLBACK = "mimo-v2.5"                # API fallback via opencode-go
+MODEL = "openai-codex/gpt-5.6-luna:high"       # OMP-based primary
+MODEL_FALLBACK = "mimo-v2.5"                   # API fallback via opencode-go
+MODEL_REVIEWER = "deepseek-v4-flash"            # independent API critic
 DEFAULT_TIMEOUT = 900
+EDITORIAL_TIMEOUT = 300
+INTRO_TIMEOUT = 90
 RESEARCH_TIMEOUT = 1800
 FETCH_TIMEOUT = 900
 
@@ -181,9 +188,12 @@ def _effective_model(requested: str) -> str:
     """Return the effective model, respecting --model override."""
     return MODEL_OVERRIDE if MODEL_OVERRIDE else requested
 
-# ── Concurrency ────────────────────────────────────────────────────────────
-MAX_PARALLEL_RESEARCH = 1   # llama.cpp is single-request; keep sequential
-MAX_PARALLEL_FETCH = 1
+# Bound independent inference calls; two overlaps latency without creating a burst workload.
+MAX_PARALLEL_RESEARCH = 2
+MAX_PARALLEL_FETCH = 2
+ARTICLE_CACHE_TTL_HOURS = 24
+ARTICLE_CACHE_VERSION = 1
+FETCH_PROMPT_VERSION = 2
 
 # ── Search Health Monitoring ──────────────────────────────────────────────
 SEARXNG_URL = "http://localhost:8080"
@@ -1025,20 +1035,177 @@ def _extract_json(text: str, label: str = "output") -> Any:
     raise ValueError(f"Could not extract JSON from {label}. Raw text (first 500 chars):\n{text[:500]}")
 
 
+_TRACKING_QUERY_KEYS = {
+    "fbclid", "gclid", "mc_cid", "mc_eid", "ref_src",
+}
+
+
 def _normalize_url(url: str) -> str:
-    """Normalize a URL for dedup comparison: strip protocol, www prefix, trailing slash, lowercase."""
-    u = url.strip().lower()
-    # Strip protocol
-    for prefix in ("https://", "http://"):
-        if u.startswith(prefix):
-            u = u[len(prefix):]
-            break
-    # Strip www. prefix
-    if u.startswith("www."):
-        u = u[4:]
-    # Strip trailing slash
-    u = u.rstrip("/")
-    return u
+    """Return a stable dedup/cache key while preserving case-sensitive URL paths."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    candidate = raw if "://" in raw else f"https://{raw}"
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        return raw.lower().rstrip("/")
+    host = (parts.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return raw.lower().rstrip("/")
+    try:
+        port = parts.port
+    except ValueError:
+        return raw.lower().rstrip("/")
+    if port and not ((parts.scheme == "http" and port == 80)
+                     or (parts.scheme == "https" and port == 443)):
+        host = f"{host}:{port}"
+    path = parts.path.rstrip("/")
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_")
+        and key.lower() not in _TRACKING_QUERY_KEYS
+    ]
+    query.sort()
+    suffix = f"?{urlencode(query, doseq=True)}" if query else ""
+    return f"{host}{path}{suffix}"
+
+
+def _article_cache_path(url: str, cache_dir: Path | None = None) -> Path:
+    key = hashlib.sha256(_normalize_url(url).encode()).hexdigest()
+    return (cache_dir or ARTICLE_CACHE_DIR) / f"{key}.json"
+
+
+def _load_article_cache(
+    url: str,
+    *,
+    model: str,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> dict | None:
+    """Load a same-day article summary produced by the same model/prompt contract."""
+    if not _normalize_url(url):
+        return None
+    path = _article_cache_path(url, cache_dir)
+    try:
+        entry = json.loads(path.read_text())
+        fetched_at = datetime.fromisoformat(entry["fetched_at"])
+        current = now or datetime.now(timezone.utc)
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        age = current - fetched_at
+        if not timedelta(0) <= age <= timedelta(hours=ARTICLE_CACHE_TTL_HOURS):
+            return None
+        if entry.get("version") != ARTICLE_CACHE_VERSION:
+            return None
+        if entry.get("prompt_version") != FETCH_PROMPT_VERSION:
+            return None
+        if entry.get("model") != _effective_model(model):
+            return None
+        if entry.get("normalized_url") != _normalize_url(url):
+            return None
+        result = entry.get("result")
+        return result if isinstance(result, dict) else None
+    except (AttributeError, OSError, KeyError, TypeError, ValueError):
+        return None
+
+
+def _save_article_cache(
+    url: str,
+    result: dict,
+    *,
+    model: str,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Atomically cache successful topic-neutral article fetch/summary output."""
+    if not result.get("fetch_success", True) or not _normalize_url(url):
+        return
+    path = _article_cache_path(url, cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "version": ARTICLE_CACHE_VERSION,
+        "prompt_version": FETCH_PROMPT_VERSION,
+        "model": _effective_model(model),
+        "normalized_url": _normalize_url(url),
+        "fetched_at": (now or datetime.now(timezone.utc)).isoformat(),
+        "result": {k: v for k, v in result.items() if k != "cache_hit"},
+    }
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temporary.write_text(json.dumps(entry, indent=2))
+        temporary.replace(path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _prune_article_cache(
+    *,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Delete expired or malformed cache entries; return the number removed."""
+    root = cache_dir or ARTICLE_CACHE_DIR
+    current = now or datetime.now(timezone.utc)
+    removed = 0
+    try:
+        paths = list(root.glob("*.json"))
+    except OSError:
+        return 0
+    for path in paths:
+        try:
+            entry = json.loads(path.read_text())
+            fetched_at = datetime.fromisoformat(entry["fetched_at"])
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+            age = current - fetched_at
+            valid = (
+                timedelta(0) <= age <= timedelta(hours=ARTICLE_CACHE_TTL_HOURS)
+                and entry.get("version") == ARTICLE_CACHE_VERSION
+                and entry.get("prompt_version") == FETCH_PROMPT_VERSION
+            )
+        except (AttributeError, OSError, KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _load_cross_topic_urls(
+    topic: dict,
+    run_dir: Path,
+    *,
+    digests_dir: Path | None = None,
+) -> set[str]:
+    """Load URLs already selected by earlier topics for this run date."""
+    blocked: set[str] = set()
+    root = digests_dir or DIGESTS_DIR
+    current_category = topic["category"]
+    for config in TOPICS.values():
+        if config["category"] == current_category:
+            continue
+        curated_path = root / config["category"] / run_dir.name / "06-curated.json"
+        try:
+            data = json.loads(curated_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for story in data.get("fresh", []) + data.get("ongoing", []):
+            normalized = _normalize_url(story.get("url", ""))
+            if normalized:
+                blocked.add(normalized)
+    return blocked
 
 
 def _load_recent_covered_urls(digest_dir: Path, today: date, days: int) -> set[str]:
@@ -1220,11 +1387,9 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
             print(f"  *** HALT during {label}: search health critical ***")
         return findings
 
-    findings: list[dict] = []
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_RESEARCH) as pool:
-        futures = {pool.submit(_research_one, a): a for a in topic["research_angles"]}
-        for future in as_completed(futures):
-            findings.extend(future.result())
+        per_angle = list(pool.map(_research_one, topic["research_angles"]))
+    findings = [finding for angle_findings in per_angle for finding in angle_findings]
 
     # Filter out non-dict artifacts (LLMs sometimes produce stray strings)
     artifacts = [f for f in findings if not isinstance(f, dict)]
@@ -1477,27 +1642,46 @@ def phase_3_rank(
     for o in ongoing:
         o["source_verdict"] = "ongoing"
 
-    # ── Pool A: Fresh findings ──
-    # Sort strategy: stable two-pass. Primary: importance (high→med→low).
-    # Tiebreaker: date_published recency (newer first).
-    pool_a = sorted(fresh, key=lambda f: f.get("date_published", ""), reverse=True)
+    # Remove stories already selected by an earlier topic before any article fetch.
+    other_topic_urls = _load_cross_topic_urls(topic, run_dir)
+    cross_topic_rejected = [
+        {**item, "rejection_reason": "already selected by another digest today"}
+        for item in fresh + ongoing
+        if _normalize_url(item.get("url", "")) in other_topic_urls
+    ]
+    eligible_fresh = [
+        item for item in fresh
+        if _normalize_url(item.get("url", "")) not in other_topic_urls
+    ]
+    eligible_ongoing = [
+        item for item in ongoing
+        if _normalize_url(item.get("url", "")) not in other_topic_urls
+    ]
+    if cross_topic_rejected:
+        print(f"  [Phase 3 cross-dedup] skipped {len(cross_topic_rejected)} "
+              "already-selected URL(s) before fetch")
+
+    # Pool A: stable importance-first ranking, then publication recency.
+    pool_a = sorted(eligible_fresh, key=lambda f: f.get("date_published", ""), reverse=True)
     pool_a = sorted(pool_a, key=lambda f: importance_order.get(f.get("importance", "low"), 2))
     pool_a = pool_a[:FRESH_CAP]
 
-    # ── Pool B: Ongoing articles ──
-    # Sort strategy: stable two-pass. Primary: date_published recency (newer first).
-    # Tiebreaker: importance (high→med→low).
-    pool_b = sorted(ongoing, key=lambda f: importance_order.get(f.get("importance", "low"), 2))
+    # Pool B: publication recency first, then importance.
+    pool_b = sorted(eligible_ongoing,
+                    key=lambda f: importance_order.get(f.get("importance", "low"), 2))
     pool_b = sorted(pool_b, key=lambda f: f.get("date_published", ""), reverse=True)
     pool_b = pool_b[:ONGOING_CAP]
 
-    # ── Pool C: Stories-in-flight (bypasses Phase 4) ──
-    active_sif = [s for s in stories_in_flight.get("stories", [])
-                  if s.get("status") == "active"]
-    # Sort by last_updated descending
-    pool_c = sorted(active_sif, key=lambda s: s.get("last_updated", ""), reverse=True)[:SIF_CAP]
+    # Pool C bypasses Phase 4 but still obeys the same cross-topic exclusion.
+    active_sif = [
+        story for story in stories_in_flight.get("stories", [])
+        if story.get("status") == "active"
+        and _normalize_url(story.get("url", "")) not in other_topic_urls
+    ]
+    pool_c = sorted(
+        active_sif, key=lambda s: s.get("last_updated", ""), reverse=True
+    )[:SIF_CAP]
 
-    # Phase 4 fetch queue: Pool A (fresh first) + Pool B
     phase_4_queue = pool_a + pool_b
 
     output = {
@@ -1505,6 +1689,7 @@ def phase_3_rank(
         "sif_candidates": pool_c,
         "pool_a": pool_a,
         "pool_b": pool_b,
+        "cross_topic_rejected": cross_topic_rejected,
     }
     output_path.write_text(json.dumps(output, indent=2))
     print(f"  Phase 3 done: Pool A={len(pool_a)} fresh, Pool B={len(pool_b)} ongoing, "
@@ -1512,22 +1697,19 @@ def phase_3_rank(
     return phase_4_queue, pool_c
 
 def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
-    """Phase 4: Fetch each article via omp web_fetch and produce detailed summaries.
-
-    Each article is fetched by an omp agent that reads the article and
-    returns a structured JSON summary. Sequential to avoid overloading.
-    """
+    """Fetch and summarize articles with a shared cache and two-worker bound."""
     output_path = run_dir / "04-fetch-summaries.json"
     if output_path.exists():
         print(f"  [skip] Phase 4 output exists: {output_path}")
         return json.loads(output_path.read_text())
+    pruned_cache_entries = _prune_article_cache()
+    if pruned_cache_entries:
+        print(f"  [cache] pruned {pruned_cache_entries} expired/invalid entry(s)")
 
     system_prompt = (
-        "You are a research assistant. Your job is to read ONE article via web_fetch "
-        "and produce a detailed, factual summary. Do not search — just fetch the URL "
-        "given and summarize.\n\n"
-        "After fetching, output your result as a single JSON object wrapped in ```json "
-        "fences with these fields:\n"
+        "You are a research assistant. Read ONE article via web_fetch and produce a "
+        "topic-neutral, detailed factual summary. Do not search.\n\n"
+        "Output one JSON object in ```json fences with these fields:\n"
         '  {"title": "article title", "url": "the URL you fetched", '
         '"date_confirmed": "YYYY-MM-DD or empty if not found in article", '
         '"author": "author name or empty", '
@@ -1543,8 +1725,13 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
         title = finding.get("title", "unknown")
         label = f"fetch:{title[:50]}"
         source = finding.get("source_verdict", "?")
+        cached = _load_article_cache(url, model=MODEL)
+        if cached is not None:
+            print(f"  [cache] [{source}] {label}")
+            return {**finding, **cached, "url": url, "cache_hit": True}
+
         print(f"  [run ] [{source}] {label}")
-        t0 = time.time()
+        started = time.time()
         prompt = (
             f"Fetch this article: {url}\n\n"
             f"Title from research: {title}\n\n"
@@ -1552,33 +1739,45 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
             "wrapped in ```json fences."
         )
         try:
-            raw = _call_omp_p(prompt, model=MODEL, timeout=FETCH_TIMEOUT,
-                             append_system=system_prompt)
+            raw = _call_omp_p(
+                prompt, model=MODEL, timeout=FETCH_TIMEOUT,
+                append_system=system_prompt,
+            )
             result = _extract_json(raw, f"{label} output")
             if not isinstance(result, dict):
-                # LLM returned a JSON array (or scalar) instead of the requested
-                # object — previously crashed with "'list' object has no
-                # attribute 'get'" and dropped the article. Treat as fetch failure.
                 raise ValueError(
                     f"fetch output is not a JSON object (got {type(result).__name__})")
-            elapsed = time.time() - t0
+            result["url"] = url
+            try:
+                _save_article_cache(url, result, model=MODEL)
+            except OSError as cache_error:
+                print(f"  [cache warn] {label} — {cache_error}")
+            elapsed = time.time() - started
             status = "✓" if result.get("fetch_success", True) else "✗"
             print(f"  [done] {label} — {status} ({elapsed:.0f}s)")
-            return {**finding, **result}
-        except Exception as e:
-            elapsed = time.time() - t0
-            print(f"  [FAIL] {label} — {e} ({elapsed:.0f}s)")
-            return {**finding, "fetch_success": False,
-                    "summary": f"Fetch failed: {str(e)[:100]}", "key_details": [],
-                    "date_confirmed": "", "author": ""}
+            return {**finding, **result, "url": url, "cache_hit": False}
+        except Exception as error:
+            elapsed = time.time() - started
+            print(f"  [FAIL] {label} — {error} ({elapsed:.0f}s)")
+            return {
+                **finding,
+                "fetch_success": False,
+                "summary": f"Fetch failed: {str(error)[:100]}",
+                "key_details": [],
+                "date_confirmed": "",
+                "author": "",
+                "cache_hit": False,
+            }
 
-    results: list[dict] = []
-    for finding in findings:
-        results.append(_fetch_one(finding))
+    workers = min(MAX_PARALLEL_FETCH, max(1, len(findings)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(_fetch_one, findings))
 
     output_path.write_text(json.dumps(results, indent=2))
-    successful = sum(1 for r in results if r.get("fetch_success", True))
-    print(f"  Phase 4 done: {successful}/{len(results)} fetches successful")
+    successful = sum(1 for result in results if result.get("fetch_success", True))
+    cache_hits = sum(1 for result in results if result.get("cache_hit"))
+    print(f"  Phase 4 done: {successful}/{len(results)} fetches successful, "
+          f"{cache_hits} cache hit(s), concurrency={workers}")
     return results
 
 
@@ -1786,319 +1985,915 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     return results
 
 
-def phase_6_curate(topic: dict, summaries: list[dict], sif_candidates: list[dict],
-                   stories_in_flight: dict, run_dir: Path) -> tuple[list[dict], dict, list[dict]]:
-    """Phase 6: Curate — split into 6a (Python prep), 6b (LLM editorial), 6c (Python validate).
+def _editorial_candidate_id(candidate: dict) -> str:
+    identity = _normalize_url(candidate.get("url", "")) or candidate.get("title", "")
+    return f"candidate-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
 
-    Returns (fresh_stories, updated_stories_in_flight, ongoing_stories).
-    """
+
+def _clean_editorial_text(value: Any, fallback: str = "", limit: int = 1200) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    return (text or fallback.strip())[:limit]
+
+
+def _summarize_model_error(error: Exception) -> str:
+    if isinstance(error, subprocess.TimeoutExpired):
+        return f"timed out after {error.timeout}s"
+    return " ".join(str(error).split())[:500]
+
+
+def _prepare_editorial_candidates(
+    summaries: list[dict],
+    blocked_urls: set[str],
+) -> tuple[list[dict], list[dict]]:
+    kept = [item for item in summaries if item.get("judge_verdict") in ("keep", "fix")]
+    rejected = [item for item in summaries if item.get("judge_verdict") == "drop"]
+    seen: set[str] = set()
+    eligible: list[dict] = []
+    for item in kept:
+        normalized = _normalize_url(item.get("url", ""))
+        if not normalized or normalized in seen or normalized in blocked_urls:
+            continue
+        seen.add(normalized)
+        candidate = copy.deepcopy(item)
+        candidate["candidate_id"] = _editorial_candidate_id(candidate)
+        eligible.append(candidate)
+
+    importance_order = {"high": 0, "medium": 1, "low": 2}
+    eligible = sorted(
+        eligible, key=lambda item: item.get("date_published", ""), reverse=True
+    )
+    eligible = sorted(
+        eligible,
+        key=lambda item: importance_order.get(item.get("importance", "low"), 2),
+    )
+    return eligible[:15], rejected
+
+
+def _validate_editorial_proposal(
+    proposal: dict,
+    candidates: list[dict],
+    sif_candidates: list[dict],
+    stories_in_flight: dict,
+    blocked_urls: set[str] | None = None,
+) -> tuple[dict, list[str]]:
+    """Validate model IDs/transitions and return a bounded, source-backed proposal."""
+    if not isinstance(proposal, dict):
+        raise ValueError("editorial proposal must be a JSON object")
+
+    blocked = blocked_urls or set()
+    warnings: list[str] = []
+    candidate_by_id = {
+        candidate["candidate_id"]: candidate
+        for candidate in candidates
+        if candidate.get("candidate_id")
+    }
+    tracker_by_url = {
+        _normalize_url(story.get("url", "")): story
+        for story in stories_in_flight.get("stories", [])
+        if _normalize_url(story.get("url", ""))
+    }
+    ongoing_by_url = {
+        _normalize_url(story.get("url", "")): story
+        for story in sif_candidates
+        if _normalize_url(story.get("url", ""))
+        and _normalize_url(story.get("url", "")) not in blocked
+    }
+
+    fresh: list[dict] = []
+    selected_ids: set[str] = set()
+    raw_fresh = proposal.get("selected_fresh", [])
+    if not isinstance(raw_fresh, list):
+        warnings.append("selected_fresh was not a list")
+        raw_fresh = []
+    for item in raw_fresh:
+        if not isinstance(item, dict):
+            warnings.append("ignored non-object fresh selection")
+            continue
+        candidate_id = item.get("candidate_id", "")
+        source = candidate_by_id.get(candidate_id)
+        if source is None:
+            warnings.append(f"ignored unknown candidate_id {candidate_id!r}")
+            continue
+        normalized = _normalize_url(source.get("url", ""))
+        if normalized in blocked:
+            warnings.append(f"ignored cross-topic duplicate {candidate_id}")
+            continue
+        if candidate_id in selected_ids:
+            warnings.append(f"ignored duplicate fresh selection {candidate_id}")
+            continue
+        selected_ids.add(candidate_id)
+        related = _normalize_url(item.get("related_story_url", ""))
+        if related and related not in tracker_by_url:
+            warnings.append(f"removed unknown related story from {candidate_id}")
+            related = ""
+        fresh.append({
+            "candidate_id": candidate_id,
+            "rank": len(fresh) + 1,
+            "editorial_summary": _clean_editorial_text(
+                item.get("editorial_summary", item.get("summary")),
+                source.get("summary", ""),
+            ),
+            "selection_reason": _clean_editorial_text(
+                item.get("selection_reason", item.get("reason")), limit=400
+            ),
+            "related_story_url": tracker_by_url[related].get("url", "") if related else None,
+        })
+        if len(fresh) == 7:
+            if len(raw_fresh) > 7:
+                warnings.append("capped selected_fresh at 7")
+            break
+
+    ongoing: list[dict] = []
+    selected_ongoing: set[str] = set()
+    fresh_urls = {
+        _normalize_url(candidate_by_id[item["candidate_id"]].get("url", ""))
+        for item in fresh
+    }
+    raw_ongoing = proposal.get("selected_ongoing", [])
+    if not isinstance(raw_ongoing, list):
+        warnings.append("selected_ongoing was not a list")
+        raw_ongoing = []
+    for item in raw_ongoing:
+        if not isinstance(item, dict):
+            warnings.append("ignored non-object ongoing selection")
+            continue
+        normalized = _normalize_url(item.get("story_url", item.get("url", "")))
+        source = ongoing_by_url.get(normalized)
+        if source is None:
+            warnings.append(f"ignored unknown ongoing story {normalized!r}")
+            continue
+        if normalized in selected_ongoing or normalized in fresh_urls:
+            warnings.append(f"ignored duplicate ongoing story {normalized}")
+            continue
+        selected_ongoing.add(normalized)
+        ongoing.append({
+            "story_url": source.get("url", ""),
+            "rank": len(ongoing) + 1,
+            "summary": _clean_editorial_text(
+                item.get("summary"), source.get("latest_dev", "")
+            ),
+            "why_still_relevant": _clean_editorial_text(
+                item.get("why_still_relevant"), source.get("latest_dev", ""), 600
+            ),
+        })
+        if len(ongoing) == 3:
+            if len(raw_ongoing) > 3:
+                warnings.append("capped selected_ongoing at 3")
+            break
+
+    state_proposals: list[dict] = []
+    raw_state = proposal.get(
+        "story_state_proposals", proposal.get("state_proposals", [])
+    )
+    if not isinstance(raw_state, list):
+        warnings.append("story_state_proposals was not a list")
+        raw_state = []
+    for item in raw_state:
+        if not isinstance(item, dict):
+            warnings.append("ignored non-object state proposal")
+            continue
+        operation = item.get("operation")
+        evidence = item.get("evidence_candidate_ids", [])
+        if not isinstance(evidence, list):
+            evidence = []
+        evidence = [
+            candidate_id for candidate_id in evidence
+            if candidate_id in selected_ids
+        ]
+        latest_dev = _clean_editorial_text(item.get("latest_dev"), limit=800)
+        importance = item.get("importance", "medium")
+        if importance not in ("high", "medium", "low"):
+            importance = "medium"
+        status = item.get("status", "active")
+        if status not in ("active", "cooled"):
+            status = "active"
+
+        if operation == "add":
+            candidate_id = item.get("candidate_id", "")
+            if candidate_id not in selected_ids:
+                warnings.append(
+                    f"ignored tracker add for unselected candidate {candidate_id!r}")
+                continue
+            source = candidate_by_id[candidate_id]
+            if _normalize_url(source.get("url", "")) in tracker_by_url:
+                warnings.append(f"ignored tracker add for existing story {candidate_id}")
+                continue
+            state_proposals.append({
+                "operation": "add",
+                "candidate_id": candidate_id,
+                "evidence_candidate_ids": [candidate_id],
+                "latest_dev": latest_dev or source.get("summary", ""),
+                "importance": importance,
+                "status": "active",
+            })
+        elif operation == "update":
+            normalized = _normalize_url(item.get("story_url", ""))
+            source = tracker_by_url.get(normalized)
+            if source is None or not evidence or not latest_dev:
+                warnings.append(
+                    f"ignored unsupported tracker update for {normalized!r}")
+                continue
+            state_proposals.append({
+                "operation": "update",
+                "story_url": source.get("url", ""),
+                "evidence_candidate_ids": evidence,
+                "latest_dev": latest_dev,
+                "importance": importance,
+                "status": status,
+            })
+        else:
+            warnings.append(f"ignored unknown state operation {operation!r}")
+
+    domains: dict[str, int] = {}
+    for item in fresh:
+        source = candidate_by_id[item["candidate_id"]]
+        domain = source.get("source_domain") or urlsplit(source.get("url", "")).hostname or ""
+        domains[domain] = domains.get(domain, 0) + 1
+    concentrated = sorted(domain for domain, count in domains.items() if domain and count > 2)
+    if concentrated:
+        warnings.append(f"source concentration above 2: {', '.join(concentrated)}")
+    if candidates and not fresh:
+        warnings.append("proposal selected no valid fresh stories")
+
+    return {
+        "selected_fresh": fresh,
+        "selected_ongoing": ongoing,
+        "story_state_proposals": state_proposals,
+        "rejected": proposal.get("rejected", []),
+        "gaps": _clean_editorial_text(proposal.get("gaps"), limit=800),
+        "balance_summary": _clean_editorial_text(
+            proposal.get("balance_summary"), limit=600
+        ),
+    }, warnings
+
+
+def _raw_editorial_proposal(
+    candidates: list[dict],
+    sif_candidates: list[dict],
+) -> dict:
+    """Build a source-only last-resort proposal after both curation models fail."""
+    return {
+        "selected_fresh": [
+            {
+                "candidate_id": candidate["candidate_id"],
+                "rank": index,
+                "editorial_summary": candidate.get("summary", ""),
+                "selection_reason": "deterministic fallback",
+                "related_story_url": None,
+            }
+            for index, candidate in enumerate(candidates[:7], 1)
+        ],
+        "selected_ongoing": [
+            {
+                "story_url": story.get("url", ""),
+                "rank": index,
+                "summary": story.get("latest_dev", ""),
+                "why_still_relevant": story.get("latest_dev", ""),
+            }
+            for index, story in enumerate(sif_candidates[:3], 1)
+        ],
+        "story_state_proposals": [],
+        "rejected": [],
+        "gaps": "Curation models unavailable; source-ranked fallback used.",
+        "balance_summary": "",
+    }
+
+
+def _apply_editorial_patches(
+    proposal: dict,
+    review: dict,
+) -> tuple[dict, list[dict], list[str]]:
+    """Apply only the critic's bounded list operations; validation follows."""
+    patched = copy.deepcopy(proposal)
+    applied: list[dict] = []
+    warnings: list[str] = []
+    changes = review.get("changes", [])
+    if not isinstance(changes, list):
+        return patched, applied, ["critic changes was not a list"]
+
+    def replace_by(items: list[dict], key: str, value: str, replacement: dict) -> bool:
+        for index, item in enumerate(items):
+            current = item.get(key, "")
+            matches = (
+                _normalize_url(current) == _normalize_url(value)
+                if key == "story_url" else current == value
+            )
+            if matches:
+                items[index] = replacement
+                return True
+        return False
+
+    for change in changes[:20]:
+        if not isinstance(change, dict):
+            warnings.append("ignored non-object critic change")
+            continue
+        operation = change.get("operation")
+        item = change.get("item")
+        changed = False
+        if operation == "remove_fresh":
+            candidate_id = change.get("candidate_id", "")
+            before = len(patched["selected_fresh"])
+            patched["selected_fresh"] = [
+                entry for entry in patched["selected_fresh"]
+                if entry.get("candidate_id") != candidate_id
+            ]
+            changed = len(patched["selected_fresh"]) != before
+        elif operation == "add_fresh" and isinstance(item, dict):
+            patched["selected_fresh"].append(item)
+            changed = True
+        elif operation == "replace_fresh" and isinstance(item, dict):
+            changed = replace_by(
+                patched["selected_fresh"], "candidate_id",
+                change.get("candidate_id", ""), item,
+            )
+        elif operation == "move_fresh":
+            candidate_id = change.get("candidate_id", "")
+            position = change.get("position")
+            if isinstance(position, int) and position >= 1:
+                matches = [
+                    entry for entry in patched["selected_fresh"]
+                    if entry.get("candidate_id") == candidate_id
+                ]
+                if matches:
+                    patched["selected_fresh"] = [
+                        entry for entry in patched["selected_fresh"]
+                        if entry.get("candidate_id") != candidate_id
+                    ]
+                    patched["selected_fresh"].insert(
+                        min(position - 1, len(patched["selected_fresh"])), matches[0]
+                    )
+                    changed = True
+        elif operation == "remove_ongoing":
+            story_url = change.get("story_url", "")
+            before = len(patched["selected_ongoing"])
+            patched["selected_ongoing"] = [
+                entry for entry in patched["selected_ongoing"]
+                if _normalize_url(entry.get("story_url", "")) != _normalize_url(story_url)
+            ]
+            changed = len(patched["selected_ongoing"]) != before
+        elif operation == "add_ongoing" and isinstance(item, dict):
+            patched["selected_ongoing"].append(item)
+            changed = True
+        elif operation == "replace_ongoing" and isinstance(item, dict):
+            changed = replace_by(
+                patched["selected_ongoing"], "story_url",
+                change.get("story_url", ""), item,
+            )
+        elif operation == "remove_state":
+            index = change.get("index")
+            if isinstance(index, int) and 0 <= index < len(patched["story_state_proposals"]):
+                patched["story_state_proposals"].pop(index)
+                changed = True
+        elif operation == "add_state" and isinstance(item, dict):
+            patched["story_state_proposals"].append(item)
+            changed = True
+        elif operation == "replace_state" and isinstance(item, dict):
+            index = change.get("index")
+            if isinstance(index, int) and 0 <= index < len(patched["story_state_proposals"]):
+                patched["story_state_proposals"][index] = item
+                changed = True
+        if changed:
+            applied.append(change)
+        else:
+            warnings.append(f"ignored invalid critic operation {operation!r}")
+    return patched, applied, warnings
+
+
+def _apply_story_state_proposals(
+    stories_in_flight: dict,
+    proposal: dict,
+    candidates: list[dict],
+    today_str: str,
+) -> dict:
+    """Apply only validated add/update operations to a copied tracker."""
+    updated = copy.deepcopy(stories_in_flight)
+    stories = updated.setdefault("stories", [])
+    candidate_by_id = {
+        candidate["candidate_id"]: candidate for candidate in candidates
+    }
+    story_by_url = {
+        _normalize_url(story.get("url", "")): story
+        for story in stories
+        if _normalize_url(story.get("url", ""))
+    }
+    for operation in proposal.get("story_state_proposals", []):
+        if operation["operation"] == "add":
+            source = candidate_by_id.get(operation["candidate_id"])
+            if source is None:
+                continue
+            normalized = _normalize_url(source.get("url", ""))
+            if normalized in story_by_url:
+                continue
+            story = {
+                "title": source.get("title", ""),
+                "url": source.get("url", ""),
+                "category": source.get("category", ""),
+                "status": "active",
+                "latest_dev": operation.get("latest_dev", source.get("summary", "")),
+                "last_updated": today_str,
+                "importance": operation.get("importance", source.get("importance", "medium")),
+                "first_seen": today_str,
+            }
+            stories.append(story)
+            story_by_url[normalized] = story
+        elif operation["operation"] == "update":
+            story = story_by_url.get(_normalize_url(operation.get("story_url", "")))
+            if story is None:
+                continue
+            story["latest_dev"] = operation["latest_dev"]
+            story["last_updated"] = today_str
+            story["importance"] = operation["importance"]
+            story["status"] = operation["status"]
+    return updated
+
+
+def _materialize_editorial_selection(
+    proposal: dict,
+    candidates: list[dict],
+    stories_in_flight: dict,
+) -> tuple[list[dict], list[dict]]:
+    candidate_by_id = {
+        candidate["candidate_id"]: candidate for candidate in candidates
+    }
+    story_by_url = {
+        _normalize_url(story.get("url", "")): story
+        for story in stories_in_flight.get("stories", [])
+    }
+    fresh: list[dict] = []
+    for selection in proposal["selected_fresh"]:
+        source = copy.deepcopy(candidate_by_id[selection["candidate_id"]])
+        source.update({
+            "rank": len(fresh) + 1,
+            "summary": selection["editorial_summary"],
+            "selection_reason": selection["selection_reason"],
+            "related_story_url": selection["related_story_url"],
+        })
+        fresh.append(source)
+
+    ongoing: list[dict] = []
+    for selection in proposal["selected_ongoing"]:
+        source = copy.deepcopy(
+            story_by_url[_normalize_url(selection["story_url"])]
+        )
+        source.update({
+            "rank": len(ongoing) + 1,
+            "summary": selection["summary"],
+            "why_still_relevant": selection["why_still_relevant"],
+        })
+        ongoing.append(source)
+    return fresh, ongoing
+
+
+def _model_attempts(*models: str) -> list[tuple[str, str]]:
+    attempts: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for requested in models:
+        effective = _effective_model(requested)
+        if effective not in seen:
+            seen.add(effective)
+            attempts.append((requested, effective))
+    return attempts
+
+
+def phase_6_curate(
+    topic: dict,
+    summaries: list[dict],
+    sif_candidates: list[dict],
+    stories_in_flight: dict,
+    run_dir: Path,
+) -> tuple[list[dict], dict, list[dict]]:
+    """Propose, validate, independently review, then apply editorial state changes."""
     output_path = run_dir / "06-curated.json"
     if output_path.exists():
         print(f"  [skip] Phase 6 output exists: {output_path}")
         data = json.loads(output_path.read_text())
         return data["fresh"], data.get("stories_in_flight", stories_in_flight), data["ongoing"]
 
-    kept = [s for s in summaries if s.get("judge_verdict") in ("keep", "fix")]
-    dropped = [s for s in summaries if s.get("judge_verdict") == "drop"]
-
-    # ── 6a: Python prep ──
-    fresh_candidates = [s for s in kept if s.get("source_verdict") == "fresh"]
-    ongoing_candidates = [s for s in kept if s.get("source_verdict") == "ongoing"]
-
-    # Deduplicate by URL within each pool
-    def _dedup_by_url(items: list[dict]) -> list[dict]:
-        seen: set[str] = set()
-        result: list[dict] = []
-        for item in items:
-            url = _normalize_url(item.get("url", ""))
-            if url and url not in seen:
-                seen.add(url)
-                result.append(item)
-        return result
-
-    fresh_candidates = _dedup_by_url(fresh_candidates)
-    ongoing_candidates = _dedup_by_url(ongoing_candidates)
-
-    # ── Cross-topic dedup: read other digests' curated outputs for today ──
-    # Prevents the same story appearing in multiple digests on the same day.
-    other_topic_urls: set[str] = set()
-    today_str = run_dir.name
-    try:
-        current_cat = topic["category"]
-        for cat, cfg in TOPICS.items():
-            if cfg["category"] == current_cat:
-                continue
-            other_run_dir = DIGESTS_DIR / cfg["category"] / today_str
-            other_curated = other_run_dir / "06-curated.json"
-            if other_curated.exists():
-                other_data = json.loads(other_curated.read_text())
-                for story in other_data.get("fresh", []) + other_data.get("ongoing", []):
-                    url = _normalize_url(story.get("url", ""))
-                    if url:
-                        other_topic_urls.add(url)
-        if other_topic_urls:
-            print(f"  [6a cross-dedup] {len(other_topic_urls)} URLs already in other digests today")
-    except Exception as e:
-        print(f"  [6a cross-dedup warn] {e}")
-
-    # Pre-rank by importance + recency, cap to top 15 for the LLM
-    importance_order = {"high": 0, "medium": 1, "low": 2}
-    ranked_candidates = sorted(
-        fresh_candidates + ongoing_candidates,
-        key=lambda s: (
-            importance_order.get(s.get("importance", "low"), 2),
-            s.get("date_published", "9999-99-99"),
-        )
-    )[:15]
-
-    print(f"  [6a prep] {len(fresh_candidates)} fresh, {len(ongoing_candidates)} ongoing, "
-          f"{len(sif_candidates)} SIF → {len(ranked_candidates)} capped for LLM")
-
-    # ── 6b: LLM editorial ──
-    t0 = time.time()
-    rubric = _importance_rubric_text(topic)
-
-    candidates_json = json.dumps(ranked_candidates, indent=2)
-    sif_json = json.dumps(sif_candidates, indent=2)
-    tracker_json = json.dumps(stories_in_flight, indent=2)
+    started = time.time()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    blocked_urls = _load_cross_topic_urls(topic, run_dir)
+    candidates, dropped = _prepare_editorial_candidates(summaries, blocked_urls)
+    sif_candidates = [
+        story for story in sif_candidates
+        if _normalize_url(story.get("url", "")) not in blocked_urls
+    ]
+    print(f"  [6a prep] {len(candidates)} candidates, {len(sif_candidates)} SIF, "
+          f"{len(blocked_urls)} cross-topic URL(s) blocked")
 
     system = (
-        "You are the lead editor of a daily news digest. You receive vetted article "
-        "summaries and a 'stories-in-flight' tracker of evolving stories from previous "
-        "days. Your job is to curate the final story selection.\n\n"
-        "Tasks:\n"
-        "1. CROSS-REFERENCE: Identify connections between fresh articles and stories "
-        "already in the tracker. If today's findings add meaningful new developments "
-        "to a tracker story, update its 'latest_dev' and set 'last_updated' to today's "
-        "date (YYYY-MM-DD) — this resets the auto-cool clock.\n"
-        "2. UPDATE TRACKER: Adjust 'importance' on tracker entries as stories evolve "
-        "(e.g. diplomatic spat → military confrontation → escalate to high; resolved "
-        "story → cool to low). You may set status to 'cooled' if a story has definitively "
-        "resolved (e.g. bill signed, trial verdict, product shipped). Otherwise leave "
-        "status as-is — the system auto-cools stories with no updates after 5 days and "
-        "auto-prunes cooled stories after 7 days total.\n"
-        "3. ADD NEW TRACKER ENTRIES: Major announcements, unfolding events, controversies, "
-        "multi-day stories should be added to the tracker. Each needs: title, url, first_seen "
-        "(today), last_updated (today), latest_dev (1-sentence summary of what's new), "
-        "status: 'active', importance: high/medium/low (default medium), category.\n"
-        "4. FLAG GAPS: What important story might be missing? Add a 'gaps' note.\n"
-        "5. WRITE INTRO HOOK: 2-3 sentence editorial intro setting the tone.\n"
-        "6. SELECT FINAL LINEUP: 5-7 fresh stories + 2-3 ongoing from the stories-in-flight "
-        "tracker (NOT from the candidates — those are separate). The ongoing stories should "
-        "be DIFFERENT from the fresh stories — they are ongoing narratives, not today's headlines.\n"
-        "CRITICAL: Candidates have a 'source_verdict' field ('fresh' = today/yesterday, "
-        "'ongoing' = 2-5 days old). Prefer 'source_verdict: fresh' candidates for the "
-        "Fresh section. Only use 'source_verdict: ongoing' candidates if there aren't "
-        "enough fresh ones — and even then, drop the oldest ones first.\n\n"
-        "Output a JSON object wrapped in ```json fences with this structure:\n"
-        '  {\n'
-        '    "fresh": [\n'
-        '      {"rank": 1, "title": "...", "url": "...", "category": "...",\n'
-        '       "summary": "2-3 sentence editorial summary", "related_to": null|1,\n'
-        '       "related_urls": ["..."]},\n'
-        '      ...\n'
-        '    ],\n'
-        '    "ongoing": [\n'
-        '      {"title": "...", "url": "...", "category": "...",\n'
-        '       "summary": "1-2 sentences (what the story IS, not what changed)",\n'
-        '       "why_still_relevant": "what changed or why it matters now"},\n'
-        '      ...\n'
-        '    ],\n'
-        '    "stories_in_flight": <updated tracker object>,\n'
-        '    "gaps": "string describing missing stories",\n'
-        '    "intro_hook": "2-3 sentence editorial intro for the email"\n'
-        '  }\n\n'
-        "Keep summaries tight — these are read on mobile. Prioritize substance over hype.\n"
-        "IMPORTANT: Ongoing stories must use URLs from the stories-in-flight tracker, "
-        "NOT from today's candidates. Ongoing = narratives from earlier days. "
-        "Fresh = today's news. Do not put the same story in both sections."
+        "You are the lead editor of a daily news digest. Make one coherent editorial "
+        "proposal from vetted candidates and existing stories in flight. Selection, "
+        "ranking, source/topic balance, ongoing-story connections, and state proposals "
+        "are interdependent. Do not write an intro and do not replace the tracker.\n\n"
+        "Select 5-7 fresh stories when enough good candidates exist and 2-3 ongoing "
+        "stories only from the supplied active SIF candidates. Prefer source_verdict=fresh; "
+        "use older ongoing candidates only when needed. Every selection must use the exact "
+        "candidate_id or story_url supplied. State changes are proposals only. An update "
+        "needs selected candidate evidence; an add must reference a selected candidate.\n\n"
+        "Output one JSON object in ```json fences:\n"
+        '{"selected_fresh":[{"candidate_id":"...","rank":1,'
+        '"editorial_summary":"2-3 factual sentences","selection_reason":"...",'
+        '"related_story_url":null}],'
+        '"selected_ongoing":[{"story_url":"...","rank":1,'
+        '"summary":"what the story is","why_still_relevant":"what changed"}],'
+        '"story_state_proposals":[{"operation":"add|update",'
+        '"candidate_id":"for add","story_url":"for update",'
+        '"evidence_candidate_ids":["..."],"latest_dev":"...",'
+        '"importance":"high|medium|low","status":"active|cooled"}],'
+        '"rejected":[{"candidate_id":"...","reason":"..."}],'
+        '"gaps":"...","balance_summary":"..."}'
     )
-
-    dropped_json = json.dumps(
-        [{"title": d.get("title"), "url": d.get("url"),
-          "reason": d.get("judge_issues", [])} for d in dropped],
-        indent=2)
-
-    other_topic_block = ""
-    if other_topic_urls:
-        blocked = json.dumps(sorted(list(other_topic_urls)), indent=2)
-        other_topic_block = (
-            f"## Already Covered in Other Digests Today\n\n"
-            f"The following stories were already covered in another digest today. "
-            f"Do NOT select them for this digest — each story should only appear "
-            f"in one digest per day.\n"
-            f"{blocked}\n\n"
-        )
-
     user = (
-        f"## Fresh/Ongoing Candidates (for the Fresh section)\n\n{candidates_json}\n\n"
-        f"## Stories In Flight — Active Candidates (for Ongoing section)\n\n{sif_json}\n\n"
-        f"## Full Stories In Flight Tracker (update this)\n\n{tracker_json}\n\n"
-        f"## Importance Rubric\n\n{rubric}\n\n"
-        f"## Dropped Summaries (for reference, do not include)\n\n"
-        f"{dropped_json}\n\n"
-        f"{other_topic_block}"
-        "Curate the final selection. Fresh candidates go in the Fresh section. "
-        "Stories-in-flight go in the Ongoing section. "
-        "Update the tracker with new developments and new entries. "
-        "Output the JSON object in ```json fences."
+        f"## Date\n{today_str}\n\n"
+        f"## Vetted candidates\n{json.dumps(candidates, indent=2)}\n\n"
+        f"## Active SIF candidates for ongoing selection\n"
+        f"{json.dumps(sif_candidates, indent=2)}\n\n"
+        f"## Full tracker for connections and proposed updates\n"
+        f"{json.dumps(stories_in_flight, indent=2)}\n\n"
+        f"## Importance rubric\n{_importance_rubric_text(topic)}\n\n"
+        f"## Dropped summaries; never select\n"
+        f"{json.dumps([{'title': item.get('title'), 'url': item.get('url'), 'reason': item.get('judge_issues', [])} for item in dropped], indent=2)}"
     )
 
-    try:
-        raw = _call_llm_proxy(system, user, model=MODEL)
-        result = _extract_json(raw, "curate output")
+    proposal: dict | None = None
+    proposal_model = ""
+    proposal_warnings: list[str] = []
+    proposal_errors: list[str] = []
+    for requested_model, effective_model in _model_attempts(MODEL, MODEL_FALLBACK):
+        try:
+            raw = _call_llm_proxy(
+                system, user, model=requested_model, timeout=EDITORIAL_TIMEOUT
+            )
+            parsed = _extract_json(raw, f"editorial proposal ({effective_model})")
+            validated, warnings = _validate_editorial_proposal(
+                parsed, candidates, sif_candidates, stories_in_flight, blocked_urls
+            )
+            if candidates and not validated["selected_fresh"]:
+                raise ValueError("model selected no valid fresh stories")
+            proposal = validated
+            proposal_model = effective_model
+            proposal_warnings = warnings
+            break
+        except Exception as error:
+            error_summary = _summarize_model_error(error)
+            proposal_errors.append(f"{effective_model}: {error_summary}")
+            print(f"  [6b retry] editorial proposal failed with "
+                  f"{effective_model}: {error_summary}")
 
-        # ── 6c: Python validate ──
-        fresh = result.get("fresh", kept[:7])
-        ongoing = result.get("ongoing", [])
-        updated_sif = result.get("stories_in_flight", stories_in_flight)
-        gaps = result.get("gaps", "")
-        intro = result.get("intro_hook", "")
+    proposal_status = "model"
+    if proposal is None:
+        proposal_status = "raw_fallback"
+        proposal = _raw_editorial_proposal(candidates, sif_candidates)
+        proposal, proposal_warnings = _validate_editorial_proposal(
+            proposal, candidates, sif_candidates, stories_in_flight, blocked_urls
+        )
+        print("  [6b degraded] both curation models failed; using source-ranked fallback")
 
-        # Auto-activate: if the LLM updated a cooled story's last_updated to today
-        # without changing status back to active, fix it here
-        auto_activated = 0
-        for s in updated_sif.get("stories", []):
-            if s.get("status") == "cooled" and s.get("last_updated") == today_str:
-                s["status"] = "active"
-                auto_activated += 1
-        if auto_activated:
-            print(f"  [6c activation] Re-activated {auto_activated} cooled stories updated today")
+    (run_dir / "06a-editorial-proposal.json").write_text(json.dumps({
+        "status": proposal_status,
+        "model": proposal_model,
+        "errors": proposal_errors,
+        "validation_warnings": proposal_warnings,
+        "proposal": proposal,
+    }, indent=2))
 
-        # Validate URLs against source data — build the set of known URLs
-        known_urls: set[str] = set()
-        for c in ranked_candidates:
-            u = _normalize_url(c.get("url", ""))
-            if u:
-                known_urls.add(u)
-        for s in sif_candidates:
-            u = _normalize_url(s.get("url", ""))
-            if u:
-                known_urls.add(u)
-
-        # Check fresh stories' URLs
-        validated_fresh = []
-        for f in fresh:
-            url = _normalize_url(f.get("url", ""))
-            if url in known_urls or not url:
-                validated_fresh.append(f)
+    final_proposal = proposal
+    review_status = "skipped_raw_fallback"
+    review_model = ""
+    review_errors: list[str] = []
+    review_warnings: list[str] = []
+    review_result: dict = {"verdict": "not_run", "changes": []}
+    applied_changes: list[dict] = []
+    if proposal_status == "model":
+        critic_system = (
+            "You are the independent critic for a daily digest. Review the proposed "
+            "selection, ranking, source/topic balance, ongoing links, and persistent "
+            "story-state proposals. Return bounded changes only; never rewrite the whole "
+            "proposal. Check for a missed stronger candidate, unsupported connections, "
+            "source concentration, stale material, and state changes without evidence.\n\n"
+            "Allowed operations: remove_fresh, add_fresh, replace_fresh, move_fresh, "
+            "remove_ongoing, add_ongoing, replace_ongoing, remove_state, add_state, "
+            "replace_state. add/replace operations put the proposed object in item. "
+            "remove/replace/move fresh identifies candidate_id; ongoing identifies "
+            "story_url; state operations use a zero-based index. move_fresh also supplies "
+            "a one-based position. Output JSON: "
+            '{"verdict":"approve|approve_with_changes|reject","changes":[],'
+            '"notes":"..."}'
+        )
+        critic_user = (
+            f"## Candidates\n{json.dumps(candidates, indent=2)}\n\n"
+            f"## SIF candidates\n{json.dumps(sif_candidates, indent=2)}\n\n"
+            f"## Current tracker\n{json.dumps(stories_in_flight, indent=2)}\n\n"
+            f"## Proposal\n{json.dumps(proposal, indent=2)}\n\n"
+            f"## Deterministic warnings\n{json.dumps(proposal_warnings, indent=2)}"
+        )
+        critic_models = (MODEL_REVIEWER, MODEL_FALLBACK)
+        critic_rejected = False
+        for requested_model, effective_model in _model_attempts(*critic_models):
+            try:
+                raw = _call_llm_proxy(
+                    critic_system, critic_user, model=requested_model,
+                    timeout=EDITORIAL_TIMEOUT,
+                )
+                parsed_review = _extract_json(raw, f"editorial critic ({effective_model})")
+                if not isinstance(parsed_review, dict):
+                    raise ValueError("critic output must be a JSON object")
+                review_result = parsed_review
+                verdict = parsed_review.get("verdict")
+                if verdict not in ("approve", "approve_with_changes", "reject"):
+                    raise ValueError(f"unknown critic verdict {verdict!r}")
+                if verdict == "reject":
+                    critic_rejected = True
+                    raise ValueError("critic rejected the editorial proposal")
+                patched, applied, patch_warnings = _apply_editorial_patches(
+                    proposal, parsed_review
+                )
+                validated, validation_warnings = _validate_editorial_proposal(
+                    patched, candidates, sif_candidates, stories_in_flight, blocked_urls
+                )
+                if candidates and not validated["selected_fresh"]:
+                    raise ValueError("critic changes removed every valid fresh story")
+                final_proposal = validated
+                review_result = parsed_review
+                applied_changes = applied
+                review_warnings = patch_warnings + validation_warnings
+                review_model = effective_model
+                review_status = "reviewed"
+                break
+            except Exception as error:
+                error_summary = _summarize_model_error(error)
+                review_errors.append(f"{effective_model}: {error_summary}")
+                print(f"  [6d retry] editorial critic failed with "
+                      f"{effective_model}: {error_summary}")
+        if review_status != "reviewed":
+            if critic_rejected:
+                final_proposal = _raw_editorial_proposal(candidates, sif_candidates)
+                final_proposal, fallback_warnings = _validate_editorial_proposal(
+                    final_proposal, candidates, sif_candidates,
+                    stories_in_flight, blocked_urls,
+                )
+                review_warnings.extend(fallback_warnings)
+                review_status = "rejected_fallback"
+                print("  [6d degraded] critic rejected proposal; using source-ranked fallback")
             else:
-                print(f"  [6c validate] Dropped hallucinated URL from fresh: {f.get('title', '?')[:60]}")
+                review_status = "unavailable"
+                print("  [6d degraded] critic unavailable; using validated editorial proposal")
 
-        # Check ongoing stories' URLs
-        validated_ongoing = []
-        for o in ongoing:
-            url = _normalize_url(o.get("url", ""))
-            if url in known_urls or not url:
-                validated_ongoing.append(o)
-            else:
-                print(f"  [6c validate] Dropped hallucinated URL from ongoing: {o.get('title', '?')[:60]}")
+    (run_dir / "06b-editorial-review.json").write_text(json.dumps({
+        "status": review_status,
+        "model": review_model,
+        "errors": review_errors,
+        "review": review_result,
+        "applied_changes": applied_changes,
+        "validation_warnings": review_warnings,
+    }, indent=2))
 
-        # Drop any stories whose URLs are already in another digest today
-        if other_topic_urls:
-            validated_fresh = [f for f in validated_fresh
-                               if _normalize_url(f.get("url", "")) not in other_topic_urls]
-            validated_ongoing = [o for o in validated_ongoing
-                                 if _normalize_url(o.get("url", "")) not in other_topic_urls]
-            print(f"  [6c cross-dedup] {len(validated_fresh)} fresh, {len(validated_ongoing)} ongoing after dedup")
-
-        # Apply URL validation results (with fallback to original if all hallucinated)
-        fresh = validated_fresh if validated_fresh else fresh
-        ongoing = validated_ongoing if validated_ongoing else ongoing
-
-        # Cross-topic dedup: applied AFTER validation fallback so duplicates are never restored
-        if other_topic_urls:
-            fresh = [f for f in fresh
-                     if _normalize_url(f.get("url", "")) not in other_topic_urls]
-            ongoing = [o for o in ongoing
-                       if _normalize_url(o.get("url", "")) not in other_topic_urls]
-            print(f"  [6c cross-dedup final] {len(fresh)} fresh, {len(ongoing)} ongoing after dedup")
-
-        elapsed = time.time() - t0
-        print(f"  [done] curate — {len(fresh)} fresh, {len(ongoing)} ongoing ({elapsed:.0f}s)")
-        if gaps:
-            print(f"    Gaps: {gaps[:200]}")
-    except Exception as e:
-        elapsed = time.time() - t0
-        print(f"  [FAIL] curate — {e} ({elapsed:.0f}s), using raw summaries")
-        fresh = kept[:7]
-        ongoing = []
-        updated_sif = stories_in_flight
-        intro = ""
-        gaps = ""
-
+    updated_sif = _apply_story_state_proposals(
+        stories_in_flight, final_proposal, candidates, today_str
+    )
+    fresh, ongoing = _materialize_editorial_selection(
+        final_proposal, candidates, updated_sif
+    )
     output = {
         "fresh": fresh,
         "ongoing": ongoing,
         "stories_in_flight": updated_sif,
-        "intro_hook": intro,
-        "gaps": gaps,
+        "gaps": final_proposal["gaps"],
+        "balance_summary": final_proposal["balance_summary"],
+        "editorial": {
+            "proposal_status": proposal_status,
+            "proposal_model": proposal_model,
+            "review_status": review_status,
+            "review_model": review_model,
+            "degraded": (
+                proposal_status != "model"
+                or proposal_model != _effective_model(MODEL)
+                or review_status != "reviewed"
+            ),
+        },
     }
+    (run_dir / "06c-editorial-final.json").write_text(json.dumps({
+        "proposal": final_proposal,
+        "output": output,
+    }, indent=2))
     output_path.write_text(json.dumps(output, indent=2))
+    elapsed = time.time() - started
+    print(f"  [done] curate — {len(fresh)} fresh, {len(ongoing)} ongoing, "
+          f"review={review_status} ({elapsed:.0f}s)")
     return fresh, updated_sif, ongoing
 
 
-def phase_7_write(topic: dict, fresh: list[dict], ongoing: list[dict],
-                  intro_hook: str, run_dir: Path) -> str:
-    """Phase 7: Write the HTML email.
+def _validate_intro(intro: str, stories: list[dict]) -> tuple[bool, str]:
+    text = _clean_editorial_text(intro, limit=700)
+    if len(text) < 40:
+        return False, "intro is too short"
+    if re.search(r"https?://|www\.", text, re.IGNORECASE):
+        return False, "intro contains a URL"
+    if "<" in text or ">" in text:
+        return False, "intro contains HTML"
+    source_text = " ".join(
+        f"{story.get('title', '')} {story.get('summary', '')} "
+        f"{story.get('why_still_relevant', '')}"
+        for story in stories
+    )
+    source_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", source_text))
+    intro_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", text))
+    unsupported = sorted(intro_numbers - source_numbers)
+    if unsupported:
+        return False, f"intro introduced unsupported numbers: {', '.join(unsupported)}"
+    entity_pattern = r"\b[A-Z][A-Za-z0-9’'-]{1,}\b"
+    source_entities = {
+        re.sub(r"[’']s$", "", entity.casefold())
+        for entity in re.findall(entity_pattern, source_text)
+    }
+    intro_entities = {
+        re.sub(r"[’']s$", "", entity.casefold())
+        for entity in re.findall(entity_pattern, text)
+        if (
+            re.sub(r"[’']s$", "", entity).isupper()
+            or any(
+                char.isupper()
+                for char in re.sub(r"[’']s$", "", entity)[1:]
+            )
+        )
+    }
+    unsupported_entities = sorted(intro_entities - source_entities)
+    if unsupported_entities:
+        return False, (
+            "intro introduced unsupported names: "
+            + ", ".join(unsupported_entities)
+        )
+    return True, ""
 
-    One LLM call fills the HTML template with curated stories.
-    """
+
+def _fallback_intro(fresh: list[dict], ongoing: list[dict]) -> str:
+    stories = fresh or ongoing
+    if not stories:
+        return "No stories were selected for today’s digest."
+    lead = stories[0].get("title", "the lead story")
+    if len(stories) == 1:
+        return (
+            f"Today’s digest focuses on {lead}. Read on for the verified details "
+            "and why the development matters."
+        )
+    secondary = " and ".join(
+        story.get("title", "") for story in stories[1:3] if story.get("title")
+    )
+    return (
+        f"Today’s digest leads with {lead}. Also in focus: {secondary}."
+    )
+
+
+def _generate_final_intro(
+    topic: dict,
+    fresh: list[dict],
+    ongoing: list[dict],
+    run_dir: Path,
+) -> str:
+    """Generate copy only after selection review; deterministic HTML comes later."""
+    artifact_path = run_dir / "07-intro.json"
+    if artifact_path.exists():
+        data = json.loads(artifact_path.read_text())
+        return data.get("intro", _fallback_intro(fresh, ongoing))
+
+    stories = fresh + ongoing
+    system = (
+        "Write a concise 2-3 sentence editorial introduction for a daily digest. "
+        "Use only facts, entities, and numbers in the approved story data. Do not add "
+        "URLs, HTML, new reporting, or claims about rejected stories. Output one JSON "
+        'object: {"intro":"..."}'
+    )
+    user = (
+        f"Digest: {topic['title']}\n\n"
+        f"Approved stories:\n{json.dumps(stories, indent=2)}"
+    )
+    errors: list[str] = []
+    intro = ""
+    model_used = ""
+    status = "model"
+    for requested_model, effective_model in _model_attempts(MODEL, MODEL_FALLBACK):
+        try:
+            raw = _call_llm_proxy(
+                system, user, model=requested_model, timeout=INTRO_TIMEOUT
+            )
+            result = _extract_json(raw, f"final intro ({effective_model})")
+            if not isinstance(result, dict):
+                raise ValueError("intro output must be a JSON object")
+            candidate = _clean_editorial_text(result.get("intro"), limit=700)
+            valid, reason = _validate_intro(candidate, stories)
+            if not valid:
+                raise ValueError(reason)
+            intro = candidate
+            model_used = effective_model
+            break
+        except Exception as error:
+            error_summary = _summarize_model_error(error)
+            errors.append(f"{effective_model}: {error_summary}")
+            print(f"  [7 retry] intro failed with {effective_model}: {error_summary}")
+    if not intro:
+        intro = _fallback_intro(fresh, ongoing)
+        status = "deterministic_fallback"
+    artifact_path.write_text(json.dumps({
+        "intro": intro,
+        "status": status,
+        "model": model_used,
+        "errors": errors,
+    }, indent=2))
+    return intro
+
+
+def _render_story_block(story: dict, *, ongoing: bool = False) -> str:
+    url = html.escape(str(story.get("url", "")), quote=True)
+    title = html.escape(str(story.get("title", "")))
+    category = html.escape(str(story.get("category", "")))
+    summary = html.escape(str(story.get("summary", "")))
+    why = ""
+    if ongoing:
+        why_text = html.escape(str(story.get("why_still_relevant", "")))
+        why = (
+            '\n    <p style="margin:2px 0 0; color:#7c6bbf; font-size:13px; '
+            f'font-style:italic;">↳ {why_text}</p>'
+        )
+    return (
+        "<tr>\n"
+        '  <td style="padding:8px 32px;">\n'
+        '    <p style="margin:0 0 2px;">\n'
+        f'      <a href="{url}" style="color:#1a1a2e; font-size:15px; '
+        f'font-weight:600; text-decoration:none;">{title}</a>\n'
+        f'      <span style="color:#999; font-size:12px; font-weight:400;">'
+        f" · {category}</span>\n"
+        "    </p>\n"
+        f'    <p style="margin:0; color:#555; font-size:14px; '
+        f'line-height:1.5;">{summary}</p>{why}\n'
+        "  </td>\n"
+        "</tr>"
+    )
+
+
+def _empty_section_block(message: str) -> str:
+    return (
+        '<tr><td style="padding:8px 32px; color:#777; font-size:14px;">'
+        f"{html.escape(message)}</td></tr>"
+    )
+
+
+def _render_digest_html(
+    topic: dict,
+    fresh: list[dict],
+    ongoing: list[dict],
+    intro: str,
+    *,
+    notice: str = "",
+) -> str:
+    template = TEMPLATE_PATH.read_text()
+    template = re.sub(
+        r"\n<!--\nSTORY BLOCK TEMPLATE[\s\S]*?-->\s*$", "\n", template
+    )
+    intro_text = f"{notice} {intro}".strip()
+    fresh_html = "\n".join(
+        _render_story_block(story) for story in fresh
+    ) or _empty_section_block("No fresh stories selected today.")
+    ongoing_html = "\n".join(
+        _render_story_block(story, ongoing=True) for story in ongoing
+    ) or _empty_section_block("No ongoing stories selected today.")
+    replacements = {
+        "{{DIGEST_TITLE}}": html.escape(str(topic["title"])),
+        "{{DATE}}": html.escape(datetime.now().strftime("%B %d, %Y")),
+        "{{INTRO}}": html.escape(intro_text),
+        "{{FRESH_STORIES}}": fresh_html,
+        "{{ONGOING_STORIES}}": ongoing_html,
+    }
+    rendered = template
+    for placeholder, value in replacements.items():
+        rendered = rendered.replace(placeholder, value)
+    return rendered
+
+
+def phase_7_write(
+    topic: dict,
+    fresh: list[dict],
+    ongoing: list[dict],
+    run_dir: Path,
+    *,
+    notice: str = "",
+) -> str:
+    """Generate the approved intro, then render the email deterministically."""
     output_path = run_dir / "digest.html"
     if output_path.exists():
         print(f"  [skip] Phase 7 output exists: {output_path}")
         return output_path.read_text()
 
     print(f"  [run ] write_html — {len(fresh)} fresh, {len(ongoing)} ongoing")
-    t0 = time.time()
-
-    template = TEMPLATE_PATH.read_text()
-    today_str = datetime.now().strftime("%B %d, %Y")
-
-    # Pre-fill the template header
-    html = template.replace("{{DIGEST_TITLE}}", topic["title"])
-    html = html.replace("{{DATE}}", today_str)
-
-    curated_json = json.dumps({"fresh": fresh, "ongoing": ongoing}, indent=2)
-
-    system = (
-        "You are an HTML email writer for a daily digest. You receive curated story "
-        "data and an HTML template with placeholders. Fill in the placeholders and "
-        "output the complete HTML.\n\n"
-        "CRITICAL RULES:\n"
-        "- Every story link must use the exact URL provided — do not alter, guess, or construct URLs.\n"
-        "- Use the EXACT story block HTML from the template comments for each story.\n"
-        "- For Ongoing stories, include the WHY line variant with the purple italic text.\n"
-        "- Keep summaries concise (2-3 sentences max). These are read on mobile.\n"
-        "- Do not add any stories beyond what's in the curated data.\n"
-        "- Do not modify the template structure, styling, or layout.\n"
-        "- Output ONLY the complete HTML document — no explanations, no markdown wrappers."
+    started = time.time()
+    intro = _generate_final_intro(topic, fresh, ongoing, run_dir)
+    rendered = _render_digest_html(
+        topic, fresh, ongoing, intro, notice=notice
     )
-
-    default_intro = (
-        "No intro provided — write a brief 2-3 sentence "
-        "editorial intro setting the tone for today's digest."
-    )
-
-    user = (
-        f"## Intro\n{intro_hook or default_intro}\n\n"
-        f"## Fresh Stories (use the standard story block for each)\n{curated_json}\n\n"
-        f"## HTML Template (fill {{INTRO}}, {{FRESH_STORIES}}, {{ONGOING_STORIES}})\n\n{html}\n\n"
-        "Fill the placeholders with the curated stories. Output the complete HTML document."
-    )
-
-    try:
-        raw = _call_llm_proxy(system, user, model=MODEL)
-        html_output = re.sub(r"^```html?\s*\n?", "", raw.strip())
-        html_output = re.sub(r"\n?```\s*$", "", html_output)
-        elapsed = time.time() - t0
-        output_path.write_text(html_output)
-        print(f"  [done] write_html — {len(html_output)} chars ({elapsed:.0f}s)")
-        return html_output
-    except Exception as e:
-        elapsed = time.time() - t0
-        print(f"  [FAIL] write_html — {e} ({elapsed:.0f}s)")
-        raise
+    output_path.write_text(rendered)
+    elapsed = time.time() - started
+    print(f"  [done] write_html — deterministic render, {len(rendered)} chars "
+          f"({elapsed:.0f}s)")
+    return rendered
 
 def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
                          run_dir: Path, digest_dir: Path,
@@ -2348,8 +3143,8 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
     2. AUTO-PRUNE: Any story whose first_seen is older than PRUNE_AFTER_DAYS
        → remove from the tracker entirely (regardless of status).
 
-    The Phase 6 curation LLM can still revive stories by updating last_updated
-    and setting status back to "active" when new developments appear.
+    Validated Phase 6 state proposals can still revive stories by updating
+    last_updated and setting status back to "active" when evidence supports it.
     """
     path = digest_dir / "stories-in-flight.json"
     if not path.exists():
@@ -2632,22 +3427,17 @@ def run_digest(category: str, dry_run: bool = False) -> None:
 
         # Phase 7: Write HTML
         t7 = _phase_start("Phase 7: Write HTML")
-        curated_data = json.loads((run_dir / "06-curated.json").read_text()) \
-            if (run_dir / "06-curated.json").exists() else {}
-        intro_hook = curated_data.get("intro_hook", "")
+        notice = ""
         if fresh or ongoing:
             if _UPSTREAM_OUTAGE:
-                # Research stage degraded (all-empty LLM results) but SIF has
-                # active stories to report — annotate the digest rather than
-                # hiding the degradation.
-                degraded_note = (
-                    "NOTE: Today's research stage was degraded — the research API "
+                notice = (
+                    "NOTE: Today’s research stage was degraded—the research API "
                     "returned no fresh findings. The stories below are ongoing "
                     "coverage carried over from previous days."
                 )
-                intro_hook = (f"{degraded_note}\n\n{intro_hook}"
-                              if intro_hook else degraded_note)
-            html = phase_7_write(topic, fresh, ongoing, intro_hook, run_dir)
+            html = phase_7_write(
+                topic, fresh, ongoing, run_dir, notice=notice
+            )
         else:
             if _UPSTREAM_OUTAGE:
                 html = (

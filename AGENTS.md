@@ -14,6 +14,7 @@ Carter endorses the tenets in [The Best Programmers](https://endler.dev/2025/bes
 - **Say "I don't know."** Uncertainty is fine and useful; confident bullshit is not. If a recommendation rests on something unverified, say so explicitly rather than smoothing it over.
 - **Never blame the computer.** "Flaky test," "weird cache," "probably a transient issue" are hypotheses, not conclusions. Bugs have causes — keep investigating until the cause is named, even if the fix is a retry.
 - **Keep it simple.** Prefer the smallest change that solves the problem. This reinforces the existing "no gratuitous abstractions / no speculative features" guidance further down in this file.
+- **Tune shared local models for general utility.** Use diverse evaluation tasks, neutral prompts, and sealed holdouts. Never encode benchmark answers, rubric fields, named test cases, or product-specific workflows in shared model prompts or runtime messages. Specialized behavior belongs in a separate deployment or profile.
 
 ## Scope
 
@@ -119,7 +120,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 
 ## Email Digests
 
-Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) at 08:00 UTC via `digests-daily.timer`. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
+Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) at 08:00 UTC via `digests-daily.timer`. Per-topic inference is bounded to two concurrent calls; curation uses a validated proposal + independent critic before deterministic state application and HTML rendering. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
 
 ## Homelab Steward
 
