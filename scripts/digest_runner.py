@@ -2581,25 +2581,33 @@ def phase_6_curate(
     proposal_warnings: list[str] = []
     proposal_errors: list[str] = []
     for requested_model, effective_model in _model_attempts(MODEL, MODEL_FALLBACK):
-        try:
-            raw = _call_llm_proxy(
-                system, user, model=requested_model, timeout=EDITORIAL_TIMEOUT
-            )
-            parsed = _extract_json(raw, f"editorial proposal ({effective_model})")
-            validated, warnings = _validate_editorial_proposal(
-                parsed, candidates, sif_candidates, stories_in_flight, blocked_urls
-            )
-            if candidates and not validated["selected_fresh"]:
-                raise ValueError("model selected no valid fresh stories")
-            proposal = validated
-            proposal_model = effective_model
-            proposal_warnings = warnings
+        # Retry the primary once before falling back to a weaker model: a single
+        # truncated/malformed response or transient transport error used to
+        # degrade the whole editorial stage to the fallback model (digest-quality
+        # audit 2026-08-11: world proposal fell back after one extraction error).
+        attempts = 2 if effective_model == _effective_model(MODEL) else 1
+        for _ in range(attempts):
+            try:
+                raw = _call_llm_proxy(
+                    system, user, model=requested_model, timeout=EDITORIAL_TIMEOUT
+                )
+                parsed = _extract_json(raw, f"editorial proposal ({effective_model})")
+                validated, warnings = _validate_editorial_proposal(
+                    parsed, candidates, sif_candidates, stories_in_flight, blocked_urls
+                )
+                if candidates and not validated["selected_fresh"]:
+                    raise ValueError("model selected no valid fresh stories")
+                proposal = validated
+                proposal_model = effective_model
+                proposal_warnings = warnings
+                break
+            except Exception as error:
+                error_summary = _summarize_model_error(error)
+                proposal_errors.append(f"{effective_model}: {error_summary}")
+                print(f"  [6b retry] editorial proposal failed with "
+                      f"{effective_model}: {error_summary}")
+        if proposal is not None:
             break
-        except Exception as error:
-            error_summary = _summarize_model_error(error)
-            proposal_errors.append(f"{effective_model}: {error_summary}")
-            print(f"  [6b retry] editorial proposal failed with "
-                  f"{effective_model}: {error_summary}")
 
     proposal_status = "model"
     if proposal is None:
@@ -2651,41 +2659,50 @@ def phase_6_curate(
         critic_models = (MODEL_REVIEWER, MODEL_FALLBACK)
         critic_rejected = False
         for requested_model, effective_model in _model_attempts(*critic_models):
-            try:
-                raw = _call_llm_proxy(
-                    critic_system, critic_user, model=requested_model,
-                    timeout=EDITORIAL_TIMEOUT,
-                )
-                parsed_review = _extract_json(raw, f"editorial critic ({effective_model})")
-                if not isinstance(parsed_review, dict):
-                    raise ValueError("critic output must be a JSON object")
-                review_result = parsed_review
-                verdict = parsed_review.get("verdict")
-                if verdict not in ("approve", "approve_with_changes", "reject"):
-                    raise ValueError(f"unknown critic verdict {verdict!r}")
-                if verdict == "reject":
-                    critic_rejected = True
-                    raise ValueError("critic rejected the editorial proposal")
-                patched, applied, patch_warnings = _apply_editorial_patches(
-                    proposal, parsed_review
-                )
-                validated, validation_warnings = _validate_editorial_proposal(
-                    patched, candidates, sif_candidates, stories_in_flight, blocked_urls
-                )
-                if candidates and not validated["selected_fresh"]:
-                    raise ValueError("critic changes removed every valid fresh story")
-                final_proposal = validated
-                review_result = parsed_review
-                applied_changes = applied
-                review_warnings = patch_warnings + validation_warnings
-                review_model = effective_model
-                review_status = "reviewed"
+            # Retry the primary critic once before falling back to a weaker model
+            # (a transient proxy 500 degraded review on 2026-08-11); an
+            # authoritative reject is not retried.
+            attempts = 2 if effective_model == _effective_model(MODEL_REVIEWER) else 1
+            for _ in range(attempts):
+                try:
+                    raw = _call_llm_proxy(
+                        critic_system, critic_user, model=requested_model,
+                        timeout=EDITORIAL_TIMEOUT,
+                    )
+                    parsed_review = _extract_json(raw, f"editorial critic ({effective_model})")
+                    if not isinstance(parsed_review, dict):
+                        raise ValueError("critic output must be a JSON object")
+                    review_result = parsed_review
+                    verdict = parsed_review.get("verdict")
+                    if verdict not in ("approve", "approve_with_changes", "reject"):
+                        raise ValueError(f"unknown critic verdict {verdict!r}")
+                    if verdict == "reject":
+                        critic_rejected = True
+                        raise ValueError("critic rejected the editorial proposal")
+                    patched, applied, patch_warnings = _apply_editorial_patches(
+                        proposal, parsed_review
+                    )
+                    validated, validation_warnings = _validate_editorial_proposal(
+                        patched, candidates, sif_candidates, stories_in_flight, blocked_urls
+                    )
+                    if candidates and not validated["selected_fresh"]:
+                        raise ValueError("critic changes removed every valid fresh story")
+                    final_proposal = validated
+                    review_result = parsed_review
+                    applied_changes = applied
+                    review_warnings = patch_warnings + validation_warnings
+                    review_model = effective_model
+                    review_status = "reviewed"
+                    break
+                except Exception as error:
+                    error_summary = _summarize_model_error(error)
+                    review_errors.append(f"{effective_model}: {error_summary}")
+                    print(f"  [6d retry] editorial critic failed with "
+                          f"{effective_model}: {error_summary}")
+                    if critic_rejected:
+                        break  # authoritative reject: try the next model
+            if review_status == "reviewed":
                 break
-            except Exception as error:
-                error_summary = _summarize_model_error(error)
-                review_errors.append(f"{effective_model}: {error_summary}")
-                print(f"  [6d retry] editorial critic failed with "
-                      f"{effective_model}: {error_summary}")
         if review_status != "reviewed":
             if critic_rejected:
                 final_proposal = _raw_editorial_proposal(candidates, sif_candidates)

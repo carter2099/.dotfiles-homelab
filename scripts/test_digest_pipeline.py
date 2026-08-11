@@ -309,6 +309,7 @@ def test_phase_six_fallback_and_review_chain() -> None:
         }
         responses: list[object] = [
             RuntimeError("primary unavailable"),
+            RuntimeError("primary unavailable (retry)"),
             json.dumps(proposal),
             json.dumps({"verdict": "approve", "changes": [], "notes": "Sound."}),
         ]
@@ -331,6 +332,143 @@ def test_phase_six_fallback_and_review_chain() -> None:
         check(artifact["editorial"]["proposal_model"] == digest.MODEL_FALLBACK, artifact)
         check(artifact["editorial"]["review_status"] == "reviewed", artifact)
         check(not responses, f"unused model responses: {responses!r}")
+
+
+def test_editorial_proposal_retries_primary_before_fallback() -> None:
+    """A single primary proposal failure must be retried, not degrade to fallback."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "ai-tech" / "2026-08-10"
+        run_dir.mkdir(parents=True)
+        candidates, _, tracker = editorial_fixture()
+        summaries = [
+            {key: value for key, value in candidate.items() if key != "candidate_id"}
+            for candidate in candidates
+        ]
+        selected_id = candidates[0]["candidate_id"]
+        proposal = {
+            "selected_fresh": [{
+                "candidate_id": selected_id,
+                "rank": 1,
+                "editorial_summary": "Retried primary summary.",
+                "selection_reason": "Highest importance.",
+                "related_story_url": None,
+            }],
+            "selected_ongoing": [],
+            "story_state_proposals": [{
+                "operation": "add",
+                "candidate_id": selected_id,
+                "evidence_candidate_ids": [selected_id],
+                "latest_dev": "Retried primary summary.",
+                "importance": "high",
+                "status": "active",
+            }],
+            "rejected": [],
+            "gaps": "",
+            "balance_summary": "One lead story.",
+        }
+        responses: list[object] = [
+            RuntimeError("Could not extract JSON from editorial proposal (primary). Raw text: ```json {"),
+            json.dumps(proposal),
+            json.dumps({"verdict": "approve", "changes": [], "notes": "Sound."}),
+        ]
+
+        def fake_call(*_: object, **__: object) -> str:
+            value = responses.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return str(value)
+
+        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
+            digest, "_call_llm_proxy", side_effect=fake_call
+        ):
+            fresh, _, ongoing = digest.phase_6_curate(
+                digest.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            )
+        check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
+        artifact = json.loads((run_dir / "06-curated.json").read_text())
+        check(
+            artifact["editorial"]["proposal_model"] == digest.MODEL,
+            artifact,
+        )
+        check(
+            artifact["editorial"]["degraded"] is False,
+            artifact["editorial"],
+        )
+        check(
+            len(artifact["editorial"]["proposal_model"]) > 0,
+            "proposal model missing",
+        )
+        check(not responses, f"unused model responses: {responses!r}")
+        proposal_artifact = json.loads(
+            (run_dir / "06a-editorial-proposal.json").read_text()
+        )
+        check(len(proposal_artifact["errors"]) == 1, proposal_artifact["errors"])
+
+
+def test_editorial_critic_retries_primary_after_transient_error() -> None:
+    """A transient primary critic error (proxy 500) must be retried once."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "ai-tech" / "2026-08-10"
+        run_dir.mkdir(parents=True)
+        candidates, _, tracker = editorial_fixture()
+        summaries = [
+            {key: value for key, value in candidate.items() if key != "candidate_id"}
+            for candidate in candidates
+        ]
+        selected_id = candidates[0]["candidate_id"]
+        proposal = {
+            "selected_fresh": [{
+                "candidate_id": selected_id,
+                "rank": 1,
+                "editorial_summary": "Reviewed factual summary.",
+                "selection_reason": "Highest importance.",
+                "related_story_url": None,
+            }],
+            "selected_ongoing": [],
+            "story_state_proposals": [{
+                "operation": "add",
+                "candidate_id": selected_id,
+                "evidence_candidate_ids": [selected_id],
+                "latest_dev": "Reviewed factual summary.",
+                "importance": "high",
+                "status": "active",
+            }],
+            "rejected": [],
+            "gaps": "",
+            "balance_summary": "One lead story.",
+        }
+        responses: list[object] = [
+            json.dumps(proposal),
+            RuntimeError("deepseek-v4-flash: 500 Server Error: Internal Server Error for url: http://localhost:8082/v1/chat/completions"),
+            json.dumps({"verdict": "approve", "changes": [], "notes": "Sound on retry."}),
+        ]
+
+        def fake_call(*_: object, **__: object) -> str:
+            value = responses.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return str(value)
+
+        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
+            digest, "_call_llm_proxy", side_effect=fake_call
+        ):
+            fresh, _, _ = digest.phase_6_curate(
+                digest.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            )
+        check(len(fresh) == 1, (fresh,))
+        artifact = json.loads((run_dir / "06-curated.json").read_text())
+        check(
+            artifact["editorial"]["review_model"] == digest.MODEL_REVIEWER,
+            artifact,
+        )
+        check(artifact["editorial"]["review_status"] == "reviewed", artifact)
+        check(not responses, f"unused model responses: {responses!r}")
+        review_artifact = json.loads(
+            (run_dir / "06b-editorial-review.json").read_text()
+        )
+        check(len(review_artifact["errors"]) == 1, review_artifact["errors"])
 
 
 def test_critic_rejection_fails_closed() -> None:
@@ -383,14 +521,18 @@ def test_critic_rejection_fails_closed() -> None:
             ),
             "rejected state proposal was applied",
         )
+        # The source-ranked fallback records today's selected stories in the
+        # tracker (steward digest-quality contract); compare against the real
+        # run date so the test is deterministic on any day.
+        today = datetime.now().strftime("%Y-%m-%d")
         added = {
             story.get("url"): story
             for story in updated["stories"]
-            if story.get("first_seen") == "2026-08-10"
+            if story.get("first_seen") == today
         }
         check(len(added) == 2, f"fallback did not track both fresh stories: {added}")
         check(
-            all(story.get("last_updated") == "2026-08-10" for story in added.values()),
+            all(story.get("last_updated") == today for story in added.values()),
             added,
         )
         check(
@@ -447,6 +589,8 @@ def main() -> None:
         test_editorial_validation_and_state_application,
         test_editorial_critic_patch_contract,
         test_phase_six_fallback_and_review_chain,
+        test_editorial_proposal_retries_primary_before_fallback,
+        test_editorial_critic_retries_primary_after_transient_error,
         test_critic_rejection_fails_closed,
         test_intro_boundary_and_deterministic_render,
     ]

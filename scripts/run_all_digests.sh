@@ -53,6 +53,23 @@ for topic in "${TOPICS[@]}"; do
         END_TS=$(date +%s)
         DURATION=$((END_TS - START_TS))
         echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DONE  $topic duration=${DURATION}s" | tee -a "$LOGFILE" || true
+        # Report editorial-stage degradation in the lifecycle log (digest-quality
+        # audit 2026-08-11): a successful run can still have fallen back to a
+        # weaker model for proposal/review, which used to be invisible here.
+        TODAY=$(date -u +%Y-%m-%d)
+        case "$topic" in
+            gaming) CATEGORY_DIR="gaming-digest" ;;
+            world) CATEGORY_DIR="world-digest" ;;
+            *) CATEGORY_DIR="$topic" ;;
+        esac
+        CURATED="$HOME/digests/$CATEGORY_DIR/$TODAY/06-curated.json"
+        if [ -f "$CURATED" ]; then
+            DEGRADED=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print('degraded' if d.get('editorial',{}).get('degraded') else 'ok')" "$CURATED" 2>/dev/null || echo ok)
+            if [ "$DEGRADED" = "degraded" ]; then
+                MODELS=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));e=d.get('editorial',{});print('proposal_model=%s review_model=%s review_status=%s' % (e.get('proposal_model',''),e.get('review_model',''),e.get('review_status','')))" "$CURATED" 2>/dev/null || echo "models unknown")
+                echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARN  $topic editorial degraded $MODELS" | tee -a "$LOGFILE" || true
+            fi
+        fi
     else
         RC=$?
         END_TS=$(date +%s)
