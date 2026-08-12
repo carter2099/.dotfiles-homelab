@@ -2,6 +2,7 @@
 """Focused behavioral fixtures for digest dedup, cache, editorial, and rendering."""
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import tempfile
@@ -163,6 +164,11 @@ def test_phase_four_concurrency_and_shared_cache() -> None:
 
 
 def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
+    # Publication dates are yesterday-relative: the Phase 6c freshness gate
+    # (digest-quality audit 2026-08-12) drops fresh selections outside the
+    # last-24h window, so fixture candidates must stay fresh-eligible on any
+    # run day.
+    fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     candidates, _ = digest._prepare_editorial_candidates([
         {
             "title": "Primary story",
@@ -171,7 +177,7 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
             "summary": "Primary verified summary.",
             "category": "Research",
             "importance": "high",
-            "date_published": "2026-08-10",
+            "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
         },
@@ -182,7 +188,7 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
             "summary": "Secondary verified summary.",
             "category": "Policy",
             "importance": "medium",
-            "date_published": "2026-08-10",
+            "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
         },
@@ -273,6 +279,191 @@ def test_editorial_critic_patch_contract() -> None:
           patched)
     check(len(applied) == 1 and not warnings, (applied, warnings))
     check(tracker["stories"], "fixture tracker unexpectedly empty")
+
+
+def test_editorial_drops_stale_fresh_selection() -> None:
+    """Ongoing-window candidates must never ship under "Fresh — Last 24 Hours"
+    (digest-quality audit 2026-08-12: agentic-platform shipped a 5d-old Claude
+    Code story and ai-hardware a 2d-old RTX story under Fresh). A stale-dropped
+    candidate is treated as unselected, so it gets no tracker add either."""
+    candidates, sif_candidates, tracker = editorial_fixture()
+    stale_day = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
+    stale = copy.deepcopy(candidates[0])
+    stale["date_published"] = stale_day
+    stale["date_confirmed"] = stale_day
+    stale["date_tag"] = "ongoing"
+    stale["source_verdict"] = "ongoing"
+    candidates = [stale, copy.deepcopy(candidates[1])]
+    proposal = {
+        "selected_fresh": [
+            {"candidate_id": candidate["candidate_id"]} for candidate in candidates
+        ],
+        "selected_ongoing": [],
+        "story_state_proposals": [{
+            "operation": "add",
+            "candidate_id": stale["candidate_id"],
+            "evidence_candidate_ids": [stale["candidate_id"]],
+            "latest_dev": "Prices still climbing.",
+            "importance": "high",
+            "status": "active",
+        }],
+    }
+    validated, warnings = digest._validate_editorial_proposal(
+        proposal, candidates, sif_candidates, tracker
+    )
+    check(len(validated["selected_fresh"]) == 1, validated["selected_fresh"])
+    check(
+        validated["selected_fresh"][0]["candidate_id"] == candidates[1]["candidate_id"],
+        validated["selected_fresh"],
+    )
+    check(any("stale fresh selection" in warning for warning in warnings), warnings)
+    check(
+        validated["story_state_proposals"] == [],
+        validated["story_state_proposals"],
+    )
+
+
+def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
+    """A critic that removes the last stale fresh story must be honored, not
+    converted to review=unavailable with the invalid placement retained
+    (digest-quality audit 2026-08-12: ai-hardware shipped a 2d-old RTX story
+    under Fresh because the 'removed every valid fresh story' guard fired)."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "ai-hardware" / "2026-08-12"
+        run_dir.mkdir(parents=True)
+        stale_day = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
+        summary = {
+            "title": "RTX 50-series price spike",
+            "url": "https://example.com/rtx-prices",
+            "source_domain": "example.com",
+            "summary": "Prices up as much as 39%.",
+            "category": "GPUs",
+            "importance": "high",
+            "date_published": stale_day,
+            "date_confirmed": stale_day,
+            "date_tag": "ongoing",
+            "source_verdict": "ongoing",
+            "judge_verdict": "keep",
+        }
+        candidate_id = digest._editorial_candidate_id(summary)
+        proposal = {
+            "selected_fresh": [{
+                "candidate_id": candidate_id,
+                "rank": 1,
+                "editorial_summary": "Prices spiked 39%.",
+                "selection_reason": "Consumer impact.",
+                "related_story_url": None,
+            }],
+            "selected_ongoing": [],
+            "story_state_proposals": [{
+                "operation": "add",
+                "candidate_id": candidate_id,
+                "evidence_candidate_ids": [candidate_id],
+                "latest_dev": "Prices spiked 39%.",
+                "importance": "high",
+                "status": "active",
+            }],
+            "rejected": [],
+            "gaps": "",
+            "balance_summary": "One lead story.",
+        }
+        responses: list[object] = [
+            RuntimeError("primary unavailable"),
+            RuntimeError("primary unavailable (retry)"),
+            json.dumps(proposal),
+            json.dumps({"verdict": "approve_with_changes", "changes": [{
+                "operation": "remove_fresh",
+                "candidate_id": candidate_id,
+            }], "notes": "Sole candidate is outside the 24h freshness window."}),
+        ]
+
+        def fake_call(*_: object, **__: object) -> str:
+            value = responses.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return str(value)
+
+        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
+            digest, "_call_llm_proxy", side_effect=fake_call
+        ):
+            fresh, updated, _ = digest.phase_6_curate(
+                digest.TOPICS["ai-hardware"], [summary], [], {}, run_dir
+            )
+        check(fresh == [], f"stale story shipped under Fresh: {fresh}")
+        artifact = json.loads((run_dir / "06-curated.json").read_text())
+        check(
+            artifact["editorial"]["review_status"] == "reviewed",
+            artifact["editorial"],
+        )
+        review_artifact = json.loads(
+            (run_dir / "06b-editorial-review.json").read_text()
+        )
+        check(not review_artifact["errors"], review_artifact["errors"])
+        # The stale story was not selected for anything, so it is not tracked.
+        check(
+            not any(
+                story.get("url") == summary["url"]
+                for story in updated.get("stories", [])
+            ),
+            updated,
+        )
+        check(not responses, f"unused model responses: {responses!r}")
+
+
+def test_critic_emptying_valid_fresh_still_fails_closed() -> None:
+    """The 'removed every valid fresh story' guard must still fire when
+    genuinely fresh candidates exist, so a broken critic cannot empty the
+    digest; the validated proposal is retained."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "ai-tech" / "2026-08-12"
+        run_dir.mkdir(parents=True)
+        candidates, _, tracker = editorial_fixture()
+        summaries = [
+            {key: value for key, value in candidate.items() if key != "candidate_id"}
+            for candidate in candidates
+        ]
+        proposal = {
+            "selected_fresh": [
+                {"candidate_id": candidates[0]["candidate_id"], "rank": 1,
+                 "editorial_summary": "Fresh story one.", "selection_reason": "Top.",
+                 "related_story_url": None},
+                {"candidate_id": candidates[1]["candidate_id"], "rank": 2,
+                 "editorial_summary": "Fresh story two.", "selection_reason": "Second.",
+                 "related_story_url": None},
+            ],
+            "selected_ongoing": [],
+            "story_state_proposals": [],
+            "rejected": [],
+            "gaps": "",
+            "balance_summary": "Two fresh stories.",
+        }
+        responses: list[object] = [
+            json.dumps(proposal),
+            json.dumps({"verdict": "approve_with_changes", "changes": [
+                {"operation": "remove_fresh",
+                 "candidate_id": candidates[0]["candidate_id"]},
+                {"operation": "remove_fresh",
+                 "candidate_id": candidates[1]["candidate_id"]},
+            ], "notes": "Removing all fresh."}),
+        ]
+
+        def fake_call(*_: object, **__: object) -> str:
+            value = responses.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return str(value)
+
+        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
+            digest, "_call_llm_proxy", side_effect=fake_call
+        ):
+            fresh, _, _ = digest.phase_6_curate(
+                digest.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            )
+        artifact = json.loads((run_dir / "06-curated.json").read_text())
+        check(artifact["editorial"]["review_status"] == "unavailable", artifact)
+        check(len(fresh) == 2, f"valid fresh stories were lost: {fresh}")
 
 
 def test_phase_six_fallback_and_review_chain() -> None:
@@ -588,6 +779,9 @@ def main() -> None:
         test_phase_four_concurrency_and_shared_cache,
         test_editorial_validation_and_state_application,
         test_editorial_critic_patch_contract,
+        test_editorial_drops_stale_fresh_selection,
+        test_critic_fresh_removal_honored_when_all_candidates_stale,
+        test_critic_emptying_valid_fresh_still_fails_closed,
         test_phase_six_fallback_and_review_chain,
         test_editorial_proposal_retries_primary_before_fallback,
         test_editorial_critic_retries_primary_after_transient_error,

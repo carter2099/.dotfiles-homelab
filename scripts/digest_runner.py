@@ -1290,6 +1290,33 @@ def _parse_date(date_str: str | None) -> datetime | None:
     return None
 
 
+def _candidate_fresh_date(candidate: dict) -> datetime | None:
+    """Return the best publication date for a candidate.
+
+    Prefers Phase 4's independently confirmed date; falls back to Phase 1's
+    published date. None when neither parses (Phase 5 passed the story through
+    for LLM judgment rather than dropping it).
+    """
+    confirmed = _parse_date((candidate.get("date_confirmed") or "").strip())
+    if confirmed is not None:
+        return confirmed
+    return _parse_date((candidate.get("date_published") or "").strip())
+
+
+def _is_fresh_eligible(candidate: dict, yesterday: date) -> bool:
+    """True when a candidate may legitimately appear under "Fresh — Last 24 Hours".
+
+    A candidate with a parseable publication date is fresh-eligible only when
+    that date is within the last 24h (>= yesterday). A candidate with no
+    parseable date is kept, mirroring Phase 5's pass-through for undetermined
+    dates. This deterministic gate is the backstop against the editorial model
+    or critic placing ongoing-window stories under Fresh (digest-quality audit
+    2026-08-12).
+    """
+    fresh_date = _candidate_fresh_date(candidate)
+    return fresh_date is None or fresh_date.date() >= yesterday
+
+
 def _batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
     """Split items into batches of at most `size`."""
     return [items[i:i + size] for i in range(0, len(items), size)]
@@ -2061,6 +2088,7 @@ def _validate_editorial_proposal(
 
     blocked = blocked_urls or set()
     warnings: list[str] = []
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
     candidate_by_id = {
         candidate["candidate_id"]: candidate
         for candidate in candidates
@@ -2099,6 +2127,19 @@ def _validate_editorial_proposal(
             continue
         if candidate_id in selected_ids:
             warnings.append(f"ignored duplicate fresh selection {candidate_id}")
+            continue
+        if not _is_fresh_eligible(source, yesterday):
+            # Deterministic freshness gate: an ongoing-window (2-5 day old)
+            # candidate must never ship under "Fresh — Last 24 Hours", even
+            # when the model selected it and the critic missed it (digest-quality
+            # audit 2026-08-12: ai-hardware + agentic-platform shipped stale
+            # stories under Fresh). The candidate is treated as unselected, so
+            # it also gets no tracker add/update.
+            stale_date = _candidate_fresh_date(source)
+            warnings.append(
+                f"dropped stale fresh selection {candidate_id} "
+                f"(best date {stale_date.date().isoformat()} is outside the 24h window)"
+            )
             continue
         selected_ids.add(candidate_id)
         related = _normalize_url(item.get("related_story_url", ""))
@@ -2231,7 +2272,10 @@ def _validate_editorial_proposal(
     concentrated = sorted(domain for domain, count in domains.items() if domain and count > 2)
     if concentrated:
         warnings.append(f"source concentration above 2: {', '.join(concentrated)}")
-    if candidates and not fresh:
+    if (
+        any(_is_fresh_eligible(candidate, yesterday) for candidate in candidates)
+        and not fresh
+    ):
         warnings.append("proposal selected no valid fresh stories")
 
     selected_sources = [
@@ -2534,6 +2578,15 @@ def phase_6_curate(
     today_str = datetime.now().strftime("%Y-%m-%d")
     blocked_urls = _load_cross_topic_urls(topic, run_dir)
     candidates, dropped = _prepare_editorial_candidates(summaries, blocked_urls)
+    # Deterministic freshness gate: only candidates within the last 24h (or
+    # with undetermined dates) may populate the Fresh section. When none are
+    # eligible, an empty Fresh section is the honest outcome and must not be
+    # treated as a model/critic failure (digest-quality audit 2026-08-12).
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+    fresh_eligible = [
+        candidate for candidate in candidates
+        if _is_fresh_eligible(candidate, yesterday)
+    ]
     sif_candidates = [
         story for story in sif_candidates
         if _normalize_url(story.get("url", "")) not in blocked_urls
@@ -2595,7 +2648,7 @@ def phase_6_curate(
                 validated, warnings = _validate_editorial_proposal(
                     parsed, candidates, sif_candidates, stories_in_flight, blocked_urls
                 )
-                if candidates and not validated["selected_fresh"]:
+                if fresh_eligible and not validated["selected_fresh"]:
                     raise ValueError("model selected no valid fresh stories")
                 proposal = validated
                 proposal_model = effective_model
@@ -2685,7 +2738,7 @@ def phase_6_curate(
                     validated, validation_warnings = _validate_editorial_proposal(
                         patched, candidates, sif_candidates, stories_in_flight, blocked_urls
                     )
-                    if candidates and not validated["selected_fresh"]:
+                    if fresh_eligible and not validated["selected_fresh"]:
                         raise ValueError("critic changes removed every valid fresh story")
                     final_proposal = validated
                     review_result = parsed_review
