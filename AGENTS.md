@@ -204,9 +204,13 @@ They're quick context dumps for cross-session continuity. Formal reference notes
 
 ## Gaming Rig (Windows 11)
 
-Windows 11 gaming PC at `192.168.4.103` (`ssh gamingrig`); hosts the local LLM stack (llama-swap + llama.cpp). Runbook: [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
+Windows 11 gaming PC at `192.168.4.103` (`ssh gamingrig`); hosts the local LLM stack
+(llama-swap + llama.cpp b10362). Twenty-seven GGUFs are on disk and seven models are
+registered. Nemotron 3.5 Lightning NVFP4/Q4_K_M/Q8_0 artifacts are retained but
+unregistered because the frozen optimized candidate failed its sealed quality holdout.
+Runbook: [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
-The rig is mostly accessed via local llm proxy running on this homelab.
+The rig is mostly accessed via the local llm proxy running on this homelab.
 
 ## Environment
 
