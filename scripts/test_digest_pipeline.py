@@ -522,6 +522,10 @@ def test_phase_six_fallback_and_review_chain() -> None:
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(artifact["editorial"]["proposal_model"] == digest.MODEL_FALLBACK, artifact)
         check(artifact["editorial"]["review_status"] == "reviewed", artifact)
+        check(
+            artifact["editorial"]["degraded"] is True,
+            "fallback-model proposal must be flagged degraded (digest-quality audit)",
+        )
         check(not responses, f"unused model responses: {responses!r}")
 
 

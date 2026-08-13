@@ -2798,7 +2798,11 @@ def phase_6_curate(
             "review_model": review_model,
             "degraded": (
                 proposal_status != "model"
-                or proposal_model != _effective_model(MODEL)
+                # Compare against the primary model, not _effective_model(MODEL):
+                # a whole-run fallback sets MODEL_OVERRIDE, which made the
+                # effective comparison self-consistent and hid the degradation
+                # (digest-quality audit 2026-08-13).
+                or proposal_model != MODEL
                 or review_status != "reviewed"
             ),
         },
