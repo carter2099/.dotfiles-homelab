@@ -775,6 +775,19 @@ def test_intro_boundary_and_deterministic_render() -> None:
     check("STORY BLOCK TEMPLATE" not in rendered, "template instructions leaked")
 
 
+def test_stub_retry_preserves_failed_attempt_artifacts() -> None:
+    """Stub/fallback retries archive the failed attempt's phase JSON instead of deleting it."""
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary)
+        names = ["01-research-raw.json", "03-urls-ranked.json", "06-curated.json"]
+        for name in names:
+            (run_dir / name).write_text(json.dumps({"attempt": 1, "name": name}))
+        digest._archive_stub_attempt(run_dir)
+        archived = sorted(p.name for p in run_dir.glob("stub-attempt-*/*.json"))
+        check(archived == names, f"archived={archived}")
+        check(not list(run_dir.glob("0*-*.json")), "failed attempt artifacts not preserved")
+
+
 def main() -> None:
     tests = [
         test_url_normalization,
@@ -787,6 +800,7 @@ def main() -> None:
         test_critic_fresh_removal_honored_when_all_candidates_stale,
         test_critic_emptying_valid_fresh_still_fails_closed,
         test_phase_six_fallback_and_review_chain,
+        test_stub_retry_preserves_failed_attempt_artifacts,
         test_editorial_proposal_retries_primary_before_fallback,
         test_editorial_critic_retries_primary_after_transient_error,
         test_critic_rejection_fails_closed,

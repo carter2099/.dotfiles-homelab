@@ -3315,6 +3315,21 @@ def cleanup_old_artifacts(digest_dir: Path, max_age_days: int = 14):
                 pass
 
 
+def _archive_stub_attempt(run_dir: Path) -> None:
+    """Preserve the failed attempt's phase artifacts instead of deleting them.
+
+    Stub/fallback retries used to unlink every 0*-*.json in the run dir, so a
+    fallback rerun left no JSON trail of the original failure. Move the
+    attempt's artifacts into a timestamped stub-attempt-* subdirectory instead
+    (digest-quality audit 2026-08-13).
+    """
+    archive = run_dir / f"stub-attempt-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+    archive.mkdir(exist_ok=True)
+    for p in run_dir.glob("0*-*.json"):
+        shutil.move(str(p), str(archive / p.name))
+    print(f"  [retry] Preserved failed attempt artifacts → {archive.name}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Main orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3410,8 +3425,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 MODEL_OVERRIDE = MODEL_FALLBACK
                 print(f"  *** STUB RETRY: No stories produced. "
                       f"Retrying with fallback: {MODEL_OVERRIDE}")
-                for p in run_dir.glob("0*-*.json"):
-                    p.unlink()
+                _archive_stub_attempt(run_dir)
 
             # Phase 1: Research
             t1 = _phase_start("Phase 1: Research")
@@ -3440,10 +3454,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                     _time.sleep(retry_delay)
                     print(f"  *** RETRY: No findings. Retrying Phase 1 with fallback: {fallback}")
                     MODEL_OVERRIDE = fallback
-                    if phase_1_path.exists():
-                        phase_1_path.unlink()
-                    for p in run_dir.glob("0*-*.json"):
-                        p.unlink()
+                    _archive_stub_attempt(run_dir)
                     findings = phase_1_research(topic, run_dir)
                     if findings:
                         print(f"  *** RETRY succeeded with fallback model: {fallback}")
