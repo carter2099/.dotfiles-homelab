@@ -1303,18 +1303,25 @@ def _candidate_fresh_date(candidate: dict) -> datetime | None:
     return _parse_date((candidate.get("date_published") or "").strip())
 
 
-def _is_fresh_eligible(candidate: dict, yesterday: date) -> bool:
+def _is_fresh_eligible(candidate: dict, yesterday: date, today: date | None = None) -> bool:
     """True when a candidate may legitimately appear under "Fresh — Last 24 Hours".
 
     A candidate with a parseable publication date is fresh-eligible only when
-    that date is within the last 24h (>= yesterday). A candidate with no
-    parseable date is kept, mirroring Phase 5's pass-through for undetermined
-    dates. This deterministic gate is the backstop against the editorial model
-    or critic placing ongoing-window stories under Fresh (digest-quality audit
-    2026-08-12).
+    that date is within the last 24h (>= yesterday) and not in the future
+    (<= today). A candidate with no parseable date is kept, mirroring Phase 5's
+    pass-through for undetermined dates. This deterministic gate is the
+    backstop against the editorial model or critic placing ongoing-window
+    stories under Fresh (digest-quality audit 2026-08-12) and against
+    future-dated candidates shipping under Fresh (digest-quality audit
+    2026-08-14: a 2026-10-15-dated story rendered under "Fresh — Last 24 Hours"
+    in the 2026-08-12 ai-tech digest).
     """
     fresh_date = _candidate_fresh_date(candidate)
-    return fresh_date is None or fresh_date.date() >= yesterday
+    if fresh_date is None:
+        return True
+    if today is None:
+        today = datetime.now(timezone.utc).date()
+    return yesterday <= fresh_date.date() <= today
 
 
 def _batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
@@ -2133,11 +2140,14 @@ def _validate_editorial_proposal(
             # candidate must never ship under "Fresh — Last 24 Hours", even
             # when the model selected it and the critic missed it (digest-quality
             # audit 2026-08-12: ai-hardware + agentic-platform shipped stale
-            # stories under Fresh). The candidate is treated as unselected, so
-            # it also gets no tracker add/update.
+            # stories under Fresh), and a future-dated candidate must not either
+            # (digest-quality audit 2026-08-14: a 2026-10-15-dated story shipped
+            # under Fresh). The candidate is treated as unselected, so it also
+            # gets no tracker add/update.
             stale_date = _candidate_fresh_date(source)
+            kind = "future-dated" if stale_date.date() > yesterday else "stale"
             warnings.append(
-                f"dropped stale fresh selection {candidate_id} "
+                f"dropped {kind} fresh selection {candidate_id} "
                 f"(best date {stale_date.date().isoformat()} is outside the 24h window)"
             )
             continue
@@ -2272,6 +2282,26 @@ def _validate_editorial_proposal(
     concentrated = sorted(domain for domain, count in domains.items() if domain and count > 2)
     if concentrated:
         warnings.append(f"source concentration above 2: {', '.join(concentrated)}")
+        # Enforce the cap: keep the two highest-ranked candidates per over-limit
+        # domain and drop the lower-ranked same-source selections, so a
+        # single-source Fresh section can no longer ship (digest-quality audit
+        # 2026-08-14: ai-tech shipped 5 TechCrunch stories, ai-hardware 4 Data
+        # Center Dynamics stories). `fresh` is already in rank order.
+        capped: list[dict] = []
+        per_domain: dict[str, int] = {}
+        for item in fresh:
+            source = candidate_by_id[item["candidate_id"]]
+            domain = source.get("source_domain") or urlsplit(source.get("url", "")).hostname or ""
+            if domain in concentrated:
+                if per_domain.get(domain, 0) >= 2:
+                    warnings.append(
+                        f"dropped fresh selection {item['candidate_id']} "
+                        f"(source concentration cap: max 2 per domain)"
+                    )
+                    continue
+                per_domain[domain] = per_domain.get(domain, 0) + 1
+            capped.append(item)
+        fresh = capped
     if (
         any(_is_fresh_eligible(candidate, yesterday) for candidate in candidates)
         and not fresh
@@ -2633,22 +2663,50 @@ def phase_6_curate(
     proposal_model = ""
     proposal_warnings: list[str] = []
     proposal_errors: list[str] = []
+    freshness_hint = ""
     for requested_model, effective_model in _model_attempts(MODEL, MODEL_FALLBACK):
         # Retry the primary once before falling back to a weaker model: a single
         # truncated/malformed response or transient transport error used to
         # degrade the whole editorial stage to the fallback model (digest-quality
         # audit 2026-08-11: world proposal fell back after one extraction error).
         attempts = 2 if effective_model == _effective_model(MODEL) else 1
-        for _ in range(attempts):
+        attempt = 0
+        while attempt < attempts:
+            attempt += 1
             try:
                 raw = _call_llm_proxy(
-                    system, user, model=requested_model, timeout=EDITORIAL_TIMEOUT
+                    system, user + freshness_hint, model=requested_model,
+                    timeout=EDITORIAL_TIMEOUT,
                 )
                 parsed = _extract_json(raw, f"editorial proposal ({effective_model})")
                 validated, warnings = _validate_editorial_proposal(
                     parsed, candidates, sif_candidates, stories_in_flight, blocked_urls
                 )
                 if fresh_eligible and not validated["selected_fresh"]:
+                    if not freshness_hint:
+                        # All fresh picks fell outside the last-24h window (or
+                        # none were selected) while fresh-eligible candidates
+                        # exist. Retry this model once with the freshness window
+                        # reinforced instead of failing straight through to raw
+                        # fallback (digest-quality audit 2026-08-14:
+                        # agentic-platform shipped deterministic raw fallback
+                        # with no critic review).
+                        freshness_hint = (
+                            "\n\n## Freshness window reminder\n"
+                            "Your previous proposal was rejected because it "
+                            "selected no valid fresh stories. \"Fresh — Last 24 "
+                            "Hours\" may only contain stories whose best "
+                            "publication date (date_confirmed, else "
+                            "date_published) is yesterday or today (UTC) — "
+                            "never older or future-dated. Fresh-eligible "
+                            "candidates exist in the supplied list; re-select "
+                            "5-7 fresh stories from them."
+                        )
+                        attempt -= 1
+                        raise ValueError(
+                            "model selected no valid fresh stories; retrying "
+                            "with reinforced freshness hint"
+                        )
                     raise ValueError("model selected no valid fresh stories")
                 proposal = validated
                 proposal_model = effective_model
@@ -2810,6 +2868,11 @@ def phase_6_curate(
     (run_dir / "06c-editorial-final.json").write_text(json.dumps({
         "proposal": final_proposal,
         "output": output,
+        # Final validation warnings (proposal + critic review) so the shipped
+        # selection's drops/caps are auditable from the final artifact
+        # (digest-quality audit 2026-08-14: 06c omitted the source-concentration
+        # warning entirely).
+        "validation_warnings": proposal_warnings + review_warnings,
     }, indent=2))
     output_path.write_text(json.dumps(output, indent=2))
     elapsed = time.time() - started

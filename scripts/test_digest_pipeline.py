@@ -323,6 +323,203 @@ def test_editorial_drops_stale_fresh_selection() -> None:
     )
 
 
+def test_freshness_gate_rejects_future_dates() -> None:
+    """The last-24h freshness window has an upper bound: a future-dated
+    candidate must never pass _is_fresh_eligible (digest-quality audit
+    2026-08-14: a 2026-10-15-dated story rendered under "Fresh — Last 24 Hours"
+    in the 2026-08-12 ai-tech digest)."""
+    yesterday = datetime(2026, 8, 13, tzinfo=timezone.utc).date()
+    today = datetime(2026, 8, 14, tzinfo=timezone.utc).date()
+    future = {"date_confirmed": "2026-10-15", "date_published": "2026-08-12"}
+    check(not digest._is_fresh_eligible(future, yesterday, today),
+          "future-dated candidate passed the freshness gate")
+    fresh = {"date_confirmed": "2026-08-13"}
+    check(digest._is_fresh_eligible(fresh, yesterday, today),
+          "yesterday-dated candidate must stay fresh-eligible")
+    same_day = {"date_confirmed": "2026-08-14"}
+    check(digest._is_fresh_eligible(same_day, yesterday, today),
+          "today-dated candidate must stay fresh-eligible")
+    stale = {"date_confirmed": "2026-08-10"}
+    check(not digest._is_fresh_eligible(stale, yesterday, today),
+          "stale candidate passed the freshness gate")
+    undated = {"date_confirmed": "", "date_published": ""}
+    check(digest._is_fresh_eligible(undated, yesterday, today),
+          "undated candidate must pass through")
+
+
+def test_editorial_caps_source_concentration() -> None:
+    """Fresh selection is capped at 2 stories per source domain: lower-ranked
+    same-source candidates are dropped with a warning instead of shipping a
+    single-source Fresh section (digest-quality audit 2026-08-14: ai-tech
+    shipped 5 TechCrunch stories, ai-hardware 4 Data Center Dynamics stories)."""
+    fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    candidates, _ = digest._prepare_editorial_candidates([
+        {
+            "title": f"TechCrunch story {index}",
+            "url": f"https://techcrunch.com/{index}",
+            "source_domain": "techcrunch.com",
+            "summary": f"Verified summary {index}.",
+            "category": "Research",
+            "importance": "high" if index == 0 else "medium",
+            "date_published": fresh_day,
+            "source_verdict": "fresh",
+            "judge_verdict": "keep",
+        }
+        for index in range(3)
+    ] + [
+        {
+            "title": "Other story",
+            "url": "https://other.example/story",
+            "source_domain": "other.example",
+            "summary": "Verified other summary.",
+            "category": "Policy",
+            "importance": "medium",
+            "date_published": fresh_day,
+            "source_verdict": "fresh",
+            "judge_verdict": "keep",
+        },
+    ], set())
+    proposal = {
+        "selected_fresh": [
+            {"candidate_id": candidate["candidate_id"]}
+            for candidate in candidates
+        ],
+        "selected_ongoing": [],
+        "story_state_proposals": [],
+        "gaps": "",
+        "balance_summary": "",
+    }
+    validated, warnings = digest._validate_editorial_proposal(
+        proposal, candidates, [], {"stories": []}
+    )
+    selected = validated["selected_fresh"]
+    domains = {
+        candidate["candidate_id"]: candidate["source_domain"]
+        for candidate in candidates
+    }
+    techcrunch_count = sum(
+        1 for item in selected if domains[item["candidate_id"]] == "techcrunch.com"
+    )
+    check(len(selected) == 3, f"expected 3 fresh after cap, got {len(selected)}")
+    check(techcrunch_count == 2, f"techcrunch count after cap: {techcrunch_count}")
+    check(any("source concentration above 2" in warning for warning in warnings),
+          warnings)
+    check(any("source concentration cap" in warning for warning in warnings),
+          warnings)
+
+
+def test_editorial_proposal_retries_with_freshness_hint() -> None:
+    """A model proposal whose fresh picks were all dropped by the freshness gate
+    is retried once with the window reinforced instead of dropping straight to
+    raw fallback (digest-quality audit 2026-08-14: agentic-platform shipped
+    deterministic raw fallback with no critic review)."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "agentic-platform" / "2026-08-14"
+        run_dir.mkdir(parents=True)
+        fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        stale_day = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
+
+        def build(title: str, url: str, day: str, importance: str) -> dict:
+            return {
+                "title": title,
+                "url": url,
+                "source_domain": "example.com",
+                "summary": f"{title} verified summary.",
+                "category": "Research",
+                "importance": importance,
+                "date_published": day,
+                "date_confirmed": day,
+                "date_tag": "fresh" if day == fresh_day else "ongoing",
+                "source_verdict": "fresh" if day == fresh_day else "ongoing",
+                "judge_verdict": "keep",
+            }
+
+        stale_a = build("Stale story A", "https://example.com/stale-a", stale_day, "high")
+        stale_b = build("Stale story B", "https://example.com/stale-b", stale_day, "medium")
+        fresh_c = build("Fresh story C", "https://example.com/fresh-c", fresh_day, "medium")
+        summaries = [stale_a, stale_b, fresh_c]
+        stale_a_id = digest._editorial_candidate_id(stale_a)
+        stale_b_id = digest._editorial_candidate_id(stale_b)
+        fresh_c_id = digest._editorial_candidate_id(fresh_c)
+
+        stale_only = {
+            "selected_fresh": [
+                {"candidate_id": stale_a_id},
+                {"candidate_id": stale_b_id},
+            ],
+            "selected_ongoing": [],
+            "story_state_proposals": [],
+            "gaps": "",
+            "balance_summary": "",
+        }
+        fresh_proposal = {
+            "selected_fresh": [{
+                "candidate_id": fresh_c_id,
+                "rank": 1,
+                "editorial_summary": "Reviewed factual summary.",
+                "selection_reason": "Only fresh-eligible candidate.",
+                "related_story_url": None,
+            }],
+            "selected_ongoing": [],
+            "story_state_proposals": [{
+                "operation": "add",
+                "candidate_id": fresh_c_id,
+                "evidence_candidate_ids": [fresh_c_id],
+                "latest_dev": "Reviewed factual summary.",
+                "importance": "high",
+                "status": "active",
+            }],
+            "rejected": [],
+            "gaps": "",
+            "balance_summary": "One fresh story.",
+        }
+        responses: list[object] = [
+            json.dumps(stale_only),
+            json.dumps(fresh_proposal),
+            json.dumps({"verdict": "approve", "changes": [], "notes": "Sound."}),
+        ]
+
+        def fake_call(*_: object, **__: object) -> str:
+            value = responses.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return str(value)
+
+        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
+            digest, "_call_llm_proxy", side_effect=fake_call
+        ):
+            fresh, _, ongoing = digest.phase_6_curate(
+                digest.TOPICS["agentic-platform"], summaries, [], {"stories": []}, run_dir
+            )
+        check(len(fresh) == 1, f"expected 1 fresh after hint retry, got {fresh}")
+        check(fresh[0]["url"] == "https://example.com/fresh-c", fresh)
+        check(not ongoing, ongoing)
+        check(not responses, f"unused model responses: {responses!r}")
+        proposal_artifact = json.loads(
+            (run_dir / "06a-editorial-proposal.json").read_text()
+        )
+        check(proposal_artifact["status"] == "model", proposal_artifact["status"])
+        check(len(proposal_artifact["errors"]) == 1, proposal_artifact["errors"])
+        check(
+            "reinforced freshness hint" in proposal_artifact["errors"][0],
+            proposal_artifact["errors"],
+        )
+        artifact = json.loads((run_dir / "06c-editorial-final.json").read_text())
+        check(
+            artifact["output"]["editorial"]["review_status"] == "reviewed",
+            artifact,
+        )
+        check(
+            artifact["output"]["editorial"]["proposal_model"] == digest.MODEL,
+            artifact,
+        )
+        check(
+            "validation_warnings" in artifact,
+            "06c must persist validation warnings for auditability",
+        )
+
+
 def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
     """A critic that removes the last stale fresh story must be honored, not
     converted to review=unavailable with the invalid placement retained
@@ -797,6 +994,9 @@ def main() -> None:
         test_editorial_validation_and_state_application,
         test_editorial_critic_patch_contract,
         test_editorial_drops_stale_fresh_selection,
+        test_freshness_gate_rejects_future_dates,
+        test_editorial_caps_source_concentration,
+        test_editorial_proposal_retries_with_freshness_hint,
         test_critic_fresh_removal_honored_when_all_candidates_stale,
         test_critic_emptying_valid_fresh_still_fails_closed,
         test_phase_six_fallback_and_review_chain,
