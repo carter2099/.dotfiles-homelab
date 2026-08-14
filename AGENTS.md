@@ -205,11 +205,12 @@ They're quick context dumps for cross-session continuity. Formal reference notes
 ## Gaming Rig (Windows 11)
 
 Windows 11 gaming PC at `192.168.4.103` (`ssh gamingrig`); hosts the local LLM stack
-(llama-swap + llama.cpp b10430). Twenty-eight GGUFs are on disk and seven models are
-registered. Nemotron 3.5 Lightning NVFP4/Q4_K_M/Q8_0 remains unregistered after its
-frozen candidate failed the sealed quality holdout. Qwen 3.8 27B UD-IQ2_XXS remains
-unregistered because its frozen development candidate failed the 90% performance-
-retention gate. Runbook: [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
+(llama-swap + llama.cpp b10430). Twenty-eight GGUFs are on disk and eight models are
+registered. Qwen 3.8 27B UD-IQ2_XXS is enabled as the user-requested
+`qwen-3.8-27b-iq2` trial despite missing its research performance-retention gate.
+Nemotron 3.5 Lightning NVFP4/Q4_K_M/Q8_0 remains unregistered after its frozen
+candidate failed the sealed quality holdout. Runbook:
+[`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
 The rig is mostly accessed via the local llm proxy running on this homelab.
 

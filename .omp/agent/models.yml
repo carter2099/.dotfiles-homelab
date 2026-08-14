@@ -30,6 +30,10 @@ providers:
         name: qwen-3.5-4b-q8
         reasoning: true
         contextWindow: 262144
+      - id: qwen-3.8-27b-iq2
+        name: qwen-3.8-27b-iq2
+        reasoning: true
+        contextWindow: 150000
       - id: qwen-3.6-35b-q8
         name: qwen-3.6-35b-q8
         reasoning: true
