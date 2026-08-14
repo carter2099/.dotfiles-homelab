@@ -115,7 +115,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **FreshRSS** (RSS reader, k3s Deployment, freshrss.carter2099.com) → [`k3s.md`](notes/docs/homelab/k3s.md) (covered as third-party k3s service)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
 - **OpenCode Go Proxy** (0.0.0.0:8082, UFW-gated to Docker bridges) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
-- **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges; seven reasoning-enabled local entries) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
+- **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges; eight reasoning-enabled local entries) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
 - **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 
 ## Email Digests
