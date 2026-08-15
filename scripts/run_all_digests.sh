@@ -80,3 +80,73 @@ for topic in "${TOPICS[@]}"; do
 done
 
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ALL DONE" | tee -a "$LOGFILE" || true
+
+# ── Consecutive editorial-degradation alert ──
+# digest-quality audit 2026-08-15: recurring luna-primary instability
+# (08-12: 3 topics mimo; 08-14: ai-hardware mimo + agentic raw fallback;
+# 08-15: 4 of 5 topics mimo) degraded topics to the fallback model on
+# multiple days, silently from Carter's perspective. Alert when
+# "editorial degraded" WARNs appear on two consecutive days so the
+# upstream primary path gets investigated instead of compounding.
+TODAY="$(date -u +%Y-%m-%d)"
+YESTERDAY="$(date -u -d yesterday +%Y-%m-%d)"
+WARN_DAYS="$(grep 'editorial degraded' "$LOGFILE" 2>/dev/null | cut -c1-10 | sort -u || true)"
+if printf '%s\n' "$WARN_DAYS" | grep -qx "$YESTERDAY" && \
+   printf '%s\n' "$WARN_DAYS" | grep -qx "$TODAY" && \
+   ! grep -q "^${TODAY}T.*WARN-ALERT" "$LOGFILE" 2>/dev/null; then
+    ALERT_BODY="/tmp/digests-degraded-alert.html"
+    DETAIL="$(grep 'editorial degraded' "$LOGFILE" 2>/dev/null | grep -E "^(${YESTERDAY}|${TODAY})" | sed 's/^/  /' || true)"
+    cat > "$ALERT_BODY" <<HTMLEOF
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0; padding:0; background-color:#f4f4f7; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+<table role="presentation" width="100%" style="background-color:#f4f4f7; padding:24px 0;">
+<tr><td align="center">
+<table role="presentation" width="600" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+<tr>
+  <td style="background-color:#ef6c00; padding:28px 32px;">
+    <h1 style="margin:0; color:#ffffff; font-size:22px; font-weight:600;">Digest editorial degradation on consecutive days</h1>
+    <p style="margin:6px 0 0; color:#ffe0b2; font-size:14px;">${YESTERDAY} and ${TODAY}</p>
+  </td>
+</tr>
+<tr>
+  <td style="padding:24px 32px 16px;">
+    <p style="margin:0; color:#444; font-size:15px; line-height:1.6;">
+      The daily digest pipeline fell back to a weaker editorial model on two consecutive days.
+      This recurring pattern (also seen 08-12 and 08-14) points to instability in the luna
+      primary path (opencode.ai upstream). Investigate on the host:
+    </p>
+    <pre style="margin:12px 0 0; padding:12px; background:#f5f5f5; border-radius:4px; font-size:13px; color:#333;">journalctl --user -u opencode-go-proxy.service -b --no-pager | grep -c 'free-tier 429'
+grep 'editorial degraded' ~/digests/.digests.log | tail -20</pre>
+  </td>
+</tr>
+<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+<tr>
+  <td style="padding:16px 32px 8px;">
+    <h2 style="margin:0; color:#1a1a2e; font-size:15px; font-weight:700;">Degraded topics</h2>
+  </td>
+</tr>
+<tr>
+  <td style="padding:8px 32px 24px;">
+    <pre style="margin:0; padding:12px; background:#fafafa; border:1px solid #e8e8ee; border-radius:4px; font-size:12px; line-height:1.5; color:#555; white-space:pre-wrap; word-break:break-all;">${DETAIL}</pre>
+  </td>
+</tr>
+<tr>
+  <td style="padding:24px 32px; background-color:#f8f8fb; border-top:1px solid #e8e8ee;">
+    <p style="margin:0; color:#999; font-size:12px; text-align:center;">carter2099.com · ${TODAY}</p>
+  </td>
+</tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>
+HTMLEOF
+    python3 "$HOME/scripts/send_digest.py" \
+        --subject "digests: editorial degraded on consecutive days (${YESTERDAY}, ${TODAY})" \
+        --body-file "$ALERT_BODY" \
+        --to "carter2099@pm.me" || echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARN-ALERT email send failed" | tee -a "$LOGFILE" || true
+    rm -f "$ALERT_BODY"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARN-ALERT editorial degraded on consecutive days (${YESTERDAY}, ${TODAY}); alert emailed" | tee -a "$LOGFILE" || true
+fi
