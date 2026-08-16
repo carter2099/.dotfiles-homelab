@@ -32,8 +32,8 @@ Use `notes/` as a knowledge base. You will see this referenced throughout this A
 
 Home directory managed as a bare git repo for dotfiles. Key dirs:
 - `blog/` — Rails 8 deploy wrapper (app nested within)
-- `beats/` — public beat archive deployment checkout
-- `beats-selected/` — read-only audio library mounted by the beats service (not Git-tracked)
+- `beatz/` — public beat archive deployment checkout
+- `beatz-selected/` — read-only audio, starter-selection, and artwork library mounted by the beatz service (not Git-tracked)
 - `homelab-backup/` — Go backup service
 - `k3s/` — Kubernetes manifests
 - `dev/` — Scratch space for cloned repos, tests, development
@@ -108,7 +108,7 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 Each app has a reference doc in `~/notes/docs/homelab/`:
 
 - **Blog** (Rails 8, port 33099) → [`blog.md`](notes/docs/homelab/blog.md)
-- **Beats** (public Go music player, localhost:30142; no Cloudflare Access; artwork drop: `~/beats-selected/artwork/`) → [`beats.md`](notes/docs/homelab/beats.md)
+- **Beatz** (public Go music player branded “Beats” in-app, localhost:30142; no Cloudflare Access; media: `~/beatz-selected/`) → [`beatz.md`](notes/docs/homelab/beatz.md)
 - **Hyperliquid SDK maintenance** (automated dependency maintenance; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
 - **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
@@ -236,7 +236,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, work queue, executor, budget guard, debugging
 - [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 22-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 - [`blog.md`](notes/docs/homelab/blog.md) — Rails 8 blog app
-- [`beats.md`](notes/docs/homelab/beats.md) — public beat archive player, media library, deploy/runbook
+- [`beatz.md`](notes/docs/homelab/beatz.md) — public beat archive player, starter/artwork pools, media library, deploy/runbook
 - [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md) — automated Hyperliquid SDK maintenance
 - [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md) — Go webhook + Prompt-Guard classifier
 - [`open-webui.md`](notes/docs/homelab/open-webui.md) — chat frontend, native SearXNG, Weather v2
