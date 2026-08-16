@@ -108,7 +108,7 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 Each app has a reference doc in `~/notes/docs/homelab/`:
 
 - **Blog** (Rails 8, port 33099) → [`blog.md`](notes/docs/homelab/blog.md)
-- **Beats** (public Go music player, localhost:30142; no Cloudflare Access) → [`beats.md`](notes/docs/homelab/beats.md)
+- **Beats** (public Go music player, localhost:30142; no Cloudflare Access; artwork drop: `~/beats-selected/artwork/`) → [`beats.md`](notes/docs/homelab/beats.md)
 - **Hyperliquid SDK maintenance** (automated dependency maintenance; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
 - **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
