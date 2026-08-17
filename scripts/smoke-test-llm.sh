@@ -1,305 +1,164 @@
 #!/bin/bash
-# Smoke test for local LLM (Qwen 3.6 35B Q8 via llm-proxy → gaming rig)
-# Measures: content production, TPS, context recall, memory/VRAM
-# Usage: bash ~/scripts/smoke-test-llm.sh [model_id]
-#
-# Tests:
-#   1. Thinking model — simple Q&A (verify content + TPS)
-#   2. No-thinking model — simple Q&A (verify content + TPS)
-#   3. Context window benchmark — 20K file (no-thinking model)
-#   4. Memory usage
-
+# Behavioral and throughput smoke test for Linux llama-swap through llm-proxy.
+# Usage: smoke-test-llm.sh [primary_model] [secondary_model] [context_file]
 set -euo pipefail
 
-MODEL_THINK="${1:-qwen-3.6-35b-q8}"
-MODEL_NOTHINK="${2:-qwen-3.6-35b-q8-fast}"
-ENDPOINT="http://localhost:8081/v1/chat/completions"
-TIMEOUT=300
-BENCHMARK_FILE="${3:-$HOME/benchmarks/context-window/context_20_000.md}"
+PRIMARY_MODEL="${1:-qwen-3.8-27b-iq2}"
+SECONDARY_MODEL="${2:-ornith-1.0-9b-q6}"
+CONTEXT_FILE="${3:-$HOME/benchmarks/context-window/context_20_000.md}"
+ENDPOINT="http://127.0.0.1:8081/v1/chat/completions"
+HEALTH_ENDPOINT="http://127.0.0.1:8081/health"
+TIMEOUT=900
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-pass_count=0; fail_count=0
-pass() { echo -e "${GREEN}[PASS]${NC} $1"; pass_count=$((pass_count + 1)); }
-fail() { echo -e "${RED}[FAIL]${NC} $1"; fail_count=$((fail_count + 1)); }
-info() { echo -e "${CYAN}[INFO]${NC} $1"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+passes=0
+failures=0
+pass() { printf '[PASS] %s\n' "$1"; passes=$((passes + 1)); }
+fail() { printf '[FAIL] %s\n' "$1"; failures=$((failures + 1)); }
+info() { printf '[INFO] %s\n' "$1"; }
 
-echo "============================================"
-echo "  LLM Smoke Test"
-echo "  Thinking:  $MODEL_THINK"
-echo "  No-think:  $MODEL_NOTHINK"
-echo "  $(date '+%Y-%m-%d %H:%M:%S')"
-echo "============================================"
-echo ""
+printf 'Local LLM smoke test\n'
+printf 'Primary:   %s\n' "$PRIMARY_MODEL"
+printf 'Secondary: %s\n' "$SECONDARY_MODEL"
+printf 'Started:   %s\n\n' "$(date --iso-8601=seconds)"
 
-# ── Helper: run a single API call and return metrics ──────────────
-run_test() {
-    local model="$1" prompt="$2" max_tok="${3:-4096}" temp="${4:-0.3}"
-    
-    START=$(date +%s.%N)
-    RESPONSE=$(curl -s --max-time "$TIMEOUT" "$ENDPOINT" \
-      -H "Content-Type: application/json" \
-      -d "$(python3 -c "
-import json, sys
-print(json.dumps({
-    'model': '$model',
-    'messages': [{'role': 'user', 'content': sys.argv[1]}],
-    'max_tokens': $max_tok,
-    'temperature': $temp,
-    'stream': False
-}))
-" "$prompt")" 2>&1)
-    END=$(date +%s.%N)
-    ELAPSED=$(echo "$END - $START" | bc)
-    
-    python3 -c "
-import json, sys
-d = json.loads(sys.argv[1])
-msg = d.get('choices', [{}])[0].get('message', {})
-content = msg.get('content', '') or ''
-reasoning = msg.get('reasoning_content', '') or ''
-usage = d.get('usage', {})
-finish = d.get('choices', [{}])[0].get('finish_reason', '?')
-print(f'COMPLETION_TOKENS={usage.get(\"completion_tokens\", \"?\")}')
-print(f'PROMPT_TOKENS={usage.get(\"prompt_tokens\", \"?\")}')
-print(f'CONTENT_LEN={len(content)}')
-print(f'REASONING_LEN={len(reasoning)}')
-print(f'FINISH_REASON={finish}')
-print(f'CONTENT={content[:300]}')
-print(f'REASONING_TAIL={reasoning[-200:]}')
-" "$RESPONSE" 2>&1
-    echo "ELAPSED=${ELAPSED}"
+health_json="$(curl --fail --silent --show-error --max-time 10 "$HEALTH_ENDPOINT")"
+if HEALTH_JSON="$health_json" python3 - <<'PY'
+import json, os, sys
+health = json.loads(os.environ["HEALTH_JSON"])
+print(f"state={health.get('status')} os={health.get('rig_os')} backend={health.get('backend')}")
+sys.exit(0 if health.get("status") == "healthy" and health.get("rig_os") == "linux" else 1)
+PY
+then
+  pass "Proxy reports a healthy Linux backend"
+else
+  fail "Proxy is not serving from Linux"
+  exit 1
+fi
+
+models_json="$(curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8081/v1/models)"
+if MODELS_JSON="$models_json" PRIMARY_MODEL="$PRIMARY_MODEL" SECONDARY_MODEL="$SECONDARY_MODEL" python3 - <<'PY'
+import json, os, sys
+ids = {item["id"] for item in json.loads(os.environ["MODELS_JSON"]).get("data", [])}
+required = {os.environ["PRIMARY_MODEL"], os.environ["SECONDARY_MODEL"]}
+missing = sorted(required - ids)
+if missing:
+    print("missing=" + ",".join(missing))
+    sys.exit(1)
+print("registered=" + ",".join(sorted(required)))
+PY
+then
+  pass "Requested models are registered"
+else
+  fail "Requested model is absent from /v1/models"
+  exit 1
+fi
+
+info "Linux memory before probes"
+ssh -o BatchMode=yes gamingrig-linux 'free -h | sed -n "1,2p"; nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader' || true
+
+run_probe() {
+  local label="$1" model="$2" prompt="$3" marker="$4"
+  local stem="$WORKDIR/${label// /-}"
+  MODEL="$model" PROMPT="$prompt" python3 - "$stem.payload" <<'PY'
+import json, os, sys
+with open(sys.argv[1], "w") as handle:
+    json.dump({
+        "model": os.environ["MODEL"],
+        "messages": [{"role": "user", "content": os.environ["PROMPT"]}],
+        "max_tokens": 2048,
+        "stream": False,
+    }, handle)
+PY
+
+  info "$label: requesting $model"
+  if ! elapsed="$(curl --fail-with-body --silent --show-error --max-time "$TIMEOUT" \
+      -D "$stem.headers" -o "$stem.response" -w '%{time_total}' \
+      -H 'Content-Type: application/json' --data-binary "@$stem.payload" "$ENDPOINT")"; then
+    fail "$label HTTP request"
+    cat "$stem.response" 2>/dev/null || true
+    return
+  fi
+
+  if python3 - "$stem.response" "$stem.headers" "$marker" "$elapsed" <<'PY'
+import json, pathlib, sys
+response_path, headers_path, marker, elapsed = sys.argv[1:]
+headers = pathlib.Path(headers_path).read_text(errors="replace").lower()
+if "x-fallback: true" in headers:
+    print("unexpected cloud fallback")
+    sys.exit(1)
+body = json.loads(pathlib.Path(response_path).read_text())
+choice = body.get("choices", [{}])[0]
+message = choice.get("message", {})
+content = message.get("content") or ""
+reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+usage = body.get("usage", {})
+timings = body.get("timings", {})
+print(f"content={content.strip()}")
+print(f"elapsed_seconds={float(elapsed):.3f}")
+print(f"prompt_tokens={usage.get('prompt_tokens', '?')}")
+print(f"completion_tokens={usage.get('completion_tokens', '?')}")
+print(f"generation_tokens_per_second={timings.get('predicted_per_second', '?')}")
+print(f"reasoning_characters={len(reasoning)} finish_reason={choice.get('finish_reason', '?')}")
+sys.exit(0 if marker in content and choice.get("finish_reason") == "stop" else 1)
+PY
+  then
+    pass "$label behavioral response"
+  else
+    fail "$label behavioral response"
+  fi
 }
 
-# ── Pre-test: health check ────────────────────────────────────────
-info "Checking llm-proxy health..."
-HEALTH=$(curl -s --max-time 10 "http://localhost:8081/health" 2>&1 || echo "FAIL")
-if echo "$HEALTH" | grep -q '"status":"healthy"'; then
-    pass "llm-proxy reachable"
-elif echo "$HEALTH" | grep -qi "loading\|unavailable"; then
-    warn "llm-proxy reports model loading — waiting up to 60s..."
-    for i in $(seq 1 12); do
-        sleep 5
-        HEALTH=$(curl -s --max-time 10 "http://localhost:8081/health" 2>&1 || echo "FAIL")
-        if echo "$HEALTH" | grep -q '"status":"healthy"'; then
-            pass "llm-proxy ready after ${i}x5s wait"; break
-        fi
-        [ "$i" -eq 12 ] && { fail "llm-proxy not ready after 60s"; exit 1; }
-    done
+run_probe "primary" "$PRIMARY_MODEL" \
+  "What is 17 multiplied by 19? End your final answer with exactly PRIMARY_MODEL_OK_323 on its own line." \
+  "PRIMARY_MODEL_OK_323"
+run_probe "secondary" "$SECONDARY_MODEL" \
+  "A service retries after 2, 4, and 8 seconds. What is the total delay? End with exactly SECONDARY_MODEL_OK_14 on its own line." \
+  "SECONDARY_MODEL_OK_14"
+
+if [[ -f "$CONTEXT_FILE" ]]; then
+  info "context recall: $(basename "$CONTEXT_FILE") ($(wc -c < "$CONTEXT_FILE") bytes)"
+  MODEL="$SECONDARY_MODEL" CONTEXT_FILE="$CONTEXT_FILE" python3 - "$WORKDIR/context.payload" <<'PY'
+import json, os, pathlib, sys
+content = pathlib.Path(os.environ["CONTEXT_FILE"]).read_text()
+with open(sys.argv[1], "w") as handle:
+    json.dump({
+        "model": os.environ["MODEL"],
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 2048,
+        "stream": False,
+    }, handle)
+PY
+  if context_elapsed="$(curl --fail-with-body --silent --show-error --max-time "$TIMEOUT" \
+      -D "$WORKDIR/context.headers" -o "$WORKDIR/context.response" -w '%{time_total}' \
+      -H 'Content-Type: application/json' --data-binary "@$WORKDIR/context.payload" "$ENDPOINT")" && \
+      python3 - "$WORKDIR/context.response" "$WORKDIR/context.headers" "$context_elapsed" <<'PY'
+import json, pathlib, sys
+response_path, headers_path, elapsed = sys.argv[1:]
+if "x-fallback: true" in pathlib.Path(headers_path).read_text(errors="replace").lower():
+    print("unexpected cloud fallback")
+    sys.exit(1)
+body = json.loads(pathlib.Path(response_path).read_text())
+choice = body.get("choices", [{}])[0]
+content = choice.get("message", {}).get("content") or ""
+checks = ["Portland", "age 7", "Dune", "2019", "Daily Grind", "Maple", "March 14", "2 years", "Thai green curry", "Queenstown"]
+score = sum(item.lower() in content.lower() for item in checks)
+usage = body.get("usage", {})
+print(f"elapsed_seconds={float(elapsed):.3f} prompt_tokens={usage.get('prompt_tokens', '?')} recall={score}/10 finish_reason={choice.get('finish_reason', '?')}")
+sys.exit(0 if score >= 8 and choice.get("finish_reason") == "stop" else 1)
+PY
+  then
+    pass "Context recall at least 8/10"
+  else
+    fail "Context recall benchmark"
+  fi
 else
-    fail "llm-proxy health check failed: $HEALTH"; exit 1
+  info "Context file absent; skipped: $CONTEXT_FILE"
 fi
 
-# ── Pre-test: memory snapshot ─────────────────────────────────────
-info ""
-info "── Pre-test Memory ──"
-MEM_BEFORE=$(ssh gamingrig 'wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /value' 2>&1 | grep -v '^$' | tr '\r' ' ')
-VRAM_BEFORE=$(ssh gamingrig 'powershell -Command "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"' 2>&1 | tr '\r' ' ')
-echo "  RAM: $MEM_BEFORE"
-echo "  VRAM: $VRAM_BEFORE MB (used,total)"
+info "Linux memory after probes"
+ssh -o BatchMode=yes gamingrig-linux 'free -h | sed -n "1,2p"; nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader' || true
 
-# ── Test 1: Thinking model — simple Q&A ───────────────────────────
-info ""
-info "═══════════════════════════════════════════"
-info "  Test 1: Thinking model — simple Q&A"
-info "═══════════════════════════════════════════"
-
-RESULT1=$(run_test "$MODEL_THINK" "What is the capital of France? Reply in one sentence." 4096 0.3)
-echo "$RESULT1" | grep -E "^(COMPLETION|PROMPT|CONTENT_LEN|REASONING_LEN|FINISH|CONTENT=|ELAPSED)" | while read line; do info "  $line"; done
-
-C_TOK1=$(echo "$RESULT1" | grep "^COMPLETION_TOKENS=" | cut -d= -f2)
-C_LEN1=$(echo "$RESULT1" | grep "^CONTENT_LEN=" | cut -d= -f2)
-R_LEN1=$(echo "$RESULT1" | grep "^REASONING_LEN=" | cut -d= -f2)
-FINISH1=$(echo "$RESULT1" | grep "^FINISH_REASON=" | cut -d= -f2)
-ELAPSED1=$(echo "$RESULT1" | grep "^ELAPSED=" | cut -d= -f2)
-
-if [ "$C_LEN1" -gt 0 ] 2>/dev/null; then
-    pass "Content produced (${C_LEN1} chars)"
-else
-    fail "No content produced — thinking model failed to generate answer"
-fi
-
-if [ "$FINISH1" = "stop" ]; then
-    pass "Natural stop (not truncated)"
-elif [ "$FINISH1" = "length" ]; then
-    fail "Truncated (finish_reason=length) — increase max_tokens"
-fi
-
-if [ -n "$C_TOK1" ] && [ "$C_TOK1" != "?" ] && [ -n "$ELAPSED1" ]; then
-    TPS1=$(echo "scale=1; $C_TOK1 / $ELAPSED1" | bc)
-    info "  TPS: ${TPS1} tok/s, Reasoning: ${R_LEN1:-0} chars"
-    if [ "$(echo "$TPS1 >= 5" | bc -l)" -eq 1 ] 2>/dev/null; then
-        pass "TPS >= 5 (${TPS1})"
-    else
-        warn "TPS low: ${TPS1} (threshold: 5)"
-    fi
-fi
-
-# ── Test 2: No-thinking model — simple Q&A ────────────────────────
-info ""
-info "═══════════════════════════════════════════"
-info "  Test 2: No-thinking model — simple Q&A"
-info "═══════════════════════════════════════════"
-
-# Trigger model swap (kill current, let no-think model load)
-info "Switching to no-thinking model (this may take ~60s for model swap)..."
-ssh gamingrig 'taskkill /f /im llama-server.exe' 2>&1 | grep -v "^$" || true
-sleep 3
-
-RESULT2=$(run_test "$MODEL_NOTHINK" "What is the capital of France? Reply in one sentence." 4096 0.3)
-echo "$RESULT2" | grep -E "^(COMPLETION|PROMPT|CONTENT_LEN|REASONING_LEN|FINISH|CONTENT=|ELAPSED)" | while read line; do info "  $line"; done
-
-C_TOK2=$(echo "$RESULT2" | grep "^COMPLETION_TOKENS=" | cut -d= -f2)
-C_LEN2=$(echo "$RESULT2" | grep "^CONTENT_LEN=" | cut -d= -f2)
-R_LEN2=$(echo "$RESULT2" | grep "^REASONING_LEN=" | cut -d= -f2)
-FINISH2=$(echo "$RESULT2" | grep "^FINISH_REASON=" | cut -d= -f2)
-ELAPSED2=$(echo "$RESULT2" | grep "^ELAPSED=" | cut -d= -f2)
-
-if [ "$C_LEN2" -gt 0 ] 2>/dev/null; then
-    pass "Content produced (${C_LEN2} chars)"
-else
-    fail "No content produced"
-fi
-
-if [ -n "$R_LEN2" ] && [ "$R_LEN2" != "0" ] 2>/dev/null; then
-    warn "No-thinking model still produced reasoning (${R_LEN2} chars) — --reasoning off may not be working"
-fi
-
-if [ "$FINISH2" = "stop" ]; then
-    pass "Natural stop"
-fi
-
-if [ -n "$C_TOK2" ] && [ "$C_TOK2" != "?" ] && [ -n "$ELAPSED2" ]; then
-    TPS2=$(echo "scale=1; $C_TOK2 / $ELAPSED2" | bc)
-    info "  TPS: ${TPS2} tok/s, Reasoning: ${R_LEN2:-0} chars"
-    if [ "$(echo "$TPS2 >= 5" | bc -l)" -eq 1 ] 2>/dev/null; then
-        pass "TPS >= 5 (${TPS2})"
-    else
-        warn "TPS low: ${TPS2}"
-    fi
-fi
-
-# Compare thinking vs no-thinking token efficiency
-if [ -n "$C_TOK1" ] && [ -n "$C_TOK2" ] && [ "$C_TOK1" != "?" ] && [ "$C_TOK2" != "?" ]; then
-    SAVINGS=$(echo "scale=0; 100 - ($C_TOK2 * 100 / $C_TOK1)" | bc 2>/dev/null || echo "?")
-    info "  Token savings vs thinking model: ~${SAVINGS}%"
-fi
-
-# ── Test 3: Context window benchmark ──────────────────────────────
-info ""
-info "═══════════════════════════════════════════"
-info "  Test 3: Context window — $(basename $BENCHMARK_FILE)"
-info "  (using no-thinking model)"
-info "═══════════════════════════════════════════"
-
-if [ ! -f "$BENCHMARK_FILE" ]; then
-    warn "Benchmark file not found: $BENCHMARK_FILE — skipping"
-else
-    BENCH_CONTENT=$(cat "$BENCHMARK_FILE")
-    FILE_KB=$(echo "scale=0; $(wc -c < "$BENCHMARK_FILE") / 1024" | bc)
-    info "File size: ${FILE_KB} KB"
-    
-    START3=$(date +%s.%N)
-    RESPONSE3=$(curl -s --max-time "$TIMEOUT" "$ENDPOINT" \
-      -H "Content-Type: application/json" \
-      -d "$(python3 -c "
-import json, sys
-print(json.dumps({
-    'model': '$MODEL_NOTHINK',
-    'messages': [{'role': 'user', 'content': sys.stdin.read()}],
-    'max_tokens': 2048,
-    'temperature': 0.1,
-    'stream': False
-}))
-" <<< "$BENCH_CONTENT")" 2>&1)
-    END3=$(date +%s.%N)
-    ELAPSED3=$(echo "$END3 - $START3" | bc)
-    
-    RESULT3=$(python3 -c "
-import json, sys
-d = json.loads(sys.argv[1])
-msg = d.get('choices', [{}])[0].get('message', {})
-content = msg.get('content', '') or ''
-usage = d.get('usage', {})
-finish = d.get('choices', [{}])[0].get('finish_reason', '?')
-print(f'COMPLETION_TOKENS={usage.get(\"completion_tokens\", \"?\")}')
-print(f'PROMPT_TOKENS={usage.get(\"prompt_tokens\", \"?\")}')
-print(f'FINISH_REASON={finish}')
-print('---ANSWER---')
-print(content)
-print('---END---')
-" "$RESPONSE3" 2>&1)
-    
-    C_TOK3=$(echo "$RESULT3" | grep "^COMPLETION_TOKENS=" | cut -d= -f2)
-    P_TOK3=$(echo "$RESULT3" | grep "^PROMPT_TOKENS=" | cut -d= -f2)
-    FINISH3=$(echo "$RESULT3" | grep "^FINISH_REASON=" | cut -d= -f2)
-    ANSWER=$(echo "$RESULT3" | sed -n '/^---ANSWER---$/,/^---END---$/p' | sed '1d;$d')
-    
-    # Score: keyword match against expected answers
-    SCORE=0
-    for check in "Portland" "age 7" "Dune" "2019" "Daily Grind" "Maple" "March 14" "2 years" "Thai green curry" "Queenstown"; do
-        if echo "$ANSWER" | grep -qi "$check"; then
-            SCORE=$((SCORE + 1))
-        fi
-    done
-    
-    if [ -n "$C_TOK3" ] && [ "$C_TOK3" != "?" ]; then
-        TPS3=$(echo "scale=1; $C_TOK3 / $ELAPSED3" | bc)
-        info "  ${C_TOK3} comp tokens / ${P_TOK3} prompt tokens in ${ELAPSED3}s = ${TPS3} tok/s"
-        info "  Context recall: ${SCORE}/10 correct, Finish: ${FINISH3}"
-        
-        if [ "$SCORE" -ge 8 ]; then
-            pass "Context recall >= 8/10 (${SCORE}/10)"
-        elif [ "$SCORE" -ge 5 ]; then
-            warn "Context recall moderate: ${SCORE}/10"
-        else
-            fail "Context recall poor: ${SCORE}/10"
-        fi
-        
-        if [ "$FINISH3" = "stop" ]; then
-            pass "Natural stop on benchmark"
-        elif [ "$FINISH3" = "length" ]; then
-            warn "Hit max_tokens on benchmark — answers may be truncated"
-        fi
-    else
-        fail "No completion tokens in benchmark"
-    fi
-fi
-
-# ── Post-test: memory ─────────────────────────────────────────────
-info ""
-info "── Post-test Memory ──"
-MEM_AFTER=$(ssh gamingrig 'wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /value' 2>&1 | grep -v '^$' | tr '\r' ' ')
-VRAM_AFTER=$(ssh gamingrig 'powershell -Command "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"' 2>&1 | tr '\r' ' ')
-echo "  RAM: $MEM_AFTER"
-echo "  VRAM: $VRAM_AFTER MB (used,total)"
-
-BEFORE_FREE=$(echo "$MEM_BEFORE" | grep -oP 'FreePhysicalMemory=\K[0-9]+' || echo "0")
-AFTER_FREE=$(echo "$MEM_AFTER" | grep -oP 'FreePhysicalMemory=\K[0-9]+' || echo "0")
-if [ "$BEFORE_FREE" != "0" ] && [ "$AFTER_FREE" != "0" ]; then
-    AFTER_GB=$(echo "scale=1; $AFTER_FREE / 1024 / 1024" | bc)
-    info "Free RAM: ${AFTER_GB} GB"
-    if [ "$(echo "$AFTER_GB < 2" | bc -l)" -eq 1 ] 2>/dev/null; then
-        fail "Less than 2 GB free RAM — OOM risk"
-    else
-        pass "RAM headroom OK (${AFTER_GB} GB free)"
-    fi
-fi
-
-# ── Summary ───────────────────────────────────────────────────────
-echo ""
-echo "============================================"
-echo "  Results: ${pass_count} passed, ${fail_count} failed"
-echo "============================================"
-
-if [ "$fail_count" -eq 0 ]; then
-    echo -e "${GREEN}  TIER 1 PASSED ✓${NC}"
-    echo ""
-    echo "  Next: Tier 2 — world digest with Qwen 3.6 35B Q8"
-    exit 0
-else
-    echo -e "${RED}  TIER 1 FAILED ✗${NC}"
-    echo ""
-    echo "  Fix failures above before Tier 2."
-    exit 1
-fi
+printf '\nResults: %d passed, %d failed\n' "$passes" "$failures"
+[[ "$failures" -eq 0 ]]

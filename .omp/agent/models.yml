@@ -18,26 +18,14 @@ providers:
       supportsDeveloperRole: false
       supportsReasoningEffort: false
     models:
-      - id: agents-a1-4b-q8
-        name: agents-a1-4b-q8
-        reasoning: true
-        contextWindow: 262144
       - id: ornith-1.0-35b-q8
         name: ornith-1.0-35b-q8
-        reasoning: true
-        contextWindow: 262144
-      - id: qwen-3.5-4b-q8
-        name: qwen-3.5-4b-q8
         reasoning: true
         contextWindow: 262144
       - id: qwen-3.8-27b-iq2
         name: qwen-3.8-27b-iq2
         reasoning: true
         contextWindow: 150000
-      - id: qwen-3.6-35b-q8
-        name: qwen-3.6-35b-q8
-        reasoning: true
-        contextWindow: 262144
       - id: ornith-1.0-9b-q6
         name: ornith-1.0-9b-q6
         reasoning: true

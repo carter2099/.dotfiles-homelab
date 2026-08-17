@@ -212,13 +212,16 @@ intended always-on AI OS; Windows 11 remains on the 2 TB NVMe for one-shot gamin
 Use `ssh gamingrig-linux` (or `ssh gamingrig`) for Ubuntu and `ssh gamingrig-windows` for
 Windows. Both aliases pin distinct host keys for the shared IP.
 
-Migration is in progress: the Ubuntu base, SSH access, temporary setup sudo, and one-shot
-Windows→Ubuntu boot path are verified, but NVIDIA, llama.cpp, llama-swap, retained model
-files, proxy adaptation, and `rig.carter2099.com` dashboard are not configured. The
-Windows `C:\llm\` stack remains intact until five retained Linux models pass behavioral
-requests. Firmware keeps restoring Windows first in `BootOrder`, so the final controller
-must re-arm Ubuntu `BootNext` from both operating systems rather than relying on persistent
-boot order. Runbook and autonomous setup checklist:
+Linux-primary migration completed 2026-08-17: signed NVIDIA 595.71.05 + CUDA 13.2,
+llama.cpp b10453, and llama-swap v250 serve five retained IDs continuously under systemd:
+Qwen 3.8 27B IQ2, Ornith 35B Q8, Ornith 9B Q6, Gemma 4 12B Q6, and Gemma 4 26B Q8.
+All five passed Linux behavioral serving checks. The proxy reports explicit Linux/Windows/
+offline state and keeps cloud fallback; the loopback dashboard at `127.0.0.1:30143`
+behaviorally passed Linux→Windows and sleeping-Windows→Linux transitions. Both OSes re-arm
+Ubuntu one-shot boot selection. Windows retains only seven verified GGUF backups; 21 retired
+models and the obsolete Windows inference stack were removed. Temporary unrestricted sudo
+was replaced by two exact commands. **Do not add `rig.carter2099.com` tunnel ingress until
+Carter creates its Cloudflare Access app/policy.** Full runbook:
 [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
 ## Environment

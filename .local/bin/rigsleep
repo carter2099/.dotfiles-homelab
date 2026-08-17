@@ -1,19 +1,22 @@
 #!/bin/bash
-# rigsleep — force the gaming rig to sleep immediately
+# rigsleep — put an online Windows gaming session to sleep.
 set -euo pipefail
 
-RIG_IP="${GAMING_RIG_IP:-192.168.4.103}"
-RIG_SSH_USER="${GAMING_RIG_SSH_USER:-carte}"
-RIG_SSH_KEY="${GAMING_RIG_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+echo "Sending sleep signal to the pinned Windows host..."
+ssh \
+    -o BatchMode=yes \
+    -o ConnectTimeout=5 \
+    -o ControlMaster=no \
+    -o ControlPath=none \
+    -o StrictHostKeyChecking=yes \
+    gamingrig-windows \
+    'powershell.exe -NoProfile -NonInteractive -Command "Start-Process rundll32.exe -ArgumentList ''powrprof.dll,SetSuspendState 0,1,0''"' \
+    2>/dev/null && rc=$? || rc=$?
 
-echo "Sending sleep signal to gaming rig ($RIG_IP)..."
-ssh -o ConnectTimeout=5 -i "$RIG_SSH_KEY" "${RIG_SSH_USER}@${RIG_IP}" \
-    "rundll32.exe powrprof.dll,SetSuspendState 0,1,0" 2>/dev/null && rc=$? || rc=$?
-
-if [ "$rc" -eq 255 ]; then
-    echo "Rig is going to sleep (SSH disconnected as expected)."
-elif [ "$rc" -eq 0 ]; then
-    echo "Sleep command sent (rig may already be asleep)."
-else
-    echo "Warning: sleep command returned code $rc" >&2
+if [[ "$rc" -eq 0 || "$rc" -eq 255 ]]; then
+    echo "Windows sleep command sent."
+    exit 0
 fi
+
+echo "Windows sleep command failed with code $rc." >&2
+exit "$rc"
