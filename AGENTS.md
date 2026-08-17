@@ -220,8 +220,9 @@ offline state and keeps cloud fallback; the loopback dashboard at `127.0.0.1:301
 behaviorally passed Linux→Windows and sleeping-Windows→Linux transitions. Both OSes re-arm
 Ubuntu one-shot boot selection. Windows retains only seven verified GGUF backups; 21 retired
 models and the obsolete Windows inference stack were removed. Temporary unrestricted sudo
-was replaced by two exact commands. **Do not add `rig.carter2099.com` tunnel ingress until
-Carter creates its Cloudflare Access app/policy.** Full runbook:
+was replaced by two exact commands. The dashboard is published at
+`rig.carter2099.com` through Cloudflare Access; unauthenticated GET and POST requests were
+verified to redirect to the Access login while the origin remains loopback-only. Full runbook:
 [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
 ## Environment
