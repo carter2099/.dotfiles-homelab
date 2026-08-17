@@ -205,18 +205,21 @@ They're quick context dumps for cross-session continuity. Formal reference notes
 - `~/notes/journal/` — research notes and project records (not maintained)
 - The vault is a standalone git repo (not the dotfiles bare repo) — `/note-save` handles commits
 
-## Gaming Rig (Windows 11)
+## Gaming Rig (Linux AI / Windows gaming)
 
-Windows 11 gaming PC at `192.168.4.103` (`ssh gamingrig`); hosts the local LLM stack
-(llama-swap + llama.cpp b10430). Twenty-eight GGUFs are on disk and eight models are
-registered. Qwen 3.8 27B UD-IQ2_XXS is enabled as `qwen-3.8-27b-iq2`; sustained
-manual use found it viable and good-performing despite its research performance-
-retention miss, so benchmark heuristics should be revisited later.
-Nemotron 3.5 Lightning NVFP4/Q4_K_M/Q8_0 remains unregistered after its frozen
-candidate failed the sealed quality holdout. Runbook:
+Dual-boot rig at `192.168.4.103`: Ubuntu Server 24.04.4 LTS on the 250 GB SATA SSD is the
+intended always-on AI OS; Windows 11 remains on the 2 TB NVMe for one-shot gaming boots.
+Use `ssh gamingrig-linux` (or `ssh gamingrig`) for Ubuntu and `ssh gamingrig-windows` for
+Windows. Both aliases pin distinct host keys for the shared IP.
+
+Migration is in progress: the Ubuntu base, SSH access, temporary setup sudo, and one-shot
+Windows→Ubuntu boot path are verified, but NVIDIA, llama.cpp, llama-swap, retained model
+files, proxy adaptation, and `rig.carter2099.com` dashboard are not configured. The
+Windows `C:\llm\` stack remains intact until five retained Linux models pass behavioral
+requests. Firmware keeps restoring Windows first in `BootOrder`, so the final controller
+must re-arm Ubuntu `BootNext` from both operating systems rather than relying on persistent
+boot order. Runbook and autonomous setup checklist:
 [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
-
-The rig is mostly accessed via the local llm proxy running on this homelab.
 
 ## Environment
 
