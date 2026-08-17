@@ -219,8 +219,9 @@ All five passed Linux behavioral serving checks. The proxy reports explicit Linu
 offline state and keeps cloud fallback; the loopback dashboard at `127.0.0.1:30143`
 behaviorally passed Linux→Windows and sleeping-Windows→Linux transitions. Both OSes re-arm
 Ubuntu one-shot boot selection. Windows retains only seven verified GGUF backups; 21 retired
-models and the obsolete Windows inference stack were removed. Temporary unrestricted sudo
-was replaced by two exact commands. The dashboard is published at
+models and the obsolete Windows inference stack were removed. Linux now mirrors the ThinkPad's
+agent privilege model: `carte` has unrestricted passwordless sudo through a root-owned policy.
+The dashboard is published at
 `rig.carter2099.com` through Cloudflare Access; unauthenticated GET and POST requests were
 verified to redirect to the Access login while the origin remains loopback-only. Full runbook:
 [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
