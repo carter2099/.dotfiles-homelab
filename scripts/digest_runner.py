@@ -1290,15 +1290,22 @@ def _parse_date(date_str: str | None) -> datetime | None:
     return None
 
 
-def _candidate_fresh_date(candidate: dict) -> datetime | None:
+def _candidate_fresh_date(candidate: dict, today: date | None = None) -> datetime | None:
     """Return the best publication date for a candidate.
 
     Prefers Phase 4's independently confirmed date; falls back to Phase 1's
-    published date. None when neither parses (Phase 5 passed the story through
-    for LLM judgment rather than dropping it).
+    published date. A date_confirmed that is in the future (e.g. an event or
+    conference date pulled from the article rather than its publication date)
+    is not a valid publication date, so it falls back to date_published
+    (digest-quality audit 2026-08-17: ai-hardware dropped the fresh 08-17 Hot
+    Chips preview because date_confirmed was the 08-24 conference start date).
+    None when neither parses (Phase 5 passed the story through for LLM judgment
+    rather than dropping it).
     """
+    if today is None:
+        today = datetime.now(timezone.utc).date()
     confirmed = _parse_date((candidate.get("date_confirmed") or "").strip())
-    if confirmed is not None:
+    if confirmed is not None and confirmed.date() <= today:
         return confirmed
     return _parse_date((candidate.get("date_published") or "").strip())
 
@@ -1316,11 +1323,11 @@ def _is_fresh_eligible(candidate: dict, yesterday: date, today: date | None = No
     2026-08-14: a 2026-10-15-dated story rendered under "Fresh — Last 24 Hours"
     in the 2026-08-12 ai-tech digest).
     """
-    fresh_date = _candidate_fresh_date(candidate)
-    if fresh_date is None:
-        return True
     if today is None:
         today = datetime.now(timezone.utc).date()
+    fresh_date = _candidate_fresh_date(candidate, today)
+    if fresh_date is None:
+        return True
     return yesterday <= fresh_date.date() <= today
 
 

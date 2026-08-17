@@ -347,6 +347,24 @@ def test_freshness_gate_rejects_future_dates() -> None:
           "undated candidate must pass through")
 
 
+def test_freshness_gate_ignores_future_event_date_confirmed() -> None:
+    """A date_confirmed in the future (an event/conference date pulled from the
+    article) must not override a fresh date_published. The Hot Chips 08-17
+    preview shipped its conference start date (08-24) as date_confirmed, which
+    the previous preference logic treated as the best date and dropped as
+    future-dated even though it was published within the 24h window
+    (digest-quality audit 2026-08-17: ai-hardware shipped zero fresh stories)."""
+    yesterday = datetime(2026, 8, 16, tzinfo=timezone.utc).date()
+    today = datetime(2026, 8, 17, tzinfo=timezone.utc).date()
+    fresh_event = {"date_published": "2026-08-17", "date_confirmed": "2026-08-24"}
+    check(digest._is_fresh_eligible(fresh_event, yesterday, today),
+          "future event date_confirmed dropped a fresh-eligible candidate")
+    # Regression guard: keep the genuine future-dated (publication) rejection.
+    genuine_future = {"date_published": "2026-10-15", "date_confirmed": ""}
+    check(not digest._is_fresh_eligible(genuine_future, yesterday, today),
+          "genuine future-dated publication must still be rejected")
+
+
 def test_editorial_caps_source_concentration() -> None:
     """Fresh selection is capped at 2 stories per source domain: lower-ranked
     same-source candidates are dropped with a warning instead of shipping a
@@ -995,6 +1013,7 @@ def main() -> None:
         test_editorial_critic_patch_contract,
         test_editorial_drops_stale_fresh_selection,
         test_freshness_gate_rejects_future_dates,
+        test_freshness_gate_ignores_future_event_date_confirmed,
         test_editorial_caps_source_concentration,
         test_editorial_proposal_retries_with_freshness_hint,
         test_critic_fresh_removal_honored_when_all_candidates_stale,
