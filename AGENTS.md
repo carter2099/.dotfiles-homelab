@@ -215,15 +215,19 @@ Windows. Both aliases pin distinct host keys for the shared IP.
 Linux-primary migration completed 2026-08-17: signed NVIDIA 595.71.05 + CUDA 13.2,
 llama.cpp b10453, and llama-swap v250 serve five retained IDs continuously under systemd:
 Qwen 3.8 27B IQ2, Ornith 35B Q8, Ornith 9B Q6, Gemma 4 12B Q6, and Gemma 4 26B Q8.
-All five passed Linux behavioral serving checks. The proxy reports explicit Linux/Windows/
-offline state and keeps cloud fallback; the loopback dashboard at `127.0.0.1:30143`
-behaviorally passed Linux→Windows and sleeping-Windows→Linux transitions. Both OSes re-arm
-Ubuntu one-shot boot selection. Windows retains only seven verified GGUF backups; 21 retired
-models and the obsolete Windows inference stack were removed. Linux now mirrors the ThinkPad's
-agent privilege model: `carte` has unrestricted passwordless sudo through a root-owned policy.
-The dashboard is published at
-`rig.carter2099.com` through Cloudflare Access; unauthenticated GET and POST requests were
-verified to redirect to the Access login while the origin remains loopback-only. Full runbook:
+All five passed Linux behavioral serving checks. Post-migration autoresearch completed
+2026-08-18. Current reasoning budgets in the same order are 768/256/544/112/384; Qwen now
+uses an 81,920-token full-GPU profile and Gemma 26B uses physical batch 256. Direct
+post-deploy smokes all emitted reasoning and exceeded 30 decode tokens/s.
+The proxy reports explicit Linux/Windows/offline state and keeps cloud fallback; the
+loopback dashboard at `127.0.0.1:30143` behaviorally passed Linux→Windows and
+sleeping-Windows→Linux transitions. Both OSes re-arm Ubuntu one-shot boot selection.
+Windows retains only seven verified GGUF backups; 21 retired models and the obsolete
+Windows inference stack were removed. Linux now mirrors the ThinkPad's agent privilege
+model: `carte` has unrestricted passwordless sudo through a root-owned policy. The
+dashboard is published at `rig.carter2099.com` through Cloudflare Access; unauthenticated
+GET and POST requests were verified to redirect to the Access login while the origin
+remains loopback-only. Full runbook:
 [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
 ## Environment
