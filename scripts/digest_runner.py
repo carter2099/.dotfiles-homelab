@@ -2023,11 +2023,18 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
         j = judged_map.get(url, {})
         verdict = j.get("verdict", "keep")
         if s.get("fetch_success") is False:
+            # A failed fetch is a hard drop, but record WHY so the drop is
+            # auditable instead of silent (digest-quality audit 2026-08-19:
+            # ai-tech shipped an empty Fresh section and 05-summaries-judged.json
+            # showed fetch_success=false with empty judge_issues).
             verdict = "drop"
-        if verdict == "fix" and j.get("fixed_summary"):
-            s["summary"] = j["fixed_summary"]
+            issues = ["fetch_failed: article could not be fetched/summarized as confirmed"]
+        else:
+            issues = j.get("issues", [])
+            if verdict == "fix" and j.get("fixed_summary"):
+                s["summary"] = j["fixed_summary"]
         s["judge_verdict"] = verdict
-        s["judge_issues"] = j.get("issues", [])
+        s["judge_issues"] = issues
         results.append(s)
 
 
