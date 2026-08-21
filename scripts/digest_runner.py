@@ -1074,6 +1074,21 @@ def _normalize_url(url: str) -> str:
     return f"{host}{path}{suffix}"
 
 
+def _is_listing_url(url: str) -> bool:
+    """True when a URL points at a section/date archive listing, not an article.
+
+    Search results sometimes surface Guardian daily archives with a real
+    article's title, e.g. https://www.theguardian.com/technology/2026/aug/18/all
+    — fetching that page returns the section listing ("Technology | The
+    Guardian") and the article URL never exists. Those listings must never be
+    selected into Fresh or Ongoing or enter stories-in-flight (digest-quality
+    audit 2026-08-21: world-digest ongoing entries on 08-20 and 08-21 were
+    the same two Guardian .../all pages, canonicalizing to /us/technology).
+    """
+    path = urlsplit((url or "").strip()).path.rstrip("/")
+    return path.lower().endswith("/all")
+
+
 def _article_cache_path(url: str, cache_dir: Path | None = None) -> Path:
     key = hashlib.sha256(_normalize_url(url).encode()).hexdigest()
     return (cache_dir or ARTICLE_CACHE_DIR) / f"{key}.json"
@@ -2146,6 +2161,13 @@ def _validate_editorial_proposal(
         if normalized in blocked:
             warnings.append(f"ignored cross-topic duplicate {candidate_id}")
             continue
+        if _is_listing_url(source.get("url", "")):
+            # A section/date archive page is not an article; rejecting the
+            # selection also keeps it out of stories-in-flight (digest-quality
+            # audit 2026-08-21: Guardian /all listing URLs entered the world
+            # tracker and resurfaced as ongoing on consecutive days).
+            warnings.append(f"dropped listing URL fresh selection {candidate_id}")
+            continue
         if candidate_id in selected_ids:
             warnings.append(f"ignored duplicate fresh selection {candidate_id}")
             continue
@@ -2202,6 +2224,9 @@ def _validate_editorial_proposal(
             warnings.append("ignored non-object ongoing selection")
             continue
         normalized = _normalize_url(item.get("story_url", item.get("url", "")))
+        if _is_listing_url(item.get("story_url", item.get("url", ""))):
+            warnings.append(f"ignored listing URL ongoing story {normalized!r}")
+            continue
         source = ongoing_by_url.get(normalized)
         if source is None:
             warnings.append(f"ignored unknown ongoing story {normalized!r}")
@@ -2287,6 +2312,66 @@ def _validate_editorial_proposal(
             })
         else:
             warnings.append(f"ignored unknown state operation {operation!r}")
+
+    # Deterministic minimum-content floor: a digest must not ship with a single
+    # link when vetted active SIF stories are available to fill it. Model picks
+    # can collapse the ongoing list (invalid picks dropped by validation above),
+    # leaving the pre-ranked, already-vetted SIF pool unused (digest-quality
+    # audit 2026-08-21: agentic-platform 08-20 and gaming-digest 08-20 both
+    # shipped a single-link digest). Fill ongoing from the active SIF pool in
+    # last_updated order until 2 total stories are selected; the Phase 8 send
+    # guard archives (instead of emailing) any digest that stays below 2.
+    if len(fresh) + len(ongoing) < 2:
+        selected_urls = {
+            _normalize_url(candidate_by_id[item["candidate_id"]].get("url", ""))
+            for item in fresh
+        } | {
+            _normalize_url(item["story_url"]) for item in ongoing
+        }
+        filler_pool = sorted(
+            (story for story in sif_candidates
+             if not _is_listing_url(story.get("url", ""))
+             and _normalize_url(story.get("url", "")) not in selected_urls),
+            key=lambda story: story.get("last_updated", ""), reverse=True,
+        )
+        while filler_pool and len(fresh) + len(ongoing) < 2 and len(ongoing) < 3:
+            story = filler_pool.pop(0)
+            story_url = _normalize_url(story.get("url", ""))
+            ongoing.append({
+                "story_url": story.get("url", ""),
+                "rank": len(ongoing) + 1,
+                "summary": story.get("latest_dev", story.get("title", "")),
+                "why_still_relevant": (
+                    "Active tracked story carried into today's digest to keep "
+                    "coverage complete."
+                ),
+            })
+            selected_ongoing.add(story_url)
+
+    # Deterministic tracker touch: a story selected into Ongoing is being
+    # actively tracked today. If the model omitted an update op, synthesize one
+    # (evidence-free, preserving latest_dev) so last_updated advances and
+    # auto-cool cannot cull a story the digest is still surfacing while the
+    # tracker claims it is stale (digest-quality audit 2026-08-21: the 404
+    # Media rare-books story and the OpenAI Agents JS guide resurfaced on
+    # 08-19→08-21 while last_updated stayed 2026-08-18).
+    model_updated_urls = {
+        _normalize_url(op.get("story_url", ""))
+        for op in state_proposals if op["operation"] == "update"
+    }
+    for selection in ongoing:
+        selection_url = _normalize_url(selection["story_url"])
+        story = tracker_by_url.get(selection_url)
+        if story is None or selection_url in model_updated_urls:
+            continue
+        state_proposals.append({
+            "operation": "update",
+            "story_url": story.get("url", ""),
+            "evidence_candidate_ids": [],
+            "latest_dev": story.get("latest_dev", ""),
+            "importance": story.get("importance", "medium"),
+            "status": "active",
+        })
 
     domains: dict[str, int] = {}
     for item in fresh:
@@ -3117,12 +3202,12 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     No LLM call — pure Python. In test mode, email is sent with a [TEST]
     subject prefix and archived to the test run_dir.
 
-    Skip-send on empty: when there are no fresh and no ongoing stories the
-    email is NOT sent (a "<p>No stories found today.</p>" digest is a bug,
-    not content). The HTML is still archived so the run leaves a record.
-    send_on_empty=True forces the send regardless — used for the upstream
-    outage notification, which is a deliberate alert rather than an empty
-    digest.
+    Skip-send on thin: when fewer than two stories survive curation the email
+    is NOT sent (a "<p>No stories found today.</p>" digest — or a single-link
+    digest — is a bug, not content). The HTML is still archived so the run
+    leaves a record. send_on_empty=True forces the send regardless — used for
+    the upstream outage notification, which is a deliberate alert rather than
+    an empty digest.
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -3142,13 +3227,17 @@ def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
     temp_html.write_text(html)
 
     # Only send email if archive doesn't already exist (idempotent resume
-    # guard) AND the digest has content (skip-send on empty: no fresh and no
-    # ongoing stories — unless send_on_empty, e.g. outage notification).
+    # guard) AND the digest has content. A digest with fewer than two stories
+    # is a near-empty digest, not content: single-link digests shipped on
+    # agentic-platform 08-20 and gaming-digest 08-20 (digest-quality audit
+    # 2026-08-21), so the skip-send-on-empty bar rises from zero stories to
+    # two — unless send_on_empty, e.g. outage notification.
     archive_already_exists = archive_path.exists()
-    empty_digest = not (fresh or ongoing) and not send_on_empty
+    story_count = len(fresh or []) + len(ongoing or [])
+    empty_digest = story_count < 2 and not send_on_empty
     if (archive_already_exists and not TEST_MODE) or empty_digest:
         if empty_digest:
-            print("  [skip] send_email — empty digest (no fresh/ongoing stories); archived only")
+            print(f"  [skip] send_email — thin digest ({story_count} story); archived only")
         else:
             print(f"  [skip] send_email — archive already exists: {archive_path}")
     else:

@@ -317,9 +317,39 @@ def test_editorial_drops_stale_fresh_selection() -> None:
         validated["selected_fresh"],
     )
     check(any("stale fresh selection" in warning for warning in warnings), warnings)
+    # The stale-dropped candidate is still treated as unselected: it gets no
+    # tracker add. The deterministic floor fills the digest with the
+    # pre-existing active SIF story (digest-quality audit 2026-08-21), so the
+    # only state op is the synthesized tracker touch for that story.
     check(
-        validated["story_state_proposals"] == [],
+        validated["story_state_proposals"]
+        == [{
+            "operation": "update",
+            "story_url": "https://example.com/existing",
+            "evidence_candidate_ids": [],
+            "latest_dev": "Previous development.",
+            "importance": "medium",
+            "status": "active",
+        }],
         validated["story_state_proposals"],
+    )
+    check(
+        not any(
+            op.get("operation") == "add" and op.get("candidate_id") == stale["candidate_id"]
+            for op in validated["story_state_proposals"]
+        ),
+        "stale-dropped candidate received a tracker add",
+    )
+    updated = digest._apply_story_state_proposals(
+        tracker, validated, candidates, "2026-08-10"
+    )
+    check(
+        not any(story.get("url") == stale["url"] for story in updated["stories"]),
+        "stale-dropped candidate entered the tracker",
+    )
+    check(
+        updated["stories"][0]["last_updated"] == "2026-08-10",
+        "floor-filled ongoing story was not tracker-touched",
     )
 
 
@@ -990,6 +1020,249 @@ def test_intro_boundary_and_deterministic_render() -> None:
     check("STORY BLOCK TEMPLATE" not in rendered, "template instructions leaked")
 
 
+def test_tracker_touch_updates_last_updated_for_ongoing_selection() -> None:
+    """A tracker story selected into Ongoing without a model update op must get
+    a deterministic tracker touch so last_updated advances (digest-quality
+    audit 2026-08-21: the 404 Media rare-books story and the OpenAI Agents JS
+    guide resurfaced 08-19→08-21 while last_updated stayed 2026-08-18)."""
+    candidates, sif_candidates, tracker = editorial_fixture()
+    proposal = {
+        "selected_fresh": [
+            {"candidate_id": candidates[0]["candidate_id"]},
+            {"candidate_id": candidates[1]["candidate_id"]},
+        ],
+        "selected_ongoing": [{
+            "story_url": "https://example.com/existing",
+            "summary": "Still relevant summary.",
+            "why_still_relevant": "Story is still developing.",
+        }],
+        "story_state_proposals": [],
+    }
+    validated, _ = digest._validate_editorial_proposal(
+        proposal, candidates, sif_candidates, tracker
+    )
+    touches = [
+        op for op in validated["story_state_proposals"]
+        if op["operation"] == "update"
+    ]
+    check(len(touches) == 1, validated["story_state_proposals"])
+    check(
+        touches[0]["story_url"] == "https://example.com/existing"
+        and touches[0]["latest_dev"] == "Previous development."
+        and touches[0]["status"] == "active",
+        touches,
+    )
+    original = json.loads(json.dumps(tracker))
+    updated = digest._apply_story_state_proposals(
+        tracker, validated, candidates, "2026-08-10"
+    )
+    check(tracker == original, "state application mutated its input")
+    story = updated["stories"][0]
+    check(story["last_updated"] == "2026-08-10", story)
+    check(story["latest_dev"] == "Previous development.", story)
+
+    # A model-supplied update op suppresses the synthesized touch (no dupes).
+    with_update = copy.deepcopy(proposal)
+    with_update["story_state_proposals"] = [{
+        "operation": "update",
+        "story_url": "https://example.com/existing",
+        "evidence_candidate_ids": [candidates[0]["candidate_id"]],
+        "latest_dev": "Model-verified development.",
+        "importance": "high",
+        "status": "active",
+    }]
+    validated, _ = digest._validate_editorial_proposal(
+        with_update, candidates, sif_candidates, tracker
+    )
+    update_ops = [
+        op for op in validated["story_state_proposals"]
+        if op["operation"] == "update"
+    ]
+    check(len(update_ops) == 1, validated["story_state_proposals"])
+    check(
+        update_ops[0]["latest_dev"] == "Model-verified development.",
+        update_ops,
+    )
+
+
+def test_editorial_floor_and_thin_send_guard() -> None:
+    """A selection below two stories must be filled from the active SIF pool
+    when available, and a digest that stays below two stories must not be
+    emailed (digest-quality audit 2026-08-21: agentic-platform 08-20 and
+    gaming-digest 08-20 each shipped a single-link digest)."""
+    candidates, sif_candidates, tracker = editorial_fixture()
+    second_sif = {
+        "title": "Second tracked story",
+        "url": "https://second.example/ongoing",
+        "category": "Policy",
+        "latest_dev": "Second development.",
+        "status": "active",
+        "importance": "low",
+        "first_seen": "2026-08-09",
+        "last_updated": "2026-08-09",
+    }
+    sif_candidates.append(second_sif)
+
+    # 1 fresh + 0 ongoing → floor fills the most-recently-updated SIF story.
+    proposal = {
+        "selected_fresh": [{"candidate_id": candidates[0]["candidate_id"]}],
+        "selected_ongoing": [],
+        "story_state_proposals": [],
+    }
+    validated, warnings = digest._validate_editorial_proposal(
+        proposal, candidates, sif_candidates, tracker
+    )
+    filled = {item["story_url"] for item in validated["selected_ongoing"]}
+    check(filled == {"https://second.example/ongoing"},
+          validated["selected_ongoing"])
+    check(
+        len(validated["selected_fresh"]) + len(validated["selected_ongoing"]) == 2,
+        validated,
+    )
+    check(
+        all(item["why_still_relevant"] for item in validated["selected_ongoing"]),
+        validated["selected_ongoing"],
+    )
+
+    # Floor does not add a second story once two are selected.
+    both = {
+        "selected_fresh": [
+            {"candidate_id": candidates[0]["candidate_id"]},
+            {"candidate_id": candidates[1]["candidate_id"]},
+        ],
+        "selected_ongoing": [{
+            "story_url": "https://example.com/existing",
+            "summary": "Summarized.",
+            "why_still_relevant": "Relevant.",
+        }],
+        "story_state_proposals": [],
+    }
+    validated, _ = digest._validate_editorial_proposal(
+        both, candidates, sif_candidates, tracker
+    )
+    check(len(validated["selected_ongoing"]) == 1, validated["selected_ongoing"])
+
+    # 0 fresh + 0 ongoing and an empty pool: the digest stays below two and the
+    # Phase 8 guard archives instead of emailing.
+    empty_validated, _ = digest._validate_editorial_proposal(
+        {"selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []},
+        candidates, [], {"stories": []}, set(),
+    )
+    check(not empty_validated["selected_fresh"] and not empty_validated["selected_ongoing"],
+          empty_validated)
+
+    with tempfile.TemporaryDirectory() as temporary:
+        digest_dir = Path(temporary) / "world-digest"
+        run_dir = Path(temporary) / "run"
+        digest_dir.mkdir(parents=True)
+        run_dir.mkdir(parents=True)
+
+        calls: list[object] = []
+
+        def fake_send(*_args: object, **_kwargs: object) -> object:
+            calls.append(_args)
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        html = "<html>thin</html>"
+        with patch("digest_runner.subprocess.run", side_effect=fake_send):
+            digest.phase_8_send_archive(
+                digest.TOPICS["world"], html, {"stories": []}, run_dir, digest_dir,
+                fresh=[], ongoing=[{"url": "https://example.com/only"}],
+            )
+        check(not calls, f"thin digest was emailed: {calls}")
+        check((digest_dir / f"{datetime.now():%Y-%m-%d}.html").exists(),
+              "thin digest was not archived")
+
+        calls.clear()
+        second_dir = Path(temporary) / "world-digest-two"
+        second_run = Path(temporary) / "run-two"
+        second_dir.mkdir(parents=True)
+        second_run.mkdir(parents=True)
+        with patch("digest_runner.subprocess.run", side_effect=fake_send):
+            digest.phase_8_send_archive(
+                digest.TOPICS["world"], html, {"stories": []}, second_run, second_dir,
+                fresh=[{"url": "https://example.com/a"}],
+                ongoing=[{"url": "https://example.com/b"}],
+            )
+        check(len(calls) == 1, f"two-story digest was not emailed: {calls}")
+
+
+def test_listing_urls_rejected() -> None:
+    """Section/date archive URLs (Guardian .../all) must never be selected into
+    Fresh or Ongoing or enter the tracker (digest-quality audit 2026-08-21:
+    world-digest ongoing entries on 08-20 and 08-21 were the same two Guardian
+    .../all pages, which fetch as the section listing, not an article)."""
+    listing = "https://www.theguardian.com/technology/2026/aug/18/all"
+    check(digest._is_listing_url(listing), listing)
+    check(digest._is_listing_url(listing + "?utm_source=x"), "query-suffixed listing")
+    check(not digest._is_listing_url("https://www.theguardian.com/world/article"),
+          "normal article flagged")
+    check(not digest._is_listing_url("https://example.com/all-about-x"),
+          "prefix segment flagged")
+
+    fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    candidates, _ = digest._prepare_editorial_candidates([
+        {
+            "title": "OpenAI listing page",
+            "url": listing,
+            "source_domain": "theguardian.com",
+            "summary": "Search result title on the listing page.",
+            "category": "Technology",
+            "importance": "high",
+            "date_published": fresh_day,
+            "source_verdict": "fresh",
+            "judge_verdict": "keep",
+        },
+    ], set())
+    tracker_listing = {
+        "title": "Tracked listing",
+        "url": listing,
+        "category": "Technology",
+        "latest_dev": "Development.",
+        "status": "active",
+        "importance": "medium",
+        "first_seen": "2026-08-18",
+        "last_updated": "2026-08-19",
+    }
+    proposal = {
+        "selected_fresh": [
+            {"candidate_id": candidates[0]["candidate_id"]},
+        ],
+        "selected_ongoing": [{
+            "story_url": listing,
+            "summary": "Still listed.",
+            "why_still_relevant": "Resurfacing identically.",
+        }],
+        "story_state_proposals": [{
+            "operation": "update",
+            "story_url": listing,
+            "evidence_candidate_ids": [candidates[0]["candidate_id"]],
+            "latest_dev": "Updated.",
+            "importance": "medium",
+            "status": "active",
+        }],
+    }
+    validated, warnings = digest._validate_editorial_proposal(
+        proposal, candidates, [tracker_listing],
+        {"stories": [tracker_listing]}, set(),
+    )
+    check(validated["selected_fresh"] == [], validated["selected_fresh"])
+    check(validated["selected_ongoing"] == [], validated["selected_ongoing"])
+    check(validated["story_state_proposals"] == [], validated["story_state_proposals"])
+    check(any("listing URL fresh selection" in warning for warning in warnings), warnings)
+    check(any("listing URL ongoing story" in warning for warning in warnings), warnings)
+
+    # The floor must not fill a thin digest with a listing URL either.
+    floor_proposal = {
+        "selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []
+    }
+    validated, _ = digest._validate_editorial_proposal(
+        floor_proposal, candidates, [tracker_listing],
+        {"stories": [tracker_listing]}, set(),
+    )
+    check(validated["selected_ongoing"] == [], validated["selected_ongoing"])
+
+
 def test_stub_retry_preserves_failed_attempt_artifacts() -> None:
     """Stub/fallback retries archive the failed attempt's phase JSON instead of deleting it."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -1024,6 +1297,9 @@ def main() -> None:
         test_editorial_critic_retries_primary_after_transient_error,
         test_critic_rejection_fails_closed,
         test_intro_boundary_and_deterministic_render,
+        test_tracker_touch_updates_last_updated_for_ongoing_selection,
+        test_editorial_floor_and_thin_send_guard,
+        test_listing_urls_rejected,
     ]
     for test in tests:
         test()
