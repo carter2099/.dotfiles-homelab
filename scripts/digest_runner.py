@@ -312,6 +312,12 @@ SIF_CAP = 3         # Pool C: max stories-in-flight passed directly to Phase 6
 # ── Stories-in-flight constants ────────────────────────────────────────────
 COOL_AFTER_DAYS = 5     # auto-set status to "cooled" if no updates in 5 days
 PRUNE_AFTER_DAYS = 7    # remove stories entirely after 7 days since first_seen
+# A tracker story may be surfaced in the digest at most RESURFACE_CAP_DAYS
+# consecutive days without an evidence-backed development; the next day it is
+# cooled (and drops out of Ongoing). Matches the auto-cool window: five days of
+# digest repetition without real movement is stale by the same measure the
+# tracker uses (digest-quality audit 2026-08-22).
+RESURFACE_CAP_DAYS = COOL_AFTER_DAYS - 1
 
 # ── Cross-day dedup constants ──────────────────────────────────────────────
 CROSS_DAY_DEDUP_DAYS = 5  # block URLs covered in the last N days' digests;
@@ -1259,6 +1265,102 @@ def _load_recent_covered_urls(digest_dir: Path, today: date, days: int) -> set[s
     return covered
 
 
+def _consecutive_surfaced_days(digest_dir: Path, url: str, today: date) -> int:
+    """How many consecutive prior digest days (ending yesterday) surfaced `url`.
+
+    Same two per-day sources as _load_recent_covered_urls: the run dir's
+    06-curated.json (authoritative) and the archived <date>.md fallback.
+    """
+    normalized = _normalize_url(url)
+    days = 0
+    day = today - timedelta(days=1)
+    while True:
+        day_str = day.isoformat()
+        appeared = False
+        curated = digest_dir / day_str / "06-curated.json"
+        if curated.exists():
+            try:
+                data = json.loads(curated.read_text())
+                for story in data.get("fresh", []) + data.get("ongoing", []):
+                    if _normalize_url(story.get("url", "")) == normalized:
+                        appeared = True
+                        break
+            except (json.JSONDecodeError, ValueError):
+                appeared = False
+        else:
+            md_file = digest_dir / f"{day_str}.md"
+            if md_file.exists():
+                appeared = any(
+                    _normalize_url(m.group(1)) == normalized
+                    for m in re.finditer(
+                        r"\[[^\]]*\]\((https?://[^)\s]+)\)", md_file.read_text()
+                    )
+                )
+        if not appeared:
+            break
+        days += 1
+        day -= timedelta(days=1)
+    return days
+
+
+def _enforce_ongoing_resurface_cap(
+    proposal: dict,
+    stories_in_flight: dict,
+    digest_dir: Path,
+) -> tuple[list[str], list[dict]]:
+    """Cool Ongoing selections surfaced on too many consecutive days.
+
+    A tracker story is meant to stay in rotation while it develops. A story the
+    digest keeps re-surfacing day after day with no evidence-backed development
+    (the model omits an update op, so the deterministic tracker touch advances
+    last_updated) never auto-cools and repeats for days (digest-quality audit
+    2026-08-22: the 404 Media rare-books story ran in ai-tech and OpenAI's
+    PORTS-Pike story in ai-hardware on five consecutive days, 08-18→08-22, with
+    paraphrased summaries of the same facts). Once a story has been surfaced
+    RESURFACE_CAP_DAYS consecutive days, the next selection is dropped from
+    Ongoing and the story cooled; only an evidence-backed update (an actual
+    same-story development) resets the counter.
+    """
+    warnings: list[str] = []
+    ops: list[dict] = []
+    today = datetime.now(timezone.utc).date()
+    story_by_url = {
+        _normalize_url(story.get("url", "")): story
+        for story in stories_in_flight.get("stories", [])
+    }
+    # Evidence-backed update ops (validation already requires same-story
+    # evidence) count as genuine development and reset the cap.
+    evidenced_urls = {
+        _normalize_url(op.get("story_url", ""))
+        for op in proposal.get("story_state_proposals", [])
+        if op.get("operation") == "update" and op.get("evidence_candidate_ids")
+    }
+    kept: list[dict] = []
+    for selection in proposal.get("selected_ongoing", []):
+        url = _normalize_url(selection.get("story_url", ""))
+        prior_days = _consecutive_surfaced_days(digest_dir, url, today)
+        if prior_days >= RESURFACE_CAP_DAYS and url not in evidenced_urls:
+            story = story_by_url.get(url)
+            warnings.append(
+                f"cooled recurring ongoing story surfaced {prior_days + 1} "
+                "consecutive days without an evidence-backed development"
+            )
+            if story is not None:
+                ops.append({
+                    "operation": "update",
+                    "story_url": story.get("url", ""),
+                    "evidence_candidate_ids": [],
+                    "latest_dev": story.get("latest_dev", ""),
+                    "importance": story.get("importance", "medium"),
+                    "status": "cooled",
+                })
+            continue
+        kept.append(selection)
+    if ops:
+        proposal["selected_ongoing"] = kept
+    return warnings, ops
+
+
 def _refetch_article_date(url: str, title: str) -> str | None:
     """Re-fetch an article to independently extract its publication date.
 
@@ -1375,7 +1477,9 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
 
     system_prompt = (
         "You are a research assistant for a daily news digest. Your job is to search "
-        "the web for recent news stories and report your findings in structured JSON.\n\n"
+        "the web for recent news stories and report your findings in structured JSON. "
+        "Write every finding, summary, and reason in English regardless of the source "
+        "article's language; keep story titles in their original language.\n\n"
         "IMPORTANT: Do NOT use web_fetch to read articles. Only use web_search to find "
         "stories by their titles and URLs. The articles will be fetched later by a "
         "separate process. Your job is discovery, not deep reading.\n\n"
@@ -1764,7 +1868,9 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
 
     system_prompt = (
         "You are a research assistant. Read ONE article via web_fetch and produce a "
-        "topic-neutral, detailed factual summary. Do not search.\n\n"
+        "topic-neutral, detailed factual summary. Do not search. Write the summary and "
+        "key_details in English even when the article is in another language; keep the "
+        "title verbatim in the article's original language.\n\n"
         "Output one JSON object in ```json fences with these fields:\n"
         '  {"title": "article title", "url": "the URL you fetched", '
         '"date_confirmed": "YYYY-MM-DD or empty if not found in article", '
@@ -2302,10 +2408,25 @@ def _validate_editorial_proposal(
                 warnings.append(
                     f"ignored unsupported tracker update for {normalized!r}")
                 continue
+            # An update records the tracked story's own development: its
+            # evidence must come from a candidate of the same story. A
+            # related-story candidate (different URL) cannot overwrite a
+            # tracked story's latest_dev (digest-quality audit 2026-08-22:
+            # ai-hardware's memory-prices story was overwritten with the
+            # Spanish KOSPI story's development).
+            same_story_evidence = [
+                candidate_id for candidate_id in evidence
+                if _normalize_url(candidate_by_id[candidate_id].get("url", ""))
+                == normalized
+            ]
+            if not same_story_evidence:
+                warnings.append(
+                    f"ignored cross-story tracker update for {normalized!r}")
+                continue
             state_proposals.append({
                 "operation": "update",
                 "story_url": source.get("url", ""),
-                "evidence_candidate_ids": evidence,
+                "evidence_candidate_ids": same_story_evidence,
                 "latest_dev": latest_dev,
                 "importance": importance,
                 "status": status,
@@ -2732,7 +2853,13 @@ def phase_6_curate(
         "stories only from the supplied active SIF candidates. Prefer source_verdict=fresh; "
         "use older ongoing candidates only when needed. Every selection must use the exact "
         "candidate_id or story_url supplied. State changes are proposals only. An update "
-        "needs selected candidate evidence; an add must reference a selected candidate.\n\n"
+        "needs selected candidate evidence; an add must reference a selected candidate. "
+        "An update's evidence_candidate_ids must reference candidates whose URL matches "
+        "the story being updated (same story) — a related story's candidate cannot update "
+        "another story. Write ALL prose (editorial_summary, selection_reason, summary, "
+        "why_still_relevant, latest_dev, gaps, balance_summary, rejected reasons) in "
+        "English, regardless of the source language; keep story titles in their original "
+        "language.\n\n"
         "Output one JSON object in ```json fences:\n"
         '{"selected_fresh":[{"candidate_id":"...","rank":1,'
         '"editorial_summary":"2-3 factual sentences","selection_reason":"...",'
@@ -2849,7 +2976,8 @@ def phase_6_curate(
             "selection, ranking, source/topic balance, ongoing links, and persistent "
             "story-state proposals. Return bounded changes only; never rewrite the whole "
             "proposal. Check for a missed stronger candidate, unsupported connections, "
-            "source concentration, stale material, and state changes without evidence.\n\n"
+            "source concentration, stale material, and state changes without evidence. "
+            "Write all notes and reasoning in English.\n\n"
             "Allowed operations: remove_fresh, add_fresh, replace_fresh, move_fresh, "
             "remove_ongoing, add_ongoing, replace_ongoing, remove_state, add_state, "
             "replace_state. add/replace operations put the proposed object in item. "
@@ -2935,6 +3063,25 @@ def phase_6_curate(
         "applied_changes": applied_changes,
         "validation_warnings": review_warnings,
     }, indent=2))
+
+    # Deterministic resurface cap: an Ongoing story surfaced for
+    # RESURFACE_CAP_DAYS consecutive days without an evidence-backed
+    # development is dropped from this selection and cooled, so the digest
+    # cannot repeat the same story day after day (digest-quality audit
+    # 2026-08-22). Runs after the final proposal so it also covers the
+    # raw-fallback path; the cooled update op lands after any synthesized
+    # active touch, so cooling wins in the state apply.
+    cap_warnings, cap_ops = _enforce_ongoing_resurface_cap(
+        final_proposal, stories_in_flight, run_dir.parent
+    )
+    if cap_warnings:
+        for warning in cap_warnings:
+            print(f"  [6c resurface] {warning}")
+        review_warnings.extend(cap_warnings)
+    if cap_ops:
+        final_proposal["story_state_proposals"] = (
+            final_proposal.get("story_state_proposals", []) + cap_ops
+        )
 
     updated_sif = _apply_story_state_proposals(
         stories_in_flight, final_proposal, candidates, today_str
@@ -3057,8 +3204,9 @@ def _generate_final_intro(
     system = (
         "Write a concise 2-3 sentence editorial introduction for a daily digest. "
         "Use only facts, entities, and numbers in the approved story data. Do not add "
-        "URLs, HTML, new reporting, or claims about rejected stories. Output one JSON "
-        'object: {"intro":"..."}'
+        "URLs, HTML, new reporting, or claims about rejected stories. Write it in "
+        "English — the digest language is always English regardless of source language. "
+        'Output one JSON object: {"intro":"..."}'
     )
     user = (
         f"Digest: {topic['title']}\n\n"
@@ -3322,7 +3470,9 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
 
     system = (
         "You are writing a concise markdown summary of today's email digest for "
-        "archival and future deduplication. Output ONLY the markdown, no explanations."
+        "archival and future deduplication. Write the entire summary in English — the "
+        "digest language is always English regardless of source language; keep story "
+        "titles in their original language. Output ONLY the markdown, no explanations."
     )
 
     user = (

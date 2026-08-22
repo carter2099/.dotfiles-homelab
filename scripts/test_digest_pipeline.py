@@ -209,22 +209,31 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
 def test_editorial_validation_and_state_application() -> None:
     candidates, sif_candidates, tracker = editorial_fixture()
     first_id = candidates[0]["candidate_id"]
+    # A candidate carrying the tracked story's own URL is legitimate update
+    # evidence; a different-story candidate is not (digest-quality audit
+    # 2026-08-22: ai-hardware's memory-prices story was overwritten with the
+    # related KOSPI story's development).
+    same_story = {
+        **candidates[0],
+        "title": "Existing narrative update",
+        "url": "https://example.com/existing",
+        "candidate_id": "candidate-same-story",
+    }
+    candidates.append(same_story)
+    same_story_id = same_story["candidate_id"]
     proposal = {
         "selected_fresh": [
-            {"candidate_id": first_id, "editorial_summary": "Approved summary."},
+            {"candidate_id": same_story_id, "editorial_summary": "Approved summary."},
             {"candidate_id": "candidate-unknown", "editorial_summary": "Bad."},
-            {"candidate_id": first_id, "editorial_summary": "Duplicate."},
+            {"candidate_id": same_story_id, "editorial_summary": "Duplicate."},
+            {"candidate_id": first_id, "editorial_summary": "Cross-story source."},
         ],
-        "selected_ongoing": [{
-            "story_url": "https://example.com/existing",
-            "summary": "Existing narrative summary.",
-            "why_still_relevant": "A selected article adds evidence.",
-        }],
+        "selected_ongoing": [],
         "story_state_proposals": [
             {
                 "operation": "update",
                 "story_url": "https://example.com/existing",
-                "evidence_candidate_ids": [first_id],
+                "evidence_candidate_ids": [same_story_id],
                 "latest_dev": "New verified development.",
                 "importance": "high",
                 "status": "active",
@@ -235,20 +244,30 @@ def test_editorial_validation_and_state_application() -> None:
                 "evidence_candidate_ids": ["candidate-unknown"],
                 "latest_dev": "Unsupported.",
             },
+            {
+                "operation": "update",
+                "story_url": "https://example.com/existing",
+                "evidence_candidate_ids": [first_id],
+                "latest_dev": "Related story development.",
+            },
         ],
     }
     validated, warnings = digest._validate_editorial_proposal(
         proposal, candidates, sif_candidates, tracker
     )
-    check(len(validated["selected_fresh"]) == 1, validated)
+    check(len(validated["selected_fresh"]) == 2, validated)
     check(len(validated["story_state_proposals"]) == 1, validated)
     check(
         validated["balance_summary"]
-        == "Validated selection: 1 fresh, 1 ongoing; 1 source domain(s); "
+        == "Validated selection: 2 fresh, 0 ongoing; 1 source domain(s); "
            "categories: Research.",
         validated["balance_summary"],
     )
     check(any("unknown candidate_id" in warning for warning in warnings), warnings)
+    check(
+        any("cross-story tracker update" in warning for warning in warnings),
+        warnings,
+    )
     original = json.loads(json.dumps(tracker))
     updated = digest._apply_story_state_proposals(
         tracker, validated, candidates, "2026-08-10"
@@ -1062,11 +1081,20 @@ def test_tracker_touch_updates_last_updated_for_ongoing_selection() -> None:
     check(story["latest_dev"] == "Previous development.", story)
 
     # A model-supplied update op suppresses the synthesized touch (no dupes).
+    # Evidence must be a same-story candidate (digest-quality audit 2026-08-22).
+    same_story = {
+        **candidates[0],
+        "title": "Existing narrative update",
+        "url": "https://example.com/existing",
+        "candidate_id": "candidate-same-story",
+    }
+    candidates.append(same_story)
     with_update = copy.deepcopy(proposal)
+    with_update["selected_fresh"] = [{"candidate_id": same_story["candidate_id"]}]
     with_update["story_state_proposals"] = [{
         "operation": "update",
         "story_url": "https://example.com/existing",
-        "evidence_candidate_ids": [candidates[0]["candidate_id"]],
+        "evidence_candidate_ids": [same_story["candidate_id"]],
         "latest_dev": "Model-verified development.",
         "importance": "high",
         "status": "active",
@@ -1083,6 +1111,101 @@ def test_tracker_touch_updates_last_updated_for_ongoing_selection() -> None:
         update_ops[0]["latest_dev"] == "Model-verified development.",
         update_ops,
     )
+
+
+def test_ongoing_resurface_cap_cools_recurring_story() -> None:
+    """An Ongoing story surfaced on many consecutive days without an
+    evidence-backed development must be dropped and cooled, so the digest
+    cannot repeat the same story day after day (digest-quality audit
+    2026-08-22: the 404 Media rare-books story ran in ai-tech and OpenAI's
+    PORTS-Pike story in ai-hardware on five consecutive days 08-18→08-22 with
+    paraphrased summaries of the same facts)."""
+    from datetime import date as date_cls
+    story_url = "https://example.com/recurring"
+    tracker = {"stories": [{
+        "title": "Recurring story",
+        "url": story_url,
+        "category": "Research",
+        "latest_dev": "No new development.",
+        "status": "active",
+        "importance": "medium",
+        "first_seen": "2026-08-18",
+        "last_updated": "2026-08-21",
+    }]}
+    proposal = {
+        "selected_fresh": [],
+        "selected_ongoing": [{
+            "story_url": story_url,
+            "summary": "Same facts as yesterday.",
+            "why_still_relevant": "Still the lead.",
+        }],
+        "story_state_proposals": [],
+    }
+    today = date_cls(2026, 8, 22)
+    with tempfile.TemporaryDirectory() as temporary:
+        digest_dir = Path(temporary)
+        # Days 08-18..08-21 all surfaced the story → this run would be day 5.
+        for day in range(18, 22):
+            curated_dir = digest_dir / f"2026-08-{day:02d}"
+            curated_dir.mkdir()
+            (curated_dir / "06-curated.json").write_text(json.dumps({
+                "fresh": [],
+                "ongoing": [{"url": story_url, "title": "Recurring story"}],
+            }))
+        warnings, ops = digest._enforce_ongoing_resurface_cap(
+            proposal, tracker, digest_dir
+        )
+        check(proposal["selected_ongoing"] == [], proposal["selected_ongoing"])
+        check(
+            any("consecutive days" in warning for warning in warnings), warnings
+        )
+        check(
+            len(ops) == 1
+            and ops[0]["operation"] == "update"
+            and ops[0]["story_url"] == story_url
+            and ops[0]["status"] == "cooled"
+            and ops[0]["latest_dev"] == "No new development.",
+            ops,
+        )
+
+        # A gap in the run resets the counter: 4 days total but not consecutive
+        # means the story is not capped.
+        gap_dir = Path(temporary) / "gap"
+        gap_dir.mkdir()
+        for day in (18, 19, 21):  # 08-20 missing
+            curated_dir = gap_dir / f"2026-08-{day:02d}"
+            curated_dir.mkdir()
+            (curated_dir / "06-curated.json").write_text(json.dumps({
+                "fresh": [],
+                "ongoing": [{"url": story_url}],
+            }))
+        check(
+            digest._consecutive_surfaced_days(gap_dir, story_url, today) == 1,
+            digest._consecutive_surfaced_days(gap_dir, story_url, today),
+        )
+
+        # An evidence-backed update op (a real development) resets the cap.
+        evidenced = {
+            "selected_fresh": [],
+            "selected_ongoing": [{
+                "story_url": story_url,
+                "summary": "Same facts as yesterday.",
+                "why_still_relevant": "Still the lead.",
+            }],
+            "story_state_proposals": [{
+                "operation": "update",
+                "story_url": story_url,
+                "evidence_candidate_ids": ["candidate-x"],
+                "latest_dev": "New development.",
+                "importance": "medium",
+                "status": "active",
+            }],
+        }
+        warnings, ops = digest._enforce_ongoing_resurface_cap(
+            evidenced, tracker, digest_dir
+        )
+        check(len(evidenced["selected_ongoing"]) == 1, evidenced["selected_ongoing"])
+        check(warnings == [] and ops == [], (warnings, ops))
 
 
 def test_editorial_floor_and_thin_send_guard() -> None:
@@ -1298,6 +1421,7 @@ def main() -> None:
         test_critic_rejection_fails_closed,
         test_intro_boundary_and_deterministic_render,
         test_tracker_touch_updates_last_updated_for_ongoing_selection,
+        test_ongoing_resurface_cap_cools_recurring_story,
         test_editorial_floor_and_thin_send_guard,
         test_listing_urls_rejected,
     ]
