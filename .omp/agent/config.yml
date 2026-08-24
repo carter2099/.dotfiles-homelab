@@ -1,7 +1,7 @@
 symbolPreset: nerd
 theme: 
   dark: dark-one
-setupVersion: 1
+setupVersion: 2
 modelRoles: 
   default: openai-codex/gpt-5.6-sol:medium
   plan: openai-codex/gpt-5.6-sol:max
@@ -26,3 +26,5 @@ task:
     {}
   agentModelOverrides: 
     {}
+composer: 
+  shape: box
