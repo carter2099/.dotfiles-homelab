@@ -836,6 +836,14 @@ def _date_context() -> str:
     )
 
 
+# Transient proxy 5xx retry for transformation API calls (digest-quality audit
+# 2026-08-24): a temporary 503 from the opencode-go proxy on 08-23 skipped the
+# editorial critic entirely. Retry 502/503/504 with short backoff before the
+# stage-level fallback engages.
+PROXY_5XX_RETRIES = 2
+PROXY_5XX_BACKOFF_SECONDS = 5
+
+
 def _call_llm_proxy(
     system: str,
     user: str,
@@ -857,8 +865,21 @@ def _call_llm_proxy(
         ],
         "temperature": temperature,
     }
-    resp = requests.post(provider_info["chat_url"], json=payload, timeout=timeout)
-    resp.raise_for_status()
+    resp = None
+    for _attempt in range(PROXY_5XX_RETRIES + 1):
+        resp = requests.post(provider_info["chat_url"], json=payload, timeout=timeout)
+        try:
+            resp.raise_for_status()
+            break
+        except requests.HTTPError:
+            # A transient proxy 502/503/504 must not skip an entire editorial
+            # stage — on 08-23 both Mimo calls 503'd and the ai-tech proposal
+            # fell to raw fallback with no critic (digest-quality audit
+            # 2026-08-24). Back off briefly and retry before the stage-level
+            # fallback engages.
+            if _attempt >= PROXY_5XX_RETRIES or resp.status_code not in (502, 503, 504):
+                raise
+            time.sleep(PROXY_5XX_BACKOFF_SECONDS * (_attempt + 1))
     body = resp.json()
     return body["choices"][0]["message"]["content"]
 
@@ -1095,6 +1116,35 @@ def _is_listing_url(url: str) -> bool:
     return path.lower().endswith("/all")
 
 
+# Publisher asset-CDN hosts that must never be used as article URLs. The
+# research model invented assets.theregister.com article links — that host is
+# The Register's static-image CDN, not an article host (HEAD returns 405 with
+# no redirect), and the tracker echoed the mangled link in Ongoing email for
+# five days before it was caught (digest-quality audit 2026-08-24).
+_ASSET_CDN_URL_HOSTS = {
+    "assets.theregister.com",
+}
+
+
+def _is_asset_cdn_url(url: str) -> bool:
+    """True when a URL is hosted on a publisher's sibling asset CDN.
+
+    Such hosts serve images/static assets, never articles, so a link to them
+    is dead even though the host resolves. Candidate articles must resolve on
+    the publisher's article host (e.g. www.theregister.com).
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    try:
+        host = (urlsplit(raw).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _ASSET_CDN_URL_HOSTS or any(
+        host.endswith(f".{cdn}") for cdn in _ASSET_CDN_URL_HOSTS
+    )
+
+
 def _article_cache_path(url: str, cache_dir: Path | None = None) -> Path:
     key = hashlib.sha256(_normalize_url(url).encode()).hexdigest()
     return (cache_dir or ARTICLE_CACHE_DIR) / f"{key}.json"
@@ -1307,6 +1357,7 @@ def _enforce_ongoing_resurface_cap(
     proposal: dict,
     stories_in_flight: dict,
     digest_dir: Path,
+    today: date | None = None,
 ) -> tuple[list[str], list[dict]]:
     """Cool Ongoing selections surfaced on too many consecutive days.
 
@@ -1323,7 +1374,7 @@ def _enforce_ongoing_resurface_cap(
     """
     warnings: list[str] = []
     ops: list[dict] = []
-    today = datetime.now(timezone.utc).date()
+    today = today or datetime.now(timezone.utc).date()
     story_by_url = {
         _normalize_url(story.get("url", "")): story
         for story in stories_in_flight.get("stories", [])
@@ -1817,9 +1868,26 @@ def phase_3_rank(
         item for item in ongoing
         if _normalize_url(item.get("url", "")) not in other_topic_urls
     ]
-    if cross_topic_rejected:
-        print(f"  [Phase 3 cross-dedup] skipped {len(cross_topic_rejected)} "
-              "already-selected URL(s) before fetch")
+    # URL-host validation: a candidate whose URL sits on a publisher asset CDN
+    # (e.g. assets.theregister.com) is not an article and must never reach
+    # fetch or curation (digest-quality audit 2026-08-24: research invented
+    # assets.theregister.com article links that 405'd; the tracker echoed them
+    # in the daily Ongoing email for five days).
+    asset_cdn_rejected = [
+        item for item in eligible_fresh + eligible_ongoing
+        if _is_asset_cdn_url(item.get("url", ""))
+    ]
+    eligible_fresh = [
+        item for item in eligible_fresh
+        if not _is_asset_cdn_url(item.get("url", ""))
+    ]
+    eligible_ongoing = [
+        item for item in eligible_ongoing
+        if not _is_asset_cdn_url(item.get("url", ""))
+    ]
+    if asset_cdn_rejected:
+        print(f"  [Phase 3 URL-host] rejected {len(asset_cdn_rejected)} "
+              "asset-CDN URL(s) (not article hosts) before fetch")
 
     # Pool A: stable importance-first ranking, then publication recency.
     pool_a = sorted(eligible_fresh, key=lambda f: f.get("date_published", ""), reverse=True)
@@ -1837,6 +1905,7 @@ def phase_3_rank(
         story for story in stories_in_flight.get("stories", [])
         if story.get("status") == "active"
         and _normalize_url(story.get("url", "")) not in other_topic_urls
+        and not _is_asset_cdn_url(story.get("url", ""))
     ]
     pool_c = sorted(
         active_sif, key=lambda s: s.get("last_updated", ""), reverse=True
@@ -2274,6 +2343,14 @@ def _validate_editorial_proposal(
             # tracker and resurfaced as ongoing on consecutive days).
             warnings.append(f"dropped listing URL fresh selection {candidate_id}")
             continue
+        if _is_asset_cdn_url(source.get("url", "")):
+            # A publisher asset-CDN host is not an article host; the link is
+            # dead on arrival (digest-quality audit 2026-08-24:
+            # assets.theregister.com research links 405'd and resurfaced in
+            # the tracker). Rejecting the selection also keeps it out of
+            # stories-in-flight.
+            warnings.append(f"dropped asset-CDN fresh selection {candidate_id}")
+            continue
         if candidate_id in selected_ids:
             warnings.append(f"ignored duplicate fresh selection {candidate_id}")
             continue
@@ -2332,6 +2409,9 @@ def _validate_editorial_proposal(
         normalized = _normalize_url(item.get("story_url", item.get("url", "")))
         if _is_listing_url(item.get("story_url", item.get("url", ""))):
             warnings.append(f"ignored listing URL ongoing story {normalized!r}")
+            continue
+        if _is_asset_cdn_url(item.get("story_url", item.get("url", ""))):
+            warnings.append(f"ignored asset-CDN ongoing story {normalized!r}")
             continue
         source = ongoing_by_url.get(normalized)
         if source is None:
@@ -2393,6 +2473,9 @@ def _validate_editorial_proposal(
             if _normalize_url(source.get("url", "")) in tracker_by_url:
                 warnings.append(f"ignored tracker add for existing story {candidate_id}")
                 continue
+            if _is_asset_cdn_url(source.get("url", "")):
+                warnings.append(f"ignored tracker add for asset-CDN story {candidate_id}")
+                continue
             state_proposals.append({
                 "operation": "add",
                 "candidate_id": candidate_id,
@@ -2403,6 +2486,9 @@ def _validate_editorial_proposal(
             })
         elif operation == "update":
             normalized = _normalize_url(item.get("story_url", ""))
+            if _is_asset_cdn_url(item.get("story_url", "")):
+                warnings.append(f"ignored tracker update for asset-CDN story {normalized!r}")
+                continue
             source = tracker_by_url.get(normalized)
             if source is None or not evidence or not latest_dev:
                 warnings.append(
@@ -2452,6 +2538,7 @@ def _validate_editorial_proposal(
         filler_pool = sorted(
             (story for story in sif_candidates
              if not _is_listing_url(story.get("url", ""))
+             and not _is_asset_cdn_url(story.get("url", ""))
              and _normalize_url(story.get("url", "")) not in selected_urls),
             key=lambda story: story.get("last_updated", ""), reverse=True,
         )
@@ -3646,6 +3733,20 @@ def _archive_stub_attempt(run_dir: Path) -> None:
     print(f"  [retry] Preserved failed attempt artifacts → {archive.name}")
 
 
+def _cleanup_stub_attempts(run_dir: Path) -> None:
+    """Remove archived stub-attempt subdirectories after a fully successful run.
+
+    The archived partial attempt is only useful while the run may fail; once
+    the final run completes, keeping it makes the run dir look like a partial
+    run and double-counts artifacts in audits (digest-quality audit 2026-08-24:
+    both audit-window ai-tech days carried stub-attempt-* debris).
+    """
+    for child in run_dir.iterdir():
+        if child.is_dir() and child.name.startswith("stub-attempt-"):
+            shutil.rmtree(child)
+            print(f"  [cleanup] Removed archived stub attempt: {child.name}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Main orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3947,6 +4048,10 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         t9 = _phase_start("Phase 9: Summary")
         phase_9_summary(topic, fresh, ongoing, run_dir, digest_dir)
         _phase_done("Phase 9: Summary", t9)
+        # The run completed successfully: drop the archived stub-attempt debris
+        # from the failed first attempt so the run dir stays clean and audits
+        # don't double-count partial runs (digest-quality audit 2026-08-24).
+        _cleanup_stub_attempts(run_dir)
 
     except Exception as e:
         # Save retry state for cross-process exponential backoff

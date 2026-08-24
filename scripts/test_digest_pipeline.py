@@ -1153,7 +1153,7 @@ def test_ongoing_resurface_cap_cools_recurring_story() -> None:
                 "ongoing": [{"url": story_url, "title": "Recurring story"}],
             }))
         warnings, ops = digest._enforce_ongoing_resurface_cap(
-            proposal, tracker, digest_dir
+            proposal, tracker, digest_dir, today
         )
         check(proposal["selected_ongoing"] == [], proposal["selected_ongoing"])
         check(
@@ -1399,6 +1399,157 @@ def test_stub_retry_preserves_failed_attempt_artifacts() -> None:
         check(not list(run_dir.glob("0*-*.json")), "failed attempt artifacts not preserved")
 
 
+def test_stub_attempts_cleaned_after_success() -> None:
+    """Archived stub-attempt subdirs are removed once the final run completes so
+    audits don't double-count partial runs (digest-quality audit 2026-08-24)."""
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary)
+        stub = run_dir / "stub-attempt-20260823-080644-765214"
+        stub.mkdir()
+        (stub / "01-research-raw.json").write_text("{}")
+        keep = run_dir / "06-curated.json"
+        keep.write_text("{}")
+        digest._cleanup_stub_attempts(run_dir)
+        check(not stub.exists(), "stub-attempt dir not removed")
+        check(keep.exists(), "final-run artifact was removed")
+
+
+def test_asset_cdn_urls_rejected() -> None:
+    """Publisher asset-CDN hosts (assets.theregister.com) must never be selected
+    into Fresh or Ongoing or enter the tracker; they are not article hosts
+    (digest-quality audit 2026-08-24: research invented assets.theregister.com
+    links that 405'd and resurfaced in the tracker for five days)."""
+    cdn = "https://assets.theregister.com/2026/08/19/20262/?td=keepreading&utm_source=openai"
+    check(digest._is_asset_cdn_url(cdn), cdn)
+    check(digest._is_asset_cdn_url(cdn + "?x=1"), "query-suffixed asset CDN")
+    check(not digest._is_asset_cdn_url(
+        "https://www.theregister.com/systems/2026/08/19/story/1"),
+        "article host flagged")
+
+    fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    candidates, _ = digest._prepare_editorial_candidates([
+        {
+            "title": "Baidu chips",
+            "url": cdn,
+            "source_domain": "theregister.com",
+            "summary": "Baidu chip demand rising.",
+            "category": "AI Infrastructure",
+            "importance": "high",
+            "date_published": fresh_day,
+            "source_verdict": "fresh",
+            "judge_verdict": "keep",
+        },
+    ], set())
+    tracker_cdn = {
+        "title": "Tracked asset-CDN story",
+        "url": cdn,
+        "category": "AI Infrastructure",
+        "latest_dev": "Development.",
+        "status": "active",
+        "importance": "medium",
+        "first_seen": "2026-08-20",
+        "last_updated": "2026-08-20",
+    }
+    proposal = {
+        "selected_fresh": [
+            {"candidate_id": candidates[0]["candidate_id"]},
+        ],
+        "selected_ongoing": [{
+            "story_url": cdn,
+            "summary": "Still developing.",
+            "why_still_relevant": "Resurfacing identically.",
+        }],
+        "story_state_proposals": [{
+            "operation": "update",
+            "story_url": cdn,
+            "evidence_candidate_ids": [candidates[0]["candidate_id"]],
+            "latest_dev": "Updated.",
+            "importance": "medium",
+            "status": "active",
+        }],
+    }
+    validated, warnings = digest._validate_editorial_proposal(
+        proposal, candidates, [tracker_cdn],
+        {"stories": [tracker_cdn]}, set(),
+    )
+    check(validated["selected_fresh"] == [], validated["selected_fresh"])
+    check(validated["selected_ongoing"] == [], validated["selected_ongoing"])
+    check(validated["story_state_proposals"] == [], validated["story_state_proposals"])
+    check(any("asset-CDN fresh selection" in warning for warning in warnings), warnings)
+    check(any("asset-CDN ongoing story" in warning for warning in warnings), warnings)
+
+    # The floor must not fill a thin digest with an asset-CDN URL either.
+    floor_proposal = {
+        "selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []
+    }
+    validated, _ = digest._validate_editorial_proposal(
+        floor_proposal, candidates, [tracker_cdn],
+        {"stories": [tracker_cdn]}, set(),
+    )
+    check(validated["selected_ongoing"] == [], validated["selected_ongoing"])
+
+
+def test_proxy_5xx_retry_with_backoff() -> None:
+    """A transient proxy 503 must be retried with backoff before the editorial
+    stage falls back (digest-quality audit 2026-08-24: both Mimo calls 503'd on
+    08-23 and the proposal skipped the critic entirely)."""
+    class FakeResponse:
+        def __init__(self, status_code: int, body: dict | None = None) -> None:
+            self.status_code = status_code
+            self._body = body
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"{self.status_code} Server Error")
+
+        def json(self) -> dict:
+            return self._body
+
+    import requests  # noqa: PLC0415
+
+    calls = []
+    sleeps = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append(url)
+        if len(calls) <= 2:
+            return FakeResponse(503)
+        return FakeResponse(200, {"choices": [{"message": {"content": "reviewed ok"}}]})
+
+    with patch("digest_runner.requests.post", side_effect=fake_post), \
+         patch("digest_runner._detect_model_provider",
+               return_value={"provider": "fake",
+                             "chat_url": "http://proxy.test/v1/chat/completions"}), \
+         patch("digest_runner.time.sleep", side_effect=lambda s: sleeps.append(s)):
+        content = digest._call_llm_proxy("system", "user", model="mimo-v2.5")
+        check(content == "reviewed ok", content)
+        check(len(calls) == 3, f"503 was not retried: {len(calls)} calls")
+        check(len(sleeps) == 2, f"backoff sleeps={sleeps}")
+        check(sleeps == [digest.PROXY_5XX_BACKOFF_SECONDS,
+                         digest.PROXY_5XX_BACKOFF_SECONDS * 2], sleeps)
+
+    # Exhausted 5xx retries still propagate so the stage-level fallback can act.
+    calls.clear()
+    def always_503(url, json=None, timeout=None):
+        calls.append(url)
+        return FakeResponse(503)
+
+    with patch("digest_runner.requests.post",
+               side_effect=always_503), \
+         patch("digest_runner._detect_model_provider",
+               return_value={"provider": "fake",
+                             "chat_url": "http://proxy.test/v1/chat/completions"}), \
+         patch("digest_runner.time.sleep"):
+        raised = False
+        try:
+            digest._call_llm_proxy("system", "user", model="mimo-v2.5")
+        except requests.HTTPError:
+            raised = True
+        check(raised, "exhausted 503 did not raise")
+        check(len(calls) == digest.PROXY_5XX_RETRIES + 1,
+              f"503 retried {len(calls)} times")
+
+
 def main() -> None:
     tests = [
         test_url_normalization,
@@ -1424,6 +1575,9 @@ def main() -> None:
         test_ongoing_resurface_cap_cools_recurring_story,
         test_editorial_floor_and_thin_send_guard,
         test_listing_urls_rejected,
+        test_stub_attempts_cleaned_after_success,
+        test_asset_cdn_urls_rejected,
+        test_proxy_5xx_retry_with_backoff,
     ]
     for test in tests:
         test()
