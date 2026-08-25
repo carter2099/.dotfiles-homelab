@@ -3500,7 +3500,7 @@ def _audit_collector_3_digest_quality():
                                 and publication.get("schema_version") == 2
                                 and (
                                     date_dir.name < "2026-08-25"
-                                    or publication.get("ranking_schema_version") == 2
+                                    or publication.get("ranking_schema_version") == 3
                                 )
                             ),
                             "status": publication.get("status", ""),
@@ -3513,6 +3513,18 @@ def _audit_collector_3_digest_quality():
                                 in {"high", "medium", "low"}
                                 for story in stories
                             ),
+                            "high_evidence_complete": (
+                                date_dir.name < "2026-08-25"
+                                or all(
+                                    story.get("editorial_significance") != "high"
+                                    or (
+                                        isinstance(story.get("significance_evidence"), dict)
+                                        and story.get("significance_validation", {}).get("status")
+                                        == "accepted"
+                                    )
+                                    for story in publication.get("fresh", [])
+                                )
+                            ),
                             "priority_complete": all(
                                 isinstance(story.get("priority_score"), (int, float))
                                 for story in stories
@@ -3523,6 +3535,23 @@ def _audit_collector_3_digest_quality():
                                     isinstance(story.get("attention"), dict)
                                     and story["attention"].get("status")
                                     in {"ok", "no_matches", "unavailable", "out_of_scope"}
+                                    for story in stories
+                                )
+                            ),
+                            "attention_failure_semantics_valid": (
+                                date_dir.name < "2026-08-25"
+                                or all(
+                                    (
+                                        story.get("attention", {}).get("status") != "no_matches"
+                                        or (
+                                            story["attention"].get("attention_now") == 0
+                                            and story["attention"].get("digest_prominence") == 0
+                                        )
+                                    )
+                                    and (
+                                        story.get("attention", {}).get("status") != "unavailable"
+                                        or story["attention"].get("confidence") == 0
+                                    )
                                     for story in stories
                                 )
                             ),
@@ -3988,14 +4017,15 @@ AUDIT_SECTIONS = [
         "artifact": "07-audit-3-digests.json",
         "timeout": 600,
         "guidance": (
-            "Judge Daily News curation and publication over the last 48 hours plus systemic "
-            "regressions: run completeness, freshness, cross-day duplication, stories-in-flight "
-            "hygiene (5d cool / 7d prune), five schema-v2 publications, complete newspaper "
-            "standfirsts, editorial_significance/priority_score separation, observable attention "
-            "records, active front page, and one summary-email marker after the 2026-08-25 cutover. "
-            "Attention may be `unavailable` when GDELT fails; that is valid only with confidence 0 "
-            "and editorial-only priority—not invented popularity. Require the daily-news-data R2 "
-            "target. Do not reopen known historical empty days. Sample up to 3 source links read-only."
+            "Judge Daily News over the last 48 hours plus systemic regressions: completeness, "
+            "freshness, duplication, tracker hygiene, five schema-v2/ranking-v3 publications, "
+            "complete standfirsts, and active front page. Every high significance must have "
+            "accepted source-grounded evidence; routine deprecations without demonstrated broad "
+            "impact must be downgraded. `no_matches` must score attention/prominence 0; "
+            "`unavailable` must have confidence 0 and editorial-only priority. Check deterministic "
+            "priority fields, durable attention records, one mail marker after the 2026-08-25 "
+            "cutover, and the daily-news-data R2 target. Do not reopen known historical empty days. "
+            "Sample up to 3 source links read-only."
         ),
     },
     {

@@ -21,7 +21,11 @@ from digest_runner import (
     _fallback_standfirst,
     _validate_standfirst,
 )
-from news_attention import EDITORIAL_POINTS, normalize_editorial_significance
+from news_attention import (
+    EDITORIAL_POINTS,
+    normalize_editorial_significance,
+    priority_sort_key,
+)
 from send_digest import send as smtp_send
 
 HOME = Path.home()
@@ -35,6 +39,8 @@ BASE_URL = "https://news.carter2099.com"
 SUMMARY_RECIPIENT = "carter2099@pm.me"
 TOPIC_ORDER = tuple(TOPICS)
 PUBLICATION_SCHEMA_VERSION = 2
+FRONT_PAGE_MAX_STORIES = 10
+FRONT_PAGE_SECONDARY_THRESHOLD = 65.0
 
 
 class LegacyDigestParser(HTMLParser):
@@ -152,6 +158,9 @@ def _public_story(story: dict[str, Any], *, ongoing: bool = False) -> dict[str, 
         value = _clean_text(normalized.get(key))
         if value:
             result[key] = value
+    for key in ("significance_evidence", "significance_validation"):
+        if isinstance(normalized.get(key), dict):
+            result[key] = dict(normalized[key])
     url = _safe_url(normalized.get("url"))
     if url:
         result["url"] = url
@@ -234,10 +243,7 @@ def _normalize_publication(
             for story in raw.get("ongoing", []) if isinstance(story, dict)
         ) if item.get("title") and item.get("url")
     ]
-    publication["fresh"].sort(
-        key=lambda item: float(item.get("priority_score", 0.0) or 0.0),
-        reverse=True,
-    )
+    publication["fresh"].sort(key=priority_sort_key, reverse=True)
     valid_standfirst, _ = _validate_standfirst(
         publication["standfirst"],
         publication["fresh"] + publication["ongoing"],
@@ -594,34 +600,63 @@ def render_category_page(
 def _front_page_sections(
     date_editions: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Guarantee one section lead, then fill remaining slots globally above a floor."""
     sections: list[dict[str, Any]] = []
-    all_candidates: list[dict[str, Any]] = []
+    section_by_slug: dict[str, dict[str, Any]] = {}
+    secondary_pool: list[dict[str, Any]] = []
+    chosen_urls: set[str] = set()
+
     for key in TOPIC_ORDER:
         topic = TOPICS[key]
         publication = date_editions.get(topic["web_slug"])
         if publication is None:
             continue
         source = publication["fresh"] or publication["ongoing"]
-        stories = sorted(
+        candidates = sorted(
             (dict(story) for story in source),
-            key=lambda story: float(story.get("priority_score", 0.0) or 0.0),
+            key=priority_sort_key,
             reverse=True,
-        )[:2]
-        for story in stories:
+        )
+        section = {
+            "slug": topic["web_slug"],
+            "title": topic["web_title"],
+            "stories": [],
+        }
+        sections.append(section)
+        section_by_slug[topic["web_slug"]] = section
+        for story in candidates:
             story["_section_slug"] = topic["web_slug"]
             story["_section_title"] = topic["web_title"]
             story["_ongoing"] = not bool(publication["fresh"])
-            all_candidates.append(story)
-        sections.append({
-            "slug": topic["web_slug"],
-            "title": topic["web_title"],
-            "stories": stories,
-        })
-    lead = max(
-        all_candidates,
-        key=lambda story: float(story.get("priority_score", 0.0) or 0.0),
-        default=None,
+        if not candidates:
+            continue
+
+        # One already-curated story represents every section with coverage.
+        primary = candidates[0]
+        section["stories"].append(primary)
+        chosen_urls.add(_safe_url(primary.get("url")))
+        for story in candidates[1:]:
+            if float(story.get("priority_score", 0.0) or 0.0) >= FRONT_PAGE_SECONDARY_THRESHOLD:
+                secondary_pool.append(story)
+
+    remaining_slots = max(
+        0,
+        FRONT_PAGE_MAX_STORIES - sum(len(section["stories"]) for section in sections),
     )
+    for story in sorted(secondary_pool, key=priority_sort_key, reverse=True):
+        if remaining_slots == 0:
+            break
+        url = _safe_url(story.get("url"))
+        if not url or url in chosen_urls:
+            continue
+        section_by_slug[story["_section_slug"]]["stories"].append(story)
+        chosen_urls.add(url)
+        remaining_slots -= 1
+
+    selected = [
+        story for section in sections for story in section["stories"]
+    ]
+    lead = max(selected, key=priority_sort_key, default=None)
     return lead, sections
 
 

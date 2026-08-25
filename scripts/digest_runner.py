@@ -52,7 +52,9 @@ except ImportError:
 import requests
 from news_attention import (
     EDITORIAL_POINTS,
+    SCHEMA_VERSION as ATTENTION_SCHEMA_VERSION,
     normalize_editorial_significance,
+    priority_sort_key,
     score_attention,
 )
 
@@ -64,7 +66,7 @@ ARTICLE_CACHE_DIR = DIGESTS_DIR / ".article-cache"
 ATTENTION_CACHE_DIR = DIGESTS_DIR / ".attention-cache"
 ATTENTION_ARCHIVE_DIR = DIGESTS_DIR / "news" / "attention"
 
-RANKING_SCHEMA_VERSION = 2
+RANKING_SCHEMA_VERSION = 3
 STANDFIRST_PROMPT_VERSION = 2
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
@@ -1698,6 +1700,11 @@ def phase_1_research(
         '"date_published": "YYYY-MM-DD or empty if unknown from search snippet", '
         '"summary": "1-sentence summary from search result", '
         '"category": "...", "editorial_significance": "high|medium|low", '
+        '"significance_evidence": {"basis": "binding_policy_or_law|'
+        'broad_public_consequence|major_conflict_or_disaster|major_financial_scale|'
+        'major_product_or_platform_shift|security_or_safety_incident|'
+        'widespread_mandatory_migration", "affected_scope": "broad|sector|niche", '
+        '"impact": "source-grounded factual sentence"}, '
         '"event": "concise canonical statement of what happened", '
         '"event_terms": ["2-4 distinctive English names or phrases that must all identify '
         'this event"]}\n'
@@ -1923,7 +1930,12 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         "For each finding, evaluate every rule. Preserve source fields, especially "
         "`research_angle_id`, `develops_story_url`, `date_tag`, `event`, `event_terms`, "
         "URL, and publication date. You may adjust `editorial_significance` based only "
-        "on consequence. Never estimate popularity or attention.\n\n"
+        "on consequence. Every `high` finding must include structured "
+        "`significance_evidence` with an allowed basis, broad/sector affected scope, and "
+        "a factual impact sentence grounded in the supplied title/summary. Routine "
+        "deprecations, patches, renames, or migration notices are not high without "
+        "documented widespread disruption or affected scale. Never estimate popularity "
+        "or attention.\n\n"
         "Output a JSON object with two arrays wrapped in ```json fences:\n"
         '  {\n'
         '    "approved": [<findings that pass all quality checks>],\n'
@@ -1976,7 +1988,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         if source is not None:
             for field in (
                 "date_tag", "research_angle_id", "develops_story_url",
-                "event", "event_terms",
+                "event", "event_terms", "significance_evidence",
             ):
                 if field in source:
                     f[field] = source[field]
@@ -2032,7 +2044,7 @@ def _editorial_only_priority(item: dict) -> dict:
     normalize_editorial_significance(item)
     significance = item["editorial_significance"]
     item.setdefault("attention", {
-        "schema_version": 1,
+        "schema_version": ATTENTION_SCHEMA_VERSION,
         "provider": "GDELT DOC 2.0",
         "status": "out_of_scope",
         "attention_now": 50.0,
@@ -2064,7 +2076,7 @@ def phase_2b_attention(
     if output_path.exists():
         try:
             cached = json.loads(output_path.read_text())
-            if cached.get("schema_version") == 1:
+            if cached.get("schema_version") == ATTENTION_SCHEMA_VERSION:
                 return cached.get("fresh", []), cached.get("ongoing", [])
         except (json.JSONDecodeError, OSError):
             pass
@@ -2197,19 +2209,13 @@ def phase_3_rank(
     # Product priority combines editorial consequence with observed attention.
     pool_a = sorted(
         eligible_fresh,
-        key=lambda item: (
-            float(item.get("priority_score", 0.0) or 0.0),
-            item.get("date_published", ""),
-        ),
+        key=priority_sort_key,
         reverse=True,
     )[:FRESH_CAP]
 
     pool_b = sorted(
         eligible_ongoing,
-        key=lambda item: (
-            float(item.get("priority_score", 0.0) or 0.0),
-            item.get("date_published", ""),
-        ),
+        key=priority_sort_key,
         reverse=True,
     )[:ONGOING_CAP]
 
@@ -2229,6 +2235,8 @@ def phase_3_rank(
     )[:SIF_CAP]
 
     phase_4_queue = pool_a + pool_b
+    for item in phase_4_queue:
+        item["ranking_schema_version"] = RANKING_SCHEMA_VERSION
 
     output = {
         "ranking_schema_version": RANKING_SCHEMA_VERSION,
@@ -2249,11 +2257,14 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
     if output_path.exists():
         try:
             cached = json.loads(output_path.read_text())
-            if all("priority_score" in item for item in cached):
-                print(f"  [skip] Phase 4 output exists: {output_path}")
-                return cached
         except (json.JSONDecodeError, OSError):
-            pass
+            cached = []
+        if cached and all(
+            item.get("ranking_schema_version") == RANKING_SCHEMA_VERSION
+            for item in cached
+        ):
+            print(f"  [skip] Phase 4 output exists: {output_path}")
+            return cached
     pruned_cache_entries = _prune_article_cache()
     if pruned_cache_entries:
         print(f"  [cache] pruned {pruned_cache_entries} expired/invalid entry(s)")
@@ -2372,11 +2383,14 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     if output_path.exists():
         try:
             cached = json.loads(output_path.read_text())
-            if all("priority_score" in item for item in cached):
-                print(f"  [skip] Phase 5 output exists: {output_path}")
-                return cached
         except (json.JSONDecodeError, OSError):
-            pass
+            cached = []
+        if cached and all(
+            item.get("ranking_schema_version") == RANKING_SCHEMA_VERSION
+            for item in cached
+        ):
+            print(f"  [skip] Phase 5 output exists: {output_path}")
+            return cached
 
     to_judge = [s for s in summaries if s.get("fetch_success", True)]
     failed = [s for s in summaries if not s.get("fetch_success", True)]
@@ -2609,10 +2623,7 @@ def _prepare_editorial_candidates(
 
     eligible = sorted(
         eligible,
-        key=lambda item: (
-            float(item.get("priority_score", 0.0) or 0.0),
-            item.get("date_published", ""),
-        ),
+        key=priority_sort_key,
         reverse=True,
     )
     return eligible[:15], rejected
@@ -3245,6 +3256,12 @@ def _apply_story_state_proposals(
                 "latest_dev": operation.get("latest_dev", source.get("summary", "")),
                 "last_updated": today_str,
                 "editorial_significance": "high",
+                "significance_evidence": copy.deepcopy(
+                    source.get("significance_evidence", {})
+                ),
+                "significance_validation": copy.deepcopy(
+                    source.get("significance_validation", {})
+                ),
                 "first_seen": today_str,
                 "developments": [{
                     "date": today_str,
@@ -3629,10 +3646,7 @@ def phase_6_curate(
     fresh, ongoing = _materialize_editorial_selection(
         final_proposal, candidates, updated_sif
     )
-    fresh.sort(
-        key=lambda item: float(item.get("priority_score", 0.0) or 0.0),
-        reverse=True,
-    )
+    fresh.sort(key=priority_sort_key, reverse=True)
     for rank, item in enumerate(fresh, 1):
         item["rank"] = rank
     output = {
@@ -3758,6 +3772,18 @@ def _fallback_standfirst(fresh: list[dict], ongoing: list[dict]) -> str:
         standfirst = f"{standfirst} {sentences[1]}"
     return standfirst
 
+def _standfirst_story_fingerprint(stories: list[dict]) -> str:
+    payload = [
+        {
+            "url": story.get("url", ""),
+            "summary": story.get("summary", ""),
+            "priority_score": story.get("priority_score"),
+        }
+        for story in stories
+    ]
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
 
 def _generate_section_standfirst(
     topic: dict,
@@ -3768,12 +3794,17 @@ def _generate_section_standfirst(
     """Generate newspaper copy only after selection and priority ranking."""
     artifact_path = run_dir / "07-standfirst.json"
     stories = fresh + ongoing
+    story_fingerprint = _standfirst_story_fingerprint(stories)
     if artifact_path.exists():
         try:
             data = json.loads(artifact_path.read_text())
             cached = data.get("standfirst", "")
             valid, _ = _validate_standfirst(cached, stories)
-            if data.get("prompt_version") == STANDFIRST_PROMPT_VERSION and valid:
+            if (
+                data.get("prompt_version") == STANDFIRST_PROMPT_VERSION
+                and data.get("story_fingerprint") == story_fingerprint
+                and valid
+            ):
                 return cached
         except (json.JSONDecodeError, OSError):
             pass
@@ -3824,6 +3855,7 @@ def _generate_section_standfirst(
         status = "deterministic_fallback"
     artifact_path.write_text(json.dumps({
         "prompt_version": STANDFIRST_PROMPT_VERSION,
+        "story_fingerprint": story_fingerprint,
         "standfirst": standfirst,
         "status": status,
         "model": model_used,
@@ -3910,6 +3942,7 @@ def phase_7_write(
     """Generate the approved standfirst, then render archival HTML deterministically."""
     output_path = run_dir / "digest.html"
     standfirst_path = run_dir / "07-standfirst.json"
+    story_fingerprint = _standfirst_story_fingerprint(fresh + ongoing)
     if output_path.exists() and standfirst_path.exists():
         try:
             cached = json.loads(standfirst_path.read_text())
@@ -3918,6 +3951,7 @@ def phase_7_write(
             )
             if (
                 cached.get("prompt_version") == STANDFIRST_PROMPT_VERSION
+                and cached.get("story_fingerprint") == story_fingerprint
                 and valid
             ):
                 print(f"  [skip] Phase 7 output exists: {output_path}")
@@ -3938,14 +3972,19 @@ def phase_7_write(
     return rendered
 
 def _public_story(story: dict, *, ongoing: bool = False) -> dict:
-    """Return only the source-backed fields safe to publish on the news site."""
+    """Return only source-backed fields safe to publish on the news site."""
     fields = (
         "title", "url", "source_domain", "date_published", "date_confirmed",
-        "summary", "category", "editorial_significance", "author", "event",
-        "priority_score", "priority_explanation",
+        "summary", "category", "editorial_significance", "significance_evidence",
+        "significance_validation", "author", "event", "priority_score",
+        "priority_explanation",
     )
     normalized = normalize_editorial_significance(copy.deepcopy(story))
-    public = {key: normalized.get(key) for key in fields if normalized.get(key) is not None}
+    public = {
+        key: normalized.get(key)
+        for key in fields
+        if normalized.get(key) is not None
+    }
     attention = normalized.get("attention")
     if isinstance(attention, dict):
         public["attention"] = {

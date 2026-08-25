@@ -21,7 +21,7 @@ def check(condition: bool, message: object) -> None:
 def sample_publication(topic: dict, issue_date: str, marker: str) -> dict:
     return {
         "schema_version": 2,
-        "ranking_schema_version": 2,
+        "ranking_schema_version": 3,
         "date": issue_date,
         "slug": topic["web_slug"],
         "title": topic["web_title"],
@@ -101,6 +101,51 @@ def test_digest_meta_and_truncated_copy_are_rewritten() -> None:
 
 
 
+def test_front_page_guarantees_sections_then_applies_global_floor() -> None:
+    date_editions = {}
+    secondary_scores = [64.0, 66.0, 75.0, 85.0, 95.0]
+    for index, key in enumerate(news.TOPIC_ORDER):
+        topic = news.TOPICS[key]
+        date_editions[topic["web_slug"]] = {
+            "fresh": [
+                {
+                    "title": f"{topic['web_title']} section lead",
+                    "url": f"https://example.com/{topic['web_slug']}/lead",
+                    "priority_score": 100.0 - index,
+                    "editorial_significance": "medium",
+                    "attention": {
+                        "digest_prominence": 100.0 - index,
+                        "attention_now": 90.0 - index,
+                        "confidence": 0.8,
+                    },
+                },
+                {
+                    "title": f"{topic['web_title']} secondary",
+                    "url": f"https://example.com/{topic['web_slug']}/secondary",
+                    "priority_score": secondary_scores[index],
+                    "editorial_significance": "medium",
+                    "attention": {
+                        "digest_prominence": secondary_scores[index],
+                        "attention_now": secondary_scores[index],
+                        "confidence": 0.7,
+                    },
+                },
+            ],
+            "ongoing": [],
+        }
+    lead, sections = news._front_page_sections(date_editions)
+    selected = [story for section in sections for story in section["stories"]]
+    check(len(sections) == 5, sections)
+    check(all(section["stories"] for section in sections), sections)
+    check(len(selected) == 9, selected)
+    check(
+        "https://example.com/ai-tech/secondary"
+        not in {story["url"] for story in selected},
+        selected,
+    )
+    check(lead and lead["priority_score"] == 100.0, lead)
+
+
 def test_publish_builds_separate_history_and_one_email() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -170,7 +215,7 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         stored = json.loads(
             (news_dir / "publications" / current_date / "gaming.json").read_text()
         )
-        check(stored["ranking_schema_version"] == 2, stored)
+        check(stored["ranking_schema_version"] == 3, stored)
         check("FRONT PAGE" in (current / "archive" / "index.html").read_text().upper(),
               "archive omitted front-page links")
         check((current / current_date / "gaming" / "index.html").exists(), "gaming page missing")
@@ -197,6 +242,7 @@ def main() -> None:
     tests = [
         test_legacy_html_migration,
         test_digest_meta_and_truncated_copy_are_rewritten,
+        test_front_page_guarantees_sections_then_applies_global_floor,
         test_publish_builds_separate_history_and_one_email,
     ]
     for test in tests:

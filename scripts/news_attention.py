@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROVIDER = "GDELT DOC 2.0"
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 CACHE_TTL_HOURS = 6
@@ -31,6 +31,22 @@ EDITORIAL_POINTS = {
     "high": 100.0,
     "medium": 60.0,
     "low": 25.0,
+}
+
+HIGH_SIGNIFICANCE_BASES = {
+    "binding_policy_or_law",
+    "broad_public_consequence",
+    "major_conflict_or_disaster",
+    "major_financial_scale",
+    "major_product_or_platform_shift",
+    "security_or_safety_incident",
+    "widespread_mandatory_migration",
+}
+
+IMPACT_SCOPE_POINTS = {
+    "broad": 2.0,
+    "sector": 1.0,
+    "niche": 0.0,
 }
 
 _STOPWORDS = {
@@ -51,6 +67,96 @@ def normalize_editorial_significance(item: dict[str, Any]) -> dict[str, Any]:
     legacy = item.pop("importance", None)
     value = _clean_text(item.get("editorial_significance") or legacy).lower()
     item["editorial_significance"] = value if value in EDITORIAL_POINTS else "medium"
+    return item
+
+def _significance_tokens(value: Any) -> set[str]:
+    return {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]*", _clean_text(value))
+        if len(token) >= 3 and token.casefold() not in _STOPWORDS
+    }
+
+
+def _downgrade_high(item: dict[str, Any], reason: str) -> dict[str, Any]:
+    item["editorial_significance"] = "medium"
+    item["significance_validation"] = {
+        "status": "downgraded",
+        "from": "high",
+        "to": "medium",
+        "reason": reason,
+    }
+    return item
+
+
+def enforce_editorial_significance(item: dict[str, Any]) -> dict[str, Any]:
+    """Require source-grounded impact evidence before accepting `high`."""
+    normalize_editorial_significance(item)
+    if item["editorial_significance"] != "high":
+        item.setdefault("significance_validation", {
+            "status": "accepted",
+            "reason": "high-significance gate not required",
+        })
+        return item
+
+    evidence = item.get("significance_evidence")
+    if not isinstance(evidence, dict):
+        return _downgrade_high(item, "missing structured significance evidence")
+    basis = _clean_text(evidence.get("basis")).lower()
+    scope = _clean_text(evidence.get("affected_scope")).lower()
+    impact = _clean_text(evidence.get("impact"))
+    if basis not in HIGH_SIGNIFICANCE_BASES:
+        return _downgrade_high(item, "unsupported high-significance basis")
+    if scope not in {"broad", "sector"}:
+        return _downgrade_high(item, "high significance requires broad or sector scope")
+    if len(impact) < 30:
+        return _downgrade_high(item, "impact evidence is missing or too vague")
+
+    source_text = " ".join([
+        _clean_text(item.get("title")),
+        _clean_text(item.get("summary")),
+        " ".join(
+            _clean_text(detail)
+            for detail in item.get("key_details", [])
+            if isinstance(detail, str)
+        ),
+    ])
+    impact_tokens = _significance_tokens(impact)
+    source_tokens = _significance_tokens(source_text)
+    required_overlap = min(3, len(impact_tokens))
+    if required_overlap == 0 or len(impact_tokens & source_tokens) < required_overlap:
+        return _downgrade_high(item, "impact evidence is not grounded in source facts")
+    source_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", source_text))
+    impact_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", impact))
+    if not impact_numbers.issubset(source_numbers):
+        return _downgrade_high(item, "impact evidence introduced unsupported numbers")
+
+    maintenance_change = bool(re.search(
+        r"\b(deprecat\w*|renam\w*|remov(?:e|ed|al)|patch(?:es)?|"
+        r"release notes?|minor update|version bump)\b",
+        source_text,
+        re.IGNORECASE,
+    ))
+    high_impact_exception = basis in {
+        "binding_policy_or_law",
+        "security_or_safety_incident",
+    }
+    demonstrated_scale = bool(re.search(
+        r"\b(all|every|millions?|thousands?|widely used|critical|outage|"
+        r"data loss|no replacement|breaking existing|mandatory|deadline)\b|"
+        r"\b\d[\d,.]*\s*(users?|customers?|organizations?|systems?)\b",
+        source_text,
+        re.IGNORECASE,
+    ))
+    if maintenance_change and not high_impact_exception and not demonstrated_scale:
+        return _downgrade_high(
+            item,
+            "routine maintenance or deprecation lacks demonstrated broad impact",
+        )
+
+    item["significance_validation"] = {
+        "status": "accepted",
+        "reason": f"{basis} with {scope} affected scope",
+    }
     return item
 
 
@@ -99,6 +205,17 @@ def event_terms(candidate: dict[str, Any]) -> list[str]:
         tokens.pop(0)
     phrase = _sanitize_term(" ".join(tokens[:4]))
     return [phrase] if len(phrase.split()) >= 3 else terms
+
+def event_term_source(candidate: dict[str, Any]) -> str:
+    supplied = candidate.get("event_terms")
+    if isinstance(supplied, list):
+        cleaned = [
+            term for term in (_sanitize_term(value) for value in supplied)
+            if term and not (" " not in term and term.casefold() in _STOPWORDS)
+        ]
+        if _terms_are_sufficient(cleaned):
+            return "model_terms"
+    return "title_fallback"
 
 
 def gdelt_query(candidate: dict[str, Any]) -> str:
@@ -421,7 +538,7 @@ def _confidence(observation: dict[str, Any]) -> float:
         return 0.0
     terms_quality = min(1.0, len(observation.get("terms", [])) / 3)
     if observation.get("status") == "no_matches":
-        return round(0.35 + 0.1 * terms_quality, 2)
+        return 0.55 if observation.get("term_source") == "model_terms" else 0.30
     sampled = float(observation.get("sampled_articles", 0) or 0)
     groups = float(observation.get("independent_source_groups", 0) or 0)
     lag = observation.get("data_lag_minutes")
@@ -446,6 +563,36 @@ def _priority_score(significance: str, digest_prominence: float, confidence: flo
         1,
     )
 
+def _numeric(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def priority_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    """Deterministic tie-breakers; never fall back to discovery order."""
+    attention = item.get("attention")
+    attention = attention if isinstance(attention, dict) else {}
+    evidence = item.get("significance_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    date_value = re.sub(
+        r"\D", "", _clean_text(item.get("date_confirmed") or item.get("date_published"))
+    )
+    return (
+        _numeric(item.get("priority_score")),
+        _numeric(attention.get("digest_prominence")),
+        _numeric(attention.get("attention_now")),
+        _numeric(attention.get("confidence")),
+        IMPACT_SCOPE_POINTS.get(_clean_text(evidence.get("affected_scope")).lower(), 0.0),
+        EDITORIAL_POINTS.get(
+            _clean_text(item.get("editorial_significance")).lower(), 0.0
+        ),
+        int(date_value[:8]) if len(date_value) >= 8 else 0,
+        _clean_text(item.get("title")).casefold(),
+        _clean_text(item.get("url")).casefold(),
+    )
+
 
 def score_attention(
     candidates: list[dict[str, Any]],
@@ -461,7 +608,7 @@ def score_attention(
     effective_fetcher = fetcher or (
         lambda candidate, timestamp: fetch_gdelt_attention(candidate, timestamp)
     )
-    scored = [normalize_editorial_significance(copy.deepcopy(item)) for item in candidates]
+    scored = [enforce_editorial_significance(copy.deepcopy(item)) for item in candidates]
     observations: list[dict[str, Any]] = []
     requested = 0
     cache_hits = 0
@@ -487,18 +634,31 @@ def score_attention(
                 }
             requested += 1
             _save_cache(candidate, cache_dir, observation)
+        observation.setdefault("term_source", event_term_source(candidate))
         observations.append(observation)
 
     comparable = [
         observation for observation in observations
-        if observation.get("status") in {"ok", "no_matches"}
+        if observation.get("status") == "ok"
     ]
     for candidate, observation in zip(scored, observations):
         significance = candidate["editorial_significance"]
-        if observation.get("status") == "unavailable":
+        status = observation.get("status")
+        if status == "unavailable":
             attention_now = 50.0
             digest_prominence = 50.0
             normalized = {}
+        elif status == "no_matches":
+            attention_now = 0.0
+            digest_prominence = 0.0
+            normalized = {
+                "publisher_saturation": 0.0,
+                "coverage_velocity": 0.0,
+                "source_breadth": 0.0,
+                "peak_attention": 0.0,
+                "attention_over_time": 0.0,
+                "current_momentum": 0.0,
+            }
         else:
             normalized = {
                 "publisher_saturation": _percentile(
@@ -579,6 +739,7 @@ def score_attention(
                 "sampled_articles": observation.get("sampled_articles", 0),
                 "sample_relevance": observation.get("sample_relevance"),
                 "query": observation.get("query", ""),
+                "term_source": observation.get("term_source"),
                 "channels_available": ["news_coverage"],
                 "channels_unavailable": ["homepage_prominence", "social", "video"],
             },

@@ -6,11 +6,12 @@ from __future__ import annotations
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-
 from news_attention import (
     _observation_from_response,
+    enforce_editorial_significance,
     event_terms,
     normalize_editorial_significance,
+    priority_sort_key,
     score_attention,
 )
 
@@ -65,6 +66,11 @@ def test_attention_and_editorial_significance_remain_separate() -> None:
             "url": "https://example.com/high",
             "importance": "high",
             "event_terms": ["Consequential", "quiet event"],
+            "significance_evidence": {
+                "basis": "broad_public_consequence",
+                "affected_scope": "broad",
+                "impact": "The consequential quiet event affects a broad public audience.",
+            },
         },
         {
             "title": "Fast breaking product event",
@@ -156,6 +162,11 @@ def test_unavailable_attention_falls_back_to_editorial_only() -> None:
         "title": "Major policy change",
         "url": "https://example.com/policy",
         "editorial_significance": "high",
+        "significance_evidence": {
+            "basis": "binding_policy_or_law",
+            "affected_scope": "broad",
+            "impact": "The major policy change creates binding broad requirements.",
+        },
         "event_terms": ["Major policy", "government action"],
     }
 
@@ -182,6 +193,101 @@ def test_unavailable_attention_falls_back_to_editorial_only() -> None:
     check(artifact["unavailable"] == 1, artifact)
 
 
+def test_high_significance_requires_grounded_broad_impact() -> None:
+    deprecated = {
+        "title": "Codex MCP server command deprecated",
+        "summary": "OpenAI deprecated the command and directed users to a replacement app server.",
+        "editorial_significance": "high",
+        "significance_evidence": {
+            "basis": "widespread_mandatory_migration",
+            "affected_scope": "sector",
+            "impact": "Users of the deprecated command can move to the replacement app server.",
+        },
+    }
+    enforce_editorial_significance(deprecated)
+    check(deprecated["editorial_significance"] == "medium", deprecated)
+    check(
+        "lacks demonstrated broad impact"
+        in deprecated["significance_validation"]["reason"],
+        deprecated,
+    )
+
+    binding = {
+        "title": "National regulator adopts binding AI safety rule",
+        "summary": "The national regulator adopted a binding AI safety rule covering every provider.",
+        "editorial_significance": "high",
+        "significance_evidence": {
+            "basis": "binding_policy_or_law",
+            "affected_scope": "broad",
+            "impact": "The binding AI safety rule covers every national provider.",
+        },
+    }
+    enforce_editorial_significance(binding)
+    check(binding["editorial_significance"] == "high", binding)
+    check(binding["significance_validation"]["status"] == "accepted", binding)
+
+
+def test_confirmed_no_matches_is_low_attention_not_neutral() -> None:
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    candidate = {
+        "title": "Small developer tool update",
+        "url": "https://example.com/tool",
+        "editorial_significance": "medium",
+        "event_terms": ["Developer tool", "small update"],
+    }
+
+    def no_matches(item: dict, observed_at: datetime) -> dict:
+        return {
+            "status": "no_matches",
+            "provider": "GDELT DOC 2.0",
+            "query": "\"Developer tool\" \"small update\"",
+            "terms": item["event_terms"],
+            "observed_at": observed_at.isoformat(),
+            "timeline": [],
+        }
+
+    with tempfile.TemporaryDirectory() as temporary:
+        scored, _ = score_attention(
+            [candidate],
+            Path(temporary),
+            now=now,
+            fetcher=no_matches,
+            request_interval=0,
+        )
+    story = scored[0]
+    check(story["attention"]["attention_now"] == 0.0, story)
+    check(story["attention"]["digest_prominence"] == 0.0, story)
+    check(story["attention"]["confidence"] == 0.55, story)
+    check(story["priority_score"] < 60.0, story)
+
+
+def test_priority_ties_use_evidence_not_discovery_order() -> None:
+    lower = {
+        "title": "Discovered first",
+        "priority_score": 80.0,
+        "editorial_significance": "high",
+        "attention": {
+            "digest_prominence": 60.0,
+            "attention_now": 70.0,
+            "confidence": 0.7,
+        },
+        "significance_evidence": {"affected_scope": "sector"},
+    }
+    higher = {
+        "title": "Discovered second",
+        "priority_score": 80.0,
+        "editorial_significance": "medium",
+        "attention": {
+            "digest_prominence": 90.0,
+            "attention_now": 80.0,
+            "confidence": 0.8,
+        },
+        "significance_evidence": {"affected_scope": "broad"},
+    }
+    ranked = sorted([lower, higher], key=priority_sort_key, reverse=True)
+    check(ranked[0]["title"] == "Discovered second", ranked)
+
+
 def test_event_term_fallback_and_legacy_migration() -> None:
     item = {"title": "Nvidia unveils Rubin GPU platform", "importance": "high"}
     normalize_editorial_significance(item)
@@ -197,6 +303,9 @@ def main() -> None:
         test_gdelt_timeline_observation_and_syndication_dedup,
         test_attention_and_editorial_significance_remain_separate,
         test_unavailable_attention_falls_back_to_editorial_only,
+        test_high_significance_requires_grounded_broad_impact,
+        test_confirmed_no_matches_is_low_attention_not_neutral,
+        test_priority_ties_use_evidence_not_discovery_order,
         test_event_term_fallback_and_legacy_migration,
     ]
     for test in tests:
