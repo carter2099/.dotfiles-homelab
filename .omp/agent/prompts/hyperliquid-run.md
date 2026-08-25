@@ -7,7 +7,7 @@ description: Autonomous daily development run for the Hyperliquid Ruby SDK — r
 Repo: `~/dev/hyperliquid` (dev branch)
 State file: `~/agent-state/hyperliquid-sdk.md`
 Private key: `~/.config/hyperliquid-agent/env`
-Ruby: always use `RBENV_VERSION=3.4.8`
+Ruby: always use `RBENV_VERSION=3.4.10`
 
 ## Step 1: Read state
 
@@ -25,7 +25,7 @@ Read `~/agent-state/hyperliquid-sdk.md` in full. Note:
 cd ~/dev/hyperliquid
 git checkout dev
 git pull origin dev
-RBENV_VERSION=3.4.8 bundle install --quiet
+RBENV_VERSION=3.4.10 bundle install --quiet
 ```
 
 ## Step 3: Scan upstream references (skip if SHA unchanged)
@@ -87,7 +87,7 @@ For each gap in scope:
 3. Write a unit test in `spec/` mirroring the existing test structure (WebMock stubs for HTTP methods, no live calls in unit tests).
 4. Run the single spec file to verify before moving on:
    ```bash
-   cd ~/dev/hyperliquid && RBENV_VERSION=3.4.8 bundle exec rspec spec/path/to/new_spec.rb
+   cd ~/dev/hyperliquid && RBENV_VERSION=3.4.10 bundle exec rspec spec/path/to/new_spec.rb
    ```
 5. Mark the gap 🔵 in_progress in the state file, then ✅ done once the test passes.
 
@@ -97,7 +97,7 @@ Do not implement more than the defined scope even if time seems available — st
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.8 bundle exec rake
+RBENV_VERSION=3.4.10 bundle exec rake
 ```
 
 Fix any failures before continuing. If a failure is unrelated to this run's changes, note it in the state file and email summary but do not block the commit.
@@ -109,7 +109,7 @@ Load the private key and run the automated integration suite:
 ```bash
 cd ~/dev/hyperliquid
 source ~/.config/hyperliquid-agent/env
-RBENV_VERSION=3.4.8 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY ruby scripts/test_automated.rb
+RBENV_VERSION=3.4.10 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY ruby scripts/test_automated.rb
 ```
 
 Before investigating any failures, cross-reference against the **Known Pre-existing Failures** section in the state file. If a failure matches a known pre-existing issue, note it in the email but do not spend tool calls re-investigating it. Only investigate genuinely new failures.
