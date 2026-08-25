@@ -1,8 +1,8 @@
 [Unit]
-Description=Daily homelab steward at 17:00 America/New_York (5pm ET)
+Description=Daily homelab steward at 01:00 America/New_York (1am ET)
 
 [Timer]
-OnCalendar=*-*-* 17:00:00 America/New_York
+OnCalendar=*-*-* 01:00:00 America/New_York
 Persistent=true
 
 [Install]

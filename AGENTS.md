@@ -127,7 +127,7 @@ Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) 
 
 ## Homelab Steward
 
-Daily maintenance at 5:00 PM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
+Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
 
 ## Agent CLI: omp
 
