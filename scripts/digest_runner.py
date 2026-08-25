@@ -4343,7 +4343,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 state = json.loads(retry_state_path.read_text()) \
                     if retry_state_path.exists() else {}
                 state["retry_count"] = state.get("retry_count", 0) + 1
-                state["last_failure"] = datetime.utcnow().isoformat()
+                state["last_failure"] = datetime.now(timezone.utc).isoformat()
                 retry_state_path.write_text(json.dumps(state))
             except Exception:
                 pass
@@ -4360,7 +4360,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     if not TEST_MODE:
         model = MODEL_OVERRIDE if MODEL_OVERRIDE else MODEL
         runs_log = digest_dir / ".runs.log"
-        now_utc = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         entry = f"{now_utc} {category} duration={overall_elapsed:.0f}s model={model}\n"
         with open(runs_log, "a") as f:
             f.write(entry)

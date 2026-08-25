@@ -1,5 +1,5 @@
 [Unit]
-Description=Fire all daily digests at 4am ET (8am UTC)
+Description=Publish Daily News at 4am ET (8am UTC)
 
 [Timer]
 OnCalendar=*-*-* 08:00:00

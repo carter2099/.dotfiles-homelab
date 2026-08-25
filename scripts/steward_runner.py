@@ -3517,6 +3517,7 @@ def _audit_collector_3_digest_quality():
     except OSError:
         backup_config = ""
     evidence["publication"] = {
+        "contract_started": "2026-08-25",
         "dates": publication_dates,
         "site_current_is_symlink": current_site.is_symlink(),
         "site_index_exists": (current_site / "index.html").exists(),
@@ -3927,9 +3928,10 @@ AUDIT_SECTIONS = [
             "Judge the unchanged curation pipeline plus its publication contract, focusing on the "
             "last 48 hours and ongoing systemic regressions: run completeness, story freshness, "
             "cross-day duplication, stories-in-flight.json hygiene (5d cool / 7d prune), five valid "
-            "publication JSON artifacts per completed date, active static-site build, one summary-email "
-            "marker, and the daily-news-publications target in the existing R2 backup. Do NOT file "
-            "historical empty-digest days as findings once known; only flag recent misses. Sample up "
+            "publication JSON artifacts per completed date, active static-site build, and one "
+            "summary-email marker for dates on/after the 2026-08-25 publication cutover, plus the "
+            "daily-news-publications target in the existing R2 backup. Do NOT file historical "
+            "empty-digest days as findings once known; only flag recent misses. Sample up "
             "to 3 source links read-only."
         ),
     },
