@@ -27,17 +27,26 @@ _cleanup() {
 trap _cleanup TERM INT HUP
 
 # ── Incomplete-run detection ──
-# Check if the previous run was interrupted (no "ALL DONE" at end of log)
+# A run is incomplete only if it never wrote ALL DONE. Post-completion lines
+# (WARN-ALERT and friends) may legitimately follow ALL DONE, so checking only
+# the final log line produced false "Previous run incomplete" warnings
+# (digest-quality audit 2026-08-25): compare the last START marker with the
+# last ALL DONE instead.
 if [ -f "$LOGFILE" ]; then
-    LAST_LINE=$(tail -1 "$LOGFILE" 2>/dev/null || true)
-    if [ -n "$LAST_LINE" ] && echo "$LAST_LINE" | grep -qv "ALL DONE"; then
-        # Extract topic from SCRIPT TERMINATED line if available
+    LAST_START_LN=$(grep -n " START " "$LOGFILE" 2>/dev/null | tail -1 | cut -d: -f1 || true)
+    LAST_DONE_LN=$(grep -n "ALL DONE" "$LOGFILE" 2>/dev/null | tail -1 | cut -d: -f1 || true)
+    if [ -n "$LAST_START_LN" ] && { [ -z "$LAST_DONE_LN" ] || [ "$LAST_DONE_LN" -lt "$LAST_START_LN" ]; }; then
+        # Extract topic from the most recent SCRIPT TERMINATED line (which must
+        # come after the last ALL DONE to belong to the incomplete run)
         topic_hint=""
-        if echo "$LAST_LINE" | grep -q "topic="; then
-            topic_hint=$(echo "$LAST_LINE" | sed 's/.*topic=\([^ ]*\).*/\1/')
-            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run interrupted during topic=$topic_hint (last: $LAST_LINE)" | tee -a "$LOGFILE"
+        if LAST_TERM_LN=$(grep -n "SCRIPT TERMINATED" "$LOGFILE" 2>/dev/null | tail -1 | cut -d: -f1) && \
+           [ -n "$LAST_TERM_LN" ] && { [ -z "$LAST_DONE_LN" ] || [ "$LAST_TERM_LN" -gt "$LAST_DONE_LN" ]; }; then
+            topic_hint=$(sed -n "${LAST_TERM_LN}p" "$LOGFILE" 2>/dev/null | sed 's/.*topic=\([^ ]*\).*/\1/' || true)
+        fi
+        if [ -n "$topic_hint" ]; then
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run interrupted during topic=$topic_hint" | tee -a "$LOGFILE"
         else
-            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run incomplete (last: $LAST_LINE)" | tee -a "$LOGFILE"
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING Previous run incomplete" | tee -a "$LOGFILE"
         fi
     fi
 fi
