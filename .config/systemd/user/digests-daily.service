@@ -1,5 +1,5 @@
 [Unit]
-Description=Run all 5 daily email digests sequentially
+Description=Curate and publish the daily news edition
 Wants=network-online.target
 After=network-online.target
 

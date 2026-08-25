@@ -44,6 +44,7 @@ ENDPOINTS = {
     "blog": "http://127.0.0.1:33099",
     "llm-proxy": "http://127.0.0.1:8081/health",
     "searxng": "http://127.0.0.1:8080/search?q=healthcheck&format=json",
+    "news": "http://127.0.0.1:30144/healthz",
 }
 STEWARD_MODEL = "openai-codex/gpt-5.6-luna:high"
 STEWARD_PATH = "/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -3462,6 +3463,75 @@ def _audit_collector_3_digest_quality():
                 })
                 evidence["placeholder_leakage"] += placeholder_count
         evidence["topics"][topic] = tev
+    # Published-site contract: every completed date has one durable JSON artifact
+    # per category, an atomically activated static build, one mail marker, and a
+    # configured target in the existing R2 backup.
+    news_root = HOME / "digests" / "news"
+    publications_dir = news_root / "publications"
+    publication_dates = []
+    if publications_dir.exists():
+        dated_dirs = [
+            path for path in sorted(publications_dir.iterdir(), reverse=True)
+            if path.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.name)
+        ]
+        for date_dir in dated_dirs[:2]:
+            entries = {}
+            for slug in ("ai-tech", "agents", "ai-hardware", "gaming", "world"):
+                path = date_dir / f"{slug}.json"
+                entry = {"exists": path.exists(), "valid": False, "stories": 0}
+                if path.exists():
+                    try:
+                        publication = json.loads(path.read_text())
+                        entry.update({
+                            "valid": (
+                                publication.get("date") == date_dir.name
+                                and publication.get("slug") == slug
+                            ),
+                            "status": publication.get("status", ""),
+                            "stories": len(publication.get("fresh", []))
+                            + len(publication.get("ongoing", [])),
+                            "placeholder_leaks": len(re.findall(
+                                r"\{\{[A-Z_]+\}\}|https?://example\.com\b",
+                                path.read_text(),
+                            )),
+                        })
+                    except (json.JSONDecodeError, OSError) as error:
+                        entry["error"] = str(error)
+                entries[slug] = entry
+            publication_dates.append({
+                "date": date_dir.name,
+                "categories": entries,
+                "summary_email_sent": (
+                    news_root / "mail" / f"{date_dir.name}.sent.json"
+                ).exists(),
+            })
+    current_site = news_root / "current"
+    build_path = current_site / "build.json"
+    try:
+        build = json.loads(build_path.read_text()) if build_path.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        build = {}
+    backup_config_path = HOME / "homelab-backup" / "config.yaml"
+    try:
+        backup_config = backup_config_path.read_text()
+    except OSError:
+        backup_config = ""
+    evidence["publication"] = {
+        "dates": publication_dates,
+        "site_current_is_symlink": current_site.is_symlink(),
+        "site_index_exists": (current_site / "index.html").exists(),
+        "build": build,
+        "r2_target_configured": (
+            "name: daily-news-publications" in backup_config
+            and "source: /home/carter/digests/news/publications" in backup_config
+        ),
+        "backup_config_mtime": (
+            datetime.fromtimestamp(
+                backup_config_path.stat().st_mtime, timezone.utc
+            ).isoformat()
+            if backup_config_path.exists() else ""
+        ),
+    }
 
     # llm-proxy fallback count in digest window
     fallback_log = run_capture(
@@ -3854,10 +3924,13 @@ AUDIT_SECTIONS = [
         "artifact": "07-audit-3-digests.json",
         "timeout": 600,
         "guidance": (
-            "Judge digest quality focusing on the last 48 hours plus any ongoing systemic regressions: "
-            "run completeness, story freshness, cross-day duplication, stories-in-flight.json hygiene "
-            "(5d cool / 7d prune). Do NOT file historical empty-digest days as findings once they are "
-            "already known — only flag recent misses. Sample up to 3 links with curl -sI (read-only)."
+            "Judge the unchanged curation pipeline plus its publication contract, focusing on the "
+            "last 48 hours and ongoing systemic regressions: run completeness, story freshness, "
+            "cross-day duplication, stories-in-flight.json hygiene (5d cool / 7d prune), five valid "
+            "publication JSON artifacts per completed date, active static-site build, one summary-email "
+            "marker, and the daily-news-publications target in the existing R2 backup. Do NOT file "
+            "historical empty-digest days as findings once known; only flag recent misses. Sample up "
+            "to 3 source links read-only."
         ),
     },
     {
@@ -3867,10 +3940,14 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Judge the security posture from the evidence: listening sockets vs the documented set "
-            "(loopback-only: open-webui 48100, searxng 8080, prompt-guard 8090; ufw-gated: llm-proxy 8081, 8082; "
-            "LAN: blog 33099), ufw ruleset intact (cni0/flannel.1/docker bridges), unattended-upgrades "
-            "active, carter2099.com RDAP expiry (>30d out = ok), CF tunnel ingress vs expected hostnames "
-            "(chat, hooks, freshrss, blog, omp, ssh), SSH failed-password volume. Flag anything unexpected. For repo_secrets: working_tree_issues means secret-pattern files are uncommitted in a repo — flag each as ATTENTION; commit_issues means a secret-pattern string appeared in recent diffs — flag as ATTENTION with the commit SHA. No findings = PASS for this sub-check."
+            "(loopback-only: open-webui 48100, searxng 8080, prompt-guard 8090, news 30144; "
+            "ufw-gated: llm-proxy 8081, opencode-go-proxy 8082; LAN: blog 33099), ufw ruleset intact "
+            "(cni0/flannel.1/docker bridges), unattended-upgrades active, carter2099.com RDAP expiry "
+            "(>30d out = ok), CF tunnel ingress vs expected hostnames (chat, hooks, freshrss, blog, "
+            "omp, ssh, beatz, rig, news), SSH failed-password volume. Flag anything unexpected. "
+            "For repo_secrets: working_tree_issues means secret-pattern files are uncommitted in a "
+            "repo — flag each as ATTENTION; commit_issues means a secret-pattern string appeared in "
+            "recent diffs — flag as ATTENTION with the commit SHA. No findings = PASS for this sub-check."
         ),
     },
     {

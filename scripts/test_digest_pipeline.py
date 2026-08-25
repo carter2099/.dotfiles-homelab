@@ -1360,8 +1360,8 @@ def test_ongoing_resurface_cap_cools_recurring_story() -> None:
         check(warnings == [] and ops == [], (warnings, ops))
 
 
-def test_editorial_floor_and_thin_send_guard() -> None:
-    """The send floor may use qualified developing stories, never filler."""
+def test_editorial_floor_and_publication_artifact() -> None:
+    """The editorial floor rejects filler and Phase 8 publishes stable local data."""
     candidates, sif_candidates, tracker = editorial_fixture()
     low_one_off = {
         "title": "Low-priority one-off",
@@ -1428,8 +1428,7 @@ def test_editorial_floor_and_thin_send_guard() -> None:
     )
     check(len(validated["selected_ongoing"]) == 1, validated["selected_ongoing"])
 
-    # 0 fresh + 0 ongoing and an empty pool: the digest stays below two and the
-    # Phase 8 guard archives instead of emailing.
+    # 0 fresh + 0 ongoing and an empty pool remains honestly empty.
     empty_validated, _ = digest._validate_editorial_proposal(
         {"selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []},
         candidates, [], {"stories": []}, set(),
@@ -1439,38 +1438,49 @@ def test_editorial_floor_and_thin_send_guard() -> None:
 
     with tempfile.TemporaryDirectory() as temporary:
         digest_dir = Path(temporary) / "world-digest"
-        run_dir = Path(temporary) / "run"
+        run_dir = digest_dir / f"{datetime.now():%Y-%m-%d}"
         digest_dir.mkdir(parents=True)
-        run_dir.mkdir(parents=True)
+        run_dir.mkdir()
+        (run_dir / "06-curated.json").write_text(json.dumps({"fresh": [], "ongoing": []}))
+        (run_dir / "07-intro.json").write_text(json.dumps({
+            "intro": "Two verified stories lead this published World edition."
+        }))
+        fresh_story = {
+            "title": "First",
+            "url": "https://example.com/a",
+            "summary": "First source-backed summary.",
+            "category": "Policy",
+            "candidate_id": "private-editorial-id",
+        }
+        ongoing_story = {
+            "title": "Second",
+            "url": "https://example.com/b",
+            "summary": "Second source-backed summary.",
+            "why_still_relevant": "A material development occurred today.",
+            "selection_reason": "private editorial reasoning",
+        }
 
-        calls: list[object] = []
-
-        def fake_send(*_args: object, **_kwargs: object) -> object:
-            calls.append(_args)
-            return type("Result", (), {"returncode": 0, "stderr": ""})()
-
-        html = "<html>thin</html>"
-        with patch("digest_runner.subprocess.run", side_effect=fake_send):
-            digest.phase_8_send_archive(
-                digest.TOPICS["world"], html, {"stories": []}, run_dir, digest_dir,
-                fresh=[], ongoing=[{"url": "https://example.com/only"}],
+        with patch("digest_runner.subprocess.run") as subprocess_run:
+            publication_path = digest.phase_8_archive(
+                digest.TOPICS["world"],
+                "<html>archive</html>",
+                {"stories": []},
+                run_dir,
+                digest_dir,
+                fresh=[fresh_story],
+                ongoing=[ongoing_story],
             )
-        check(not calls, f"thin digest was emailed: {calls}")
+        check(not subprocess_run.called, "topic archive attempted to send email")
         check((digest_dir / f"{datetime.now():%Y-%m-%d}.html").exists(),
-              "thin digest was not archived")
-
-        calls.clear()
-        second_dir = Path(temporary) / "world-digest-two"
-        second_run = Path(temporary) / "run-two"
-        second_dir.mkdir(parents=True)
-        second_run.mkdir(parents=True)
-        with patch("digest_runner.subprocess.run", side_effect=fake_send):
-            digest.phase_8_send_archive(
-                digest.TOPICS["world"], html, {"stories": []}, second_run, second_dir,
-                fresh=[{"url": "https://example.com/a"}],
-                ongoing=[{"url": "https://example.com/b"}],
-            )
-        check(len(calls) == 1, f"two-story digest was not emailed: {calls}")
+              "daily HTML archive missing")
+        publication = json.loads(publication_path.read_text())
+        check(publication["slug"] == "world", publication)
+        check(publication["intro"].startswith("Two verified"), publication["intro"])
+        check(len(publication["fresh"]) + len(publication["ongoing"]) == 2, publication)
+        check("candidate_id" not in publication["fresh"][0], publication["fresh"][0])
+        check("selection_reason" not in publication["ongoing"][0], publication["ongoing"][0])
+        check(publication["ongoing"][0]["why_still_relevant"].startswith("A material"),
+              publication["ongoing"][0])
 
 
 def test_listing_urls_rejected() -> None:
@@ -1739,7 +1749,7 @@ def main() -> None:
         test_followup_research_targets_prior_high_importance_stories,
         test_tracker_retention_uses_evidence_inactivity,
         test_ongoing_resurface_cap_cools_recurring_story,
-        test_editorial_floor_and_thin_send_guard,
+        test_editorial_floor_and_publication_artifact,
         test_listing_urls_rejected,
         test_stub_attempts_cleaned_after_success,
         test_asset_cdn_urls_rejected,

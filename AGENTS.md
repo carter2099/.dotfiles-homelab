@@ -37,9 +37,10 @@ Home directory managed as a bare git repo for dotfiles. Key dirs:
 - `homelab-backup/` — Go backup service
 - `k3s/` — Kubernetes manifests
 - `dev/` — Scratch space for cloned repos, tests, development
+- `news/` — Daily News nginx deployment configuration and static assets
 - `scripts/` — Digest + steward orchestrators
 - `notes/` — Agent-maintained knowledge vault (`docs/` for maintained ref, `logs/sessions/` for session history, `journal/` for research/records)
-- `digests/` / `backups/` — Automated output archives
+- `digests/` / `backups/` — Automated output archives; `digests/news/publications/` is the durable web-news store
 - `ideas/` — Unstructured ideas (not maintained)
 - `.dotfiles-homelab/` — Bare git repo tracking dotfiles
 ## Dev Workflow (`dev/`)
@@ -109,6 +110,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 
 - **Blog** (Rails 8, port 33099) → [`blog.md`](notes/docs/homelab/blog.md)
 - **Beatz** (public Go music player branded “Beats” in-app, localhost:30142; no Cloudflare Access; media: `~/beatz-selected/`; play history: `~/beatz-data/plays.jsonl`) → [`beatz.md`](notes/docs/homelab/beatz.md)
+- **Daily News** (public static newspaper UI, localhost:30144, news.carter2099.com; five separate category pages, historical editions, one summary email, durable publication JSON included in the existing R2 backup) → [`email-digests.md`](notes/docs/homelab/email-digests.md)
 - **Hyperliquid SDK maintenance** (automated dependency maintenance; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
 - **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
@@ -121,9 +123,9 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges; five reasoning-enabled local entries) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
 - **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 
-## Email Digests
+## Daily News Digests
 
-Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) at 08:00 UTC via `digests-daily.timer`. Per-topic inference is bounded to two concurrent calls; curation uses a validated DeepSeek Flash proposal followed by a separate DeepSeek Flash critic pass before deterministic state application and HTML rendering, with Mimo as fallback. **Developing and Ongoing** contains only high-importance stories with source-backed material developments on at least two distinct days; single announcements and one-off articles do not qualify. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
+Five unchanged category curation pipelines (ai-tech, agentic-platform, ai-hardware, gaming, world) run at 08:00 UTC via `digests-daily.timer`, then publish one static edition at `news.carter2099.com` and send one email containing a summary and link for each category. Durable publication JSON is stored under `~/digests/news/publications/` and included as `daily-news-publications` in the existing Cloudflare R2 homelab backup. The public origin is the loopback-only `carter-news` container on 30144. Per-topic inference remains bounded to two concurrent calls; curation uses validated DeepSeek Flash proposal/critic passes with Mimo fallback. **Developing and Ongoing** requires high importance plus source-backed material developments on at least two distinct dates. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
 
 ## Homelab Steward
 
@@ -245,9 +247,9 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`environment.md`](notes/docs/homelab/environment.md) — shell/editor tooling, git/gh, client topology
 - [`deployment.md`](notes/docs/homelab/deployment.md) — deploy flow, port-in-use, exit 255, aa-remove-unknown
 - [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules; also covers FreshRSS as a third-party k3s deployment
-- [`email-digests.md`](notes/docs/homelab/email-digests.md) — 9-phase digest workflow, stories-in-flight, audit/debug
+- [`email-digests.md`](notes/docs/homelab/email-digests.md) — Daily News curation, static publication, R2 backup, single-email delivery, stories-in-flight, audit/debug
 - [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, work queue, executor, budget guard, debugging
-- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 22-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
+- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 23-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 - [`blog.md`](notes/docs/homelab/blog.md) — Rails 8 blog app
 - [`beatz.md`](notes/docs/homelab/beatz.md) — public beat archive player, starter/artwork pools, media library, deploy/runbook
 - [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md) — automated Hyperliquid SDK maintenance

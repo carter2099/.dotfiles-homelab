@@ -10,15 +10,15 @@ bare-metal rebuild. The daily backup (`~/homelab-backup/`, 03:00 UTC) produces
 tar tzf homelab-backup-*.tar.gz | awk -F/ '{print $1}' | sort -u
 ```
 
-## What an archive contains (22 targets)
+## What an archive contains (23 targets)
 
 | Group | Targets |
 |---|---|
-| App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `agent-state` |
+| App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `agent-state`, `daily-news-publications` |
 | FreshRSS | `freshrss-db`, `freshrss-config` |
 | Open WebUI | `open-webui-db` |
-| Config/code | `homelab-backup-config`, `k3s-manifests`, `host-etc`, `pkg-manifest` |
-| Secrets (unencrypted) | `secrets-blog-master`, `secrets-open-webui-env`, `secrets-cloudflare`, `secrets-dependabot`, `secrets-llm-proxy`, `secrets-pi-web`, `secrets-searxng`, `secrets-smtp-and-staged` |
+| Config/code | `homelab-backup-config`, `k3s-manifests`, `omp-web-app`, `host-etc`, `pkg-manifest` |
+| Secrets (unencrypted) | `secrets-blog-master`, `secrets-open-webui-env`, `secrets-cloudflare`, `secrets-dependabot`, `secrets-llm-proxy`, `secrets-opencode-go-proxy`, `secrets-searxng`, `secrets-smtp-and-staged` |
 
 DBs were captured with `sqlite3 .backup` + passed `PRAGMA integrity_check` at
 backup time, and the restore drill re-checks integrity after download.
@@ -88,16 +88,17 @@ can't reach the host → Traefik loads no ingresses → 404 on every k3s host.**
 
 ### 3d. Secrets (from `secrets-*/`)
 ```bash
-cp /tmp/restore/secrets-blog-master/master.key      ~/blog/blog/config/master.key
+cp /tmp/restore/secrets-blog-master/master.key       ~/blog/blog/config/master.key
 cp /tmp/restore/secrets-open-webui-env/.env          ~/open-webui/.env
 cp -r /tmp/restore/secrets-cloudflare/*              ~/.config/cloudflare/
-cp /tmp/restore/secrets-dependabot/env               ~/.config/dependabot-webhook/env
-cp /tmp/restore/secrets-llm-proxy/env                ~/.config/llm-proxy/env
-cp /tmp/restore/secrets-pi-web/config.json          ~/.config/pi-web/config.json
-cp /tmp/restore/secrets-searxng/settings.yml         ~/searxng/core-config/settings.yml
-cp /tmp/restore/secrets-smtp-and-staged/smtp_config ~/scripts/.smtp_config
+cp /tmp/restore/secrets-dependabot/env                ~/.config/dependabot-webhook/env
+cp /tmp/restore/secrets-llm-proxy/env                 ~/.config/llm-proxy/env
+cp /tmp/restore/secrets-opencode-go-proxy/env         ~/.config/opencode-go-proxy/env
+cp /tmp/restore/secrets-searxng/settings.yml          ~/searxng/core-config/settings.yml
+cp /tmp/restore/secrets-smtp-and-staged/smtp_config  ~/scripts/.smtp_config
 chmod 600 ~/.config/cloudflare/* ~/.config/dependabot-webhook/env \
-           ~/.config/llm-proxy/env ~/open-webui/.env ~/scripts/.smtp_config \
+           ~/.config/llm-proxy/env ~/.config/opencode-go-proxy/env \
+           ~/open-webui/.env ~/scripts/.smtp_config \
            ~/blog/blog/config/master.key
 ```
 Also restore `~/homelab-backup/.env` (R2 creds) from `homelab-backup-config/`
@@ -118,6 +119,10 @@ sudo cp /tmp/restore/open-webui-db/webui.db /var/lib/docker/volumes/open-webui_o
 
 # agent-state
 rsync -a /tmp/restore/agent-state/ ~/agent-state/
+
+# Daily News authoritative artifacts (the static site is regenerated from these)
+mkdir -p ~/digests/news/publications
+rsync -a /tmp/restore/daily-news-publications/ ~/digests/news/publications/
 ```
 
 ### 3f. FreshRSS (k3s) — paths are in the freshrss PVC

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send an HTML email digest via SMTP. Used by scheduled Claude Code triggers."""
+"""Send an HTML notification through the homelab SMTP account."""
 
 import argparse
 import email.message

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deterministic 9-phase email digest runner.
+Deterministic 9-phase daily digest curation runner.
 
 Independent model work is bounded and connected by deterministic Python contracts.
 Caps, caching, and two-worker concurrency prevent one topic from starving the others
@@ -21,8 +21,8 @@ Phases:
     4. Fetch + Summarize — cached omp -p web_fetch (concurrency 2, ≤17 total)
     5. Judge Summaries — batched LLM: accuracy/fidelity check
     6. Curate          — proposal → Python validation → independent critic → state apply
-    7. Write HTML      — final intro call + deterministic escaped template rendering
-    8. Send + Archive  — pure Python
+    7. Write HTML      — final intro call + deterministic escaped archive rendering
+    8. Archive         — local HTML + stable public publication artifact
     9. Summary         — one lightweight LLM call
 """
 
@@ -412,6 +412,8 @@ TOPICS: dict[str, dict[str, Any]] = {
         "title": "AI & Tech Digest",
         "recipients": ["carter2099@pm.me"],
         "category": "ai-tech",
+        "web_slug": "ai-tech",
+        "web_title": "AI & Tech",
         "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["ai-tech"],
         "research_angles": [
             {
@@ -508,6 +510,8 @@ TOPICS: dict[str, dict[str, Any]] = {
         "title": "Agentic Platform Digest",
         "recipients": ["carter2099@pm.me"],
         "category": "agentic-platform",
+        "web_slug": "agents",
+        "web_title": "Agents",
         "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["agentic-platform"],
         "research_angles": [
             {
@@ -582,6 +586,8 @@ TOPICS: dict[str, dict[str, Any]] = {
         "title": "AI Hardware Digest",
         "recipients": ["carter2099@pm.me"],
         "category": "ai-hardware",
+        "web_slug": "ai-hardware",
+        "web_title": "AI Hardware",
         "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["ai-hardware"],
         "research_angles": [
             {
@@ -691,6 +697,8 @@ TOPICS: dict[str, dict[str, Any]] = {
         "title": "Gaming Digest",
         "recipients": ["carter2099@pm.me"],
         "category": "gaming-digest",
+        "web_slug": "gaming",
+        "web_title": "Gaming",
         "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["gaming"],
         "research_angles": [
             {
@@ -758,6 +766,8 @@ TOPICS: dict[str, dict[str, Any]] = {
         "title": "World Digest",
         "recipients": ["carter2099@pm.me"],
         "category": "world-digest",
+        "web_slug": "world",
+        "web_title": "World",
         "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["world"],
         "research_angles": [
             {
@@ -3708,7 +3718,7 @@ def phase_7_write(
     *,
     notice: str = "",
 ) -> str:
-    """Generate the approved intro, then render the email deterministically."""
+    """Generate the approved intro, then render the archival HTML deterministically."""
     output_path = run_dir / "digest.html"
     if output_path.exists():
         print(f"  [skip] Phase 7 output exists: {output_path}")
@@ -3726,91 +3736,90 @@ def phase_7_write(
           f"({elapsed:.0f}s)")
     return rendered
 
-def phase_8_send_archive(topic: dict, html: str, stories_in_flight: dict,
-                         run_dir: Path, digest_dir: Path,
-                         fresh: list[dict] | None = None,
-                         ongoing: list[dict] | None = None,
-                         send_on_empty: bool = False) -> None:
-    """Phase 8: Send email, archive HTML, write stories-in-flight.
+def _public_story(story: dict, *, ongoing: bool = False) -> dict:
+    """Return only the source-backed fields safe to publish on the news site."""
+    fields = (
+        "title", "url", "source_domain", "date_published", "date_confirmed",
+        "summary", "category", "importance", "author",
+    )
+    public = {key: story.get(key) for key in fields if story.get(key)}
+    if ongoing and story.get("why_still_relevant"):
+        public["why_still_relevant"] = story["why_still_relevant"]
+    return public
 
-    No LLM call — pure Python. In test mode, email is sent with a [TEST]
-    subject prefix and archived to the test run_dir.
 
-    Skip-send on thin: when fewer than two stories survive curation the email
-    is NOT sent (a "<p>No stories found today.</p>" digest — or a single-link
-    digest — is a bug, not content). The HTML is still archived so the run
-    leaves a record. send_on_empty=True forces the send regardless — used for
-    the upstream outage notification, which is a deliberate alert rather than
-    an empty digest.
+def phase_8_archive(
+    topic: dict,
+    rendered_html: str,
+    stories_in_flight: dict,
+    run_dir: Path,
+    digest_dir: Path,
+    fresh: list[dict] | None = None,
+    ongoing: list[dict] | None = None,
+    *,
+    notice: str = "",
+    archive_daily: bool = True,
+) -> Path:
+    """Archive the topic and write its stable, public publication artifact.
+
+    No email is sent here. The all-topic publisher consumes publication.json
+    after every category finishes, updates the site, and sends one summary email.
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
+    fresh = fresh or []
+    ongoing = ongoing or []
 
-    # Copy curated_copy.json FIRST — not gated by idempotent resume below,
-    # so a partial re-run doesn't silently drop the curated snapshot.
     curated_src = run_dir / "06-curated.json"
     if curated_src.exists():
         shutil.copy(curated_src, run_dir / "curated_copy.json")
     else:
-        print(f"  [WARN] 06-curated.json missing — curated_copy.json not written")
+        print("  [WARN] 06-curated.json missing — curated_copy.json not written")
 
-    # Archive path: prod → digest_dir with date, test → run_dir
-    archive_path = digest_dir / f"{today_str}.html" if not TEST_MODE else run_dir / "digest.html"
-
-    # Always write temp HTML first (needed for email body and archive)
-    temp_html = digest_dir / ".daily_digest.html"
-    temp_html.write_text(html)
-
-    # Only send email if archive doesn't already exist (idempotent resume
-    # guard) AND the digest has content. A digest with fewer than two stories
-    # is a near-empty digest, not content: single-link digests shipped on
-    # agentic-platform 08-20 and gaming-digest 08-20 (digest-quality audit
-    # 2026-08-21), so the skip-send-on-empty bar rises from zero stories to
-    # two — unless send_on_empty, e.g. outage notification.
-    archive_already_exists = archive_path.exists()
-    story_count = len(fresh or []) + len(ongoing or [])
-    empty_digest = story_count < 2 and not send_on_empty
-    if (archive_already_exists and not TEST_MODE) or empty_digest:
-        if empty_digest:
-            print(f"  [skip] send_email — thin digest ({story_count} story); archived only")
-        else:
-            print(f"  [skip] send_email — archive already exists: {archive_path}")
+    archive_path = (
+        digest_dir / f"{today_str}.html"
+        if archive_daily and not TEST_MODE
+        else run_dir / "digest.html"
+    )
+    if archive_daily and not TEST_MODE:
+        latest_html = digest_dir / ".daily_digest.html"
+        latest_html.write_text(rendered_html)
+        shutil.copy(latest_html, archive_path)
     else:
-        recipients = topic["recipients"].copy()
-
-        if topic["category"] == "agentic-platform":
-            smtp_config = Path.home() / "scripts" / ".smtp_config"
-            if smtp_config.exists():
-                for line in smtp_config.read_text().splitlines():
-                    if line.startswith("AGENTIC_CC="):
-                        cc = line.split("=", 1)[1].strip()
-                        if cc:
-                            recipients.append(cc)
-                        break
-
-        prefix = "[TEST] " if TEST_MODE else ""
-        subject = f"{prefix}{topic['title']} — {today_str}"
-        print(f"  [run ] send_email to {recipients}")
-        try:
-            subprocess.run(
-                ["python3", str(SEND_DIGEST_SCRIPT),
-                 "--subject", subject,
-                 "--body-file", str(temp_html),
-                 "--to"] + recipients,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            print(f"  [done] send_email — sent to {', '.join(recipients)}")
-        except subprocess.CalledProcessError as e:
-            print(f"  [FAIL] send_email — {e.stderr[:300]}")
-
-    # Always archive the latest HTML (overwrite stale/empty archive from prior run)
-    shutil.copy(temp_html, archive_path)
+        archive_path.write_text(rendered_html)
     print(f"  [done] archived HTML → {archive_path}")
+
+    intro_path = run_dir / "07-intro.json"
+    intro = ""
+    if intro_path.exists():
+        try:
+            intro = json.loads(intro_path.read_text()).get("intro", "")
+        except (json.JSONDecodeError, OSError):
+            intro = ""
+    intro = intro or _fallback_intro(fresh, ongoing)
+    publication = {
+        "schema_version": 1,
+        "date": today_str,
+        "slug": topic["web_slug"],
+        "title": topic["web_title"],
+        "digest_title": topic["title"],
+        "source_category": topic["category"],
+        "status": "degraded" if notice else ("published" if fresh or ongoing else "empty"),
+        "notice": notice,
+        "intro": intro,
+        "fresh": [_public_story(story) for story in fresh],
+        "ongoing": [_public_story(story, ongoing=True) for story in ongoing],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    publication_path = run_dir / "publication.json"
+    publication_tmp = run_dir / ".publication.json.tmp"
+    publication_tmp.write_text(json.dumps(publication, indent=2, ensure_ascii=False) + "\n")
+    publication_tmp.replace(publication_path)
+    print(f"  [done] publication artifact → {publication_path}")
 
     sif_path = digest_dir / "stories-in-flight.json"
     sif_path.write_text(json.dumps(stories_in_flight, indent=2))
-    print(f"  [done] stories-in-flight updated")
+    print("  [done] stories-in-flight updated")
+    return publication_path
 
 
 
@@ -3818,11 +3827,12 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
                     run_dir: Path, digest_dir: Path) -> None:
     """Phase 9: Write the .md summary for future dedup.
 
-    One LLM call, lightweight. Output goes to run_dir; Phase 8 copies it.
+    One LLM call, lightweight. Output is retained in the run and topic archives.
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
     output_path = run_dir / "summary.md"
     digest_md_path = digest_dir / f"{today_str}.md"
+    publication_url = f"https://news.carter2099.com/{today_str}/{topic['web_slug']}/"
     if output_path.exists():
         print(f"  [skip] Phase 9 output exists: {output_path}")
         return
@@ -3836,7 +3846,7 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
         # stories with example.com URLs. Write an honest summary directly.
         md_output = (
             f"# {topic['title']} — {today_str}\n"
-            f"**Sent to:** {', '.join(topic['recipients'])}\n\n"
+            f"**Published at:** {publication_url}\n\n"
             "## Fresh\n"
             "- No stories published in the last 24 hours.\n\n"
             "## Developing and Ongoing\n"
@@ -3855,7 +3865,7 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
     ongoing_json = json.dumps(ongoing, indent=2)
 
     system = (
-        "You are writing a concise markdown summary of today's email digest for "
+        "You are writing a concise markdown summary of today's published digest for "
         "archival and future deduplication. Write the entire summary in English — the "
         "digest language is always English regardless of source language; keep story "
         "titles in their original language. Output ONLY the markdown, no explanations."
@@ -3864,7 +3874,7 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
     user = (
         f"Write a markdown summary of today's {topic['title']} in this exact format:\n\n"
         f"# {topic['title']} — {today_str}\n"
-        f"**Sent to:** {', '.join(topic['recipients'])}\n\n"
+        f"**Published at:** {publication_url}\n\n"
         "## Fresh\n"
         "- [Story title](URL) — one-line summary\n"
         "- [Story title](URL) — one-line summary\n\n"
@@ -3891,7 +3901,7 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
         # Fallback: write minimal summary from structured data
         lines = [
             f"# {topic['title']} — {today_str}",
-            f"**Sent to:** {', '.join(topic['recipients'])}",
+            f"**Published at:** {publication_url}",
             "",
             "## Fresh",
         ]
@@ -4031,8 +4041,8 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     """Run the full digest pipeline for a topic category.
 
     When TEST_MODE is set (via --test CLI flag), output goes to
-    ~/digests/test/<topic>/<label>/ and email is never sent. The
-    stories-in-flight from prod are copied in so ongoing tracking works.
+    ~/digests/test/<topic>/<label>/. Production and test topic runs never send
+    email; the all-topic publisher owns the single daily summary message.
     """
     global MODEL_OVERRIDE
     if category not in TOPICS:
@@ -4066,7 +4076,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     print(f"  {topic['title']} — {today_str}{model_note}")
     print(f"  Run dir: {run_dir}")
     if TEST_MODE:
-        print(f"  *** TEST MODE — output isolated, email enabled ***")
+        print(f"  *** TEST MODE — output isolated, no email ***")
     print(f"{'='*60}\n")
 
     overall_start = time.time()
@@ -4266,8 +4276,8 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                           f"({MODEL_OVERRIDE}) — no more retries.")
             break
 
-        # Phase 7: Write HTML
-        t7 = _phase_start("Phase 7: Write HTML")
+        # Phase 7: Write archive HTML
+        t7 = _phase_start("Phase 7: Write Archive HTML")
         notice = ""
         if fresh or ongoing:
             if _UPSTREAM_OUTAGE:
@@ -4299,28 +4309,23 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                     f'<p>{today_str}</p><p>No stories found today.</p></body></html>'
                 )
             (run_dir / "digest.html").write_text(html)
-        _phase_done("Phase 7: Write HTML", t7)
+        _phase_done("Phase 7: Write Archive HTML", t7)
 
-        # Phase 8: Send + Archive
-        t8 = _phase_start("Phase 8: Send & Archive")
-        if dry_run:
-            print("  [skip] DRY RUN — skipping email send")
-            archive_path = run_dir / "digest.html"
-            (run_dir / "digest.html").write_text(html)
-            print(f"  [done] archived HTML → {archive_path}")
-            sif_path = digest_dir / "stories-in-flight.json"
-            sif_path.write_text(json.dumps(stories_in_flight, indent=2))
-            print(f"  [done] stories-in-flight updated")
-            curated_src = run_dir / "06-curated.json"
-            if curated_src.exists():
-                shutil.copy(curated_src, run_dir / "curated_copy.json")
-            else:
-                print(f"  [WARN] 06-curated.json missing — curated_copy.json not written")
-        else:
-            phase_8_send_archive(topic, html, stories_in_flight, run_dir, digest_dir,
-                                 fresh=fresh, ongoing=ongoing,
-                                 send_on_empty=_UPSTREAM_OUTAGE)
-        _phase_done("Phase 8: Send & Archive", t8)
+        # Phase 8: Archive + stable public artifact. Email is deliberately owned
+        # by news_publish.py after every topic has completed.
+        t8 = _phase_start("Phase 8: Archive & Publish Artifact")
+        phase_8_archive(
+            topic,
+            html,
+            stories_in_flight,
+            run_dir,
+            digest_dir,
+            fresh=fresh,
+            ongoing=ongoing,
+            notice=notice,
+            archive_daily=not dry_run,
+        )
+        _phase_done("Phase 8: Archive & Publish Artifact", t8)
 
         # Phase 9: Summary
         t9 = _phase_start("Phase 9: Summary")

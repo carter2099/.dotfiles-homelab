@@ -1,7 +1,7 @@
 schedule: "0 3 * * *"
 backup_dir: /home/carter/backups
 
-# 14 daily + 1 monthly + 1 yearly; observed archive sizes 36.5–138.3 MB (recent ~50 MB/day), worst case ≈ 2.2 GB (well under R2 free 10 GB)
+# 14 daily + 1 monthly + 1 yearly; observed archive sizes 57.3–60.8 MB (recent ~60 MB/day), worst case ≈ 0.97 GB (well under R2 free 10 GB)
 retention:
   daily_days: 14
   monthly_count: 1
@@ -82,9 +82,14 @@ targets:
     type: directory
     source: /home/carter/k3s
 
+  # Durable source artifacts for news.carter2099.com. Static HTML is regenerated.
+  - name: daily-news-publications
+    type: directory
+    source: /home/carter/digests/news/publications
+
   - name: omp-web-app
     type: directory
-    source: /home/carter/dev/pi-web
+    source: /home/carter/dev/omp-web-worktrees/phase0
     excludes:
       - .git
       - node_modules
