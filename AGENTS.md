@@ -135,7 +135,7 @@ The sole agent CLI on this host is **omp** (`@oh-my-pi/pi-coding-agent`, via bun
 
 ## Remote Agent Operations
 
-Carter's omp agent web UI is the **pi-web fork** ("OMP Web", English — his fork of `best-linux-code/pi-web`, the in-progress omp port) at `omp.carter2099.com` → [`omp-web.md`](notes/docs/homelab/omp-web.md). SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
+Carter's omp agent web UI is **OMP Web**, a private direct fork of `jmfederico/pi-web` ported to OMP and deployed from `~/dev/omp-web-worktrees/phase0`, at `omp.carter2099.com` → [`omp-web.md`](notes/docs/homelab/omp-web.md). SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
 
 ## Persistent Memory (`~/notes/`)
 
