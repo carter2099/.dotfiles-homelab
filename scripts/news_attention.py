@@ -35,9 +35,10 @@ EDITORIAL_POINTS = {
 
 _STOPWORDS = {
     "about", "after", "again", "against", "amid", "among", "and", "are",
-    "before", "being", "between", "could", "from", "have", "into", "just",
-    "more", "new", "over", "says", "than", "that", "their", "they", "this",
-    "through", "under", "with", "will", "would", "your",
+    "before", "being", "between", "could", "does", "from", "have", "how",
+    "into", "just", "more", "new", "not", "over", "says", "than", "that",
+    "their", "they", "this", "through", "under", "what", "when", "where",
+    "which", "who", "why", "with", "will", "would", "your",
 }
 
 
@@ -60,32 +61,44 @@ def _sanitize_term(value: Any) -> str:
     return term[:64]
 
 
+def _terms_are_sufficient(terms: list[str]) -> bool:
+    return (
+        len(terms) >= 2
+        or (
+            len(terms) == 1
+            and len(re.findall(r"\w+", terms[0], flags=re.UNICODE)) >= 3
+        )
+    )
+
+
 def event_terms(candidate: dict[str, Any]) -> list[str]:
-    """Return two to four bounded terms describing the event, never a score."""
+    """Return bounded event identifiers for measurement, never a score."""
     supplied = candidate.get("event_terms")
     terms: list[str] = []
     if isinstance(supplied, list):
         for value in supplied:
             term = _sanitize_term(value)
-            if term and term.casefold() not in {existing.casefold() for existing in terms}:
+            if (
+                term
+                and not (
+                    " " not in term
+                    and term.casefold() in _STOPWORDS
+                )
+                and term.casefold()
+                not in {existing.casefold() for existing in terms}
+            ):
                 terms.append(term)
             if len(terms) == 4:
                 break
-    if len(terms) >= 2:
+    if _terms_are_sufficient(terms):
         return terms
 
-    title = _clean_text(candidate.get("title"))
-    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9.+#&'-]*", title)
-    derived = [
-        token for token in tokens
-        if len(token) >= 3 and token.casefold() not in _STOPWORDS
-    ]
-    for token in derived:
-        if token.casefold() not in {existing.casefold() for existing in terms}:
-            terms.append(token)
-        if len(terms) == 3:
-            break
-    return terms
+    source = _clean_text(candidate.get("event") or candidate.get("title"))
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9.+#&'-]*", source)
+    while tokens and tokens[0].casefold() in {"a", "an", "the"}:
+        tokens.pop(0)
+    phrase = _sanitize_term(" ".join(tokens[:4]))
+    return [phrase] if len(phrase.split()) >= 3 else terms
 
 
 def gdelt_query(candidate: dict[str, Any]) -> str:
@@ -127,6 +140,24 @@ def _independent_source_groups(articles: list[dict[str, Any]]) -> int:
         if not duplicate:
             groups.append(tokens)
     return len(groups)
+
+def _sample_relevance(
+    candidate: dict[str, Any], articles: list[dict[str, Any]],
+) -> float | None:
+    if not articles:
+        return None
+    candidate_tokens = _normalized_title(
+        f"{candidate.get('title', '')} {candidate.get('event', '')} "
+        f"{' '.join(event_terms(candidate))}"
+    )
+    if not candidate_tokens:
+        return None
+    relevant = 0
+    for article in articles:
+        article_tokens = _normalized_title(article.get("title"))
+        if len(candidate_tokens & article_tokens) >= 2:
+            relevant += 1
+    return relevant / len(articles)
 
 
 def _age_bucket(age_hours: float | None) -> str:
@@ -224,6 +255,12 @@ def _observation_from_response(
     }
     domains.discard("")
 
+    sample_relevance = _sample_relevance(candidate, articles)
+    low_quality = (
+        len(articles) >= 5
+        and sample_relevance is not None
+        and sample_relevance < 0.20
+    )
     compact_timeline = [
         {
             "date": slot.strftime("%Y%m%dT%H%M%SZ"),
@@ -232,7 +269,7 @@ def _observation_from_response(
         for slot, value in zip(slots, values)
     ]
     return {
-        "status": "ok",
+        "status": "unavailable" if low_quality else "ok",
         "provider": PROVIDER,
         "query": query,
         "terms": event_terms(candidate),
@@ -248,7 +285,14 @@ def _observation_from_response(
         "distinct_publishers": len(domains),
         "independent_source_groups": _independent_source_groups(articles),
         "sampled_articles": len(articles),
+        "sample_relevance": (
+            round(sample_relevance, 3) if sample_relevance is not None else None
+        ),
         "data_lag_minutes": round(max(0.0, (now - latest).total_seconds() / 60), 1),
+        "error": (
+            "sampled GDELT headlines did not match the canonical event"
+            if low_quality else ""
+        ),
         "timeline": compact_timeline,
     }
 
@@ -263,7 +307,8 @@ def fetch_gdelt_attention(
     """Fetch one event's rolling GDELT coverage timeline with bounded retry."""
     observed_at = now or datetime.now(timezone.utc)
     query = gdelt_query(candidate)
-    if len(event_terms(candidate)) < 2 or not query:
+    terms = event_terms(candidate)
+    if not _terms_are_sufficient(terms) or not query:
         return {
             "status": "unavailable",
             "provider": PROVIDER,
@@ -532,6 +577,7 @@ def score_attention(
                 "distinct_publishers": observation.get("distinct_publishers", 0),
                 "independent_source_groups": groups,
                 "sampled_articles": observation.get("sampled_articles", 0),
+                "sample_relevance": observation.get("sample_relevance"),
                 "query": observation.get("query", ""),
                 "channels_available": ["news_coverage"],
                 "channels_unavailable": ["homepage_prominence", "social", "video"],

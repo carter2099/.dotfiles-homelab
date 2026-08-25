@@ -188,8 +188,8 @@ def test_event_term_fallback_and_legacy_migration() -> None:
     check(item["editorial_significance"] == "high", item)
     check("importance" not in item, item)
     terms = event_terms(item)
-    check(len(terms) >= 2, terms)
-    check("Nvidia" in terms, terms)
+    check(len(terms) == 1 and len(terms[0].split()) >= 3, terms)
+    check("Nvidia" in terms[0], terms)
 
 
 def main() -> None:
