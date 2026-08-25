@@ -21,6 +21,7 @@ def check(condition: bool, message: object) -> None:
 def sample_publication(topic: dict, issue_date: str, marker: str) -> dict:
     return {
         "schema_version": 2,
+        "ranking_schema_version": 2,
         "date": issue_date,
         "slug": topic["web_slug"],
         "title": topic["web_title"],
@@ -166,6 +167,10 @@ def test_publish_builds_separate_history_and_one_email() -> None:
                 else f"{marker} lead story".replace("&", "&amp;")
             )
             check(expected in front_page, marker)
+        stored = json.loads(
+            (news_dir / "publications" / current_date / "gaming.json").read_text()
+        )
+        check(stored["ranking_schema_version"] == 2, stored)
         check("FRONT PAGE" in (current / "archive" / "index.html").read_text().upper(),
               "archive omitted front-page links")
         check((current / current_date / "gaming" / "index.html").exists(), "gaming page missing")

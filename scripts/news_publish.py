@@ -193,6 +193,7 @@ def _topic_for_slug(slug: str) -> tuple[str, dict[str, Any]]:
 def _empty_publication(topic: dict[str, Any], issue_date: str) -> dict[str, Any]:
     return {
         "schema_version": PUBLICATION_SCHEMA_VERSION,
+        "ranking_schema_version": 0,
         "date": issue_date,
         "slug": topic["web_slug"],
         "title": topic["web_title"],
@@ -211,6 +212,11 @@ def _normalize_publication(
 ) -> dict[str, Any]:
     publication = _empty_publication(topic, issue_date)
     publication.update({
+        "ranking_schema_version": (
+            raw.get("ranking_schema_version")
+            if isinstance(raw.get("ranking_schema_version"), int)
+            else 1
+        ),
         "status": _clean_text(raw.get("status")) or "published",
         "notice": _clean_text(raw.get("notice")),
         "standfirst": _clean_text(raw.get("standfirst") or raw.get("intro")),

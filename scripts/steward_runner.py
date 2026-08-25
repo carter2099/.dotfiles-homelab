@@ -3498,6 +3498,10 @@ def _audit_collector_3_digest_quality():
                                 publication.get("date") == date_dir.name
                                 and publication.get("slug") == slug
                                 and publication.get("schema_version") == 2
+                                and (
+                                    date_dir.name < "2026-08-25"
+                                    or publication.get("ranking_schema_version") == 2
+                                )
                             ),
                             "status": publication.get("status", ""),
                             "stories": len(stories),
