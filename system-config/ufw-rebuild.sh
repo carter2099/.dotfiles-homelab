@@ -12,6 +12,8 @@ fi
 
 echo "=== Allowing SSH from LAN ==="
 sudo ufw allow from 192.168.4.0/22 to any port 22 proto tcp
+echo "=== Allowing blog (33099) from LAN ==="
+sudo ufw allow from 192.168.4.0/24 to any port 33099 proto tcp
 
 echo "=== Enabling UFW ==="
 sudo ufw --force enable
