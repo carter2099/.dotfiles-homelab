@@ -67,6 +67,15 @@ OMP_JSON_TIMEOUT = 2700
 OMP_JSON_MODEL = "openai-codex/gpt-5.6-luna:high"
 PENDING_PATH = HOME / "agent-state" / "pending.md"
 DEPENDABOT_UNIT = "dependabot-webhook.service"
+UPDATE_MIN_AGE_DAYS = 7
+SEARXNG_TAGS_API = (
+    "https://hub.docker.com/v2/repositories/searxng/searxng/tags"
+    "?page_size=100&ordering=last_updated"
+)
+LLAMA_CPP_RELEASES_API = (
+    "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=100"
+)
+LLAMA_CPP_UPDATE_SCRIPT = HOME / "scripts" / "update_llama_cpp_remote.sh"
 
 # Session memory (P0b) — interactive omp sessions documented into the notes vault
 SESSION_INTERACTIVE_DIR = HOME / ".omp" / "agent" / "sessions"   # interactive: project-scoped subdirs
@@ -1526,67 +1535,246 @@ def _p1_herdr_update():
 
 
 def _p1_deploy_step_ok(step):
-    """True when a P1 step actually mutated state (status ok/bumped)."""
+    """True when a P1 step actually mutated state."""
     name = step.get("step", "")
     status = step.get("status", "")
     if name.startswith("auto_") and status == "ok":
         return True
     if name in ("openwebui", "freshrss") and status == "bumped":
         return True
-    if name in ("herdr_update", "omp_update", "searxng") and status == "ok":
+    if name in (
+        "herdr_update", "omp_update", "searxng", "llama_cpp",
+    ) and status == "ok":
         return True
     return False
 
 
-def _p1_searxng_update():
-    """Ensure the container runs the immutable image pinned in Compose.
+def _release_time(value):
+    """Parse an upstream UTC timestamp into an aware datetime."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
-    Upstream updates are surfaced by the version audit for deliberate pin
-    changes; the nightly steward never advances this image implicitly.
-    """
-    print("  [1h] searxng pinned-image reconcile")
+
+def _release_is_mature(value, now=None):
+    """True once an upstream release has existed for the safety window."""
+    now = now or datetime.now(timezone.utc)
+    return now - _release_time(value) >= timedelta(days=UPDATE_MIN_AGE_DAYS)
+
+
+def _searxng_tag_date(tag):
+    match = re.fullmatch(r"(\d{4})\.(\d{1,2})\.(\d{1,2})-[0-9a-f]+", tag or "")
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _select_mature_searxng_tag(tags, current_tag, now=None):
+    """Newest immutable SearXNG tag old enough to deploy, never a downgrade."""
+    current_item = next((item for item in tags if item.get("name") == current_tag), None)
+    current_time = _release_time(current_item["last_updated"]) if current_item else None
+    current_date = _searxng_tag_date(current_tag)
+    candidates = []
+    for item in tags:
+        name = item.get("name", "")
+        published = item.get("last_updated", "")
+        digest = item.get("digest", "")
+        tag_date = _searxng_tag_date(name)
+        if not tag_date or not digest or not published:
+            continue
+        try:
+            published_time = _release_time(published)
+        except ValueError:
+            continue
+        if not _release_is_mature(published, now=now):
+            continue
+        if current_time and published_time <= current_time:
+            continue
+        if not current_time and current_date and tag_date <= current_date:
+            continue
+        candidates.append((published_time, item))
+    return max(candidates, key=lambda pair: pair[0])[1] if candidates else None
+
+
+def _select_mature_llama_release(releases, current_tag, now=None):
+    """Newest non-draft llama.cpp release old enough to deploy."""
+    match = re.fullmatch(r"b(\d+)", current_tag or "")
+    if not match:
+        return None
+    current_build = int(match.group(1))
+    candidates = []
+    for release in releases:
+        tag = release.get("tag_name", "")
+        published = release.get("published_at", "")
+        tag_match = re.fullmatch(r"b(\d+)", tag)
+        if (release.get("draft") or release.get("prerelease") or not tag_match
+                or not published):
+            continue
+        try:
+            mature = _release_is_mature(published, now=now)
+        except ValueError:
+            continue
+        build = int(tag_match.group(1))
+        if mature and build > current_build:
+            candidates.append((build, release))
+    return max(candidates, key=lambda pair: pair[0])[1] if candidates else None
+
+
+def _wait_searxng_healthy(timeout_s=45):
+    """Require SearXNG's JSON search API, not merely an open TCP port."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            req = urllib.request.Request(ENDPOINTS["searxng"])
+            with urllib.request.urlopen(req, timeout=8) as response:
+                payload = json.loads(response.read().decode())
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+    return False
+
+
+def _p1_searxng_update(tags=None, now=None):
+    """Advance the immutable image pin after seven days; roll back on failure."""
+    print("  [1h] searxng mature-image update")
     compose = HOME / "searxng" / "docker-compose.yml"
     if not compose.exists():
         return {"step": "searxng", "status": "skipped",
                 "reason": f"compose file not found: {compose}"}
 
-    image_ref = run_capture(
-        ["docker", "compose", "-f", str(compose), "config", "--images"],
-        timeout=30,
-    ).strip().splitlines()
-    if len(image_ref) != 1:
+    compose_text = compose.read_text()
+    image_match = re.search(
+        r"docker\.io/searxng/searxng@sha256:[0-9a-f]{64}", compose_text)
+    if not image_match:
         return {"step": "searxng", "status": "failed",
-                "reason": f"expected one compose image, got {image_ref}"}
-    image_ref = image_ref[0]
-    pre_id = run_capture(
-        ["docker", "inspect", "searxng", "--format", "{{.Image}}"], timeout=30)
-    expected_id = run_capture(
-        ["docker", "image", "inspect", image_ref, "--format", "{{.Id}}"], timeout=30)
+                "reason": "could not parse immutable image pin"}
+    old_ref = image_match.group(0)
+    current_tag = run_capture([
+        "docker", "inspect", "searxng", "--format",
+        '{{index .Config.Labels "org.opencontainers.image.version"}}',
+    ], timeout=30)
+    if not _searxng_tag_date(current_tag):
+        return {"step": "searxng", "status": "failed", "image_ref": old_ref,
+                "reason": f"could not parse running version label: {current_tag!r}"}
 
+    if tags is None:
+        try:
+            req = urllib.request.Request(
+                SEARXNG_TAGS_API, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as response:
+                tags = json.loads(response.read().decode()).get("results", [])
+        except Exception as exc:
+            return {"step": "searxng", "status": "error",
+                    "current_tag": current_tag,
+                    "reason": f"Docker Hub unreachable: {exc}"}
+
+    target = _select_mature_searxng_tag(tags, current_tag, now=now)
+    if not target:
+        return {"step": "searxng", "status": "skipped",
+                "current_tag": current_tag,
+                "reason": f"no newer release is {UPDATE_MIN_AGE_DAYS} days old"}
+
+    target_tag = target["name"]
+    target_ref = f"docker.io/searxng/searxng@{target['digest']}"
+    if target_ref == old_ref:
+        return {"step": "searxng", "status": "skipped",
+                "current_tag": current_tag, "target_tag": target_tag,
+                "reason": "eligible release already pinned"}
+
+    new_text = compose_text.replace(old_ref, target_ref, 1)
+    print(f"    bumping searxng: {current_tag} -> {target_tag}")
     try:
-        if not expected_id:
-            run(["docker", "compose", "-f", str(compose), "pull"],
-                cwd=compose.parent, capture_output=True, text=True, timeout=300)
-            expected_id = run_capture(
-                ["docker", "image", "inspect", image_ref, "--format", "{{.Id}}"],
-                timeout=30)
+        run(["docker", "pull", target_ref], capture_output=True, text=True, timeout=300)
+        compose.write_text(new_text)
         run(["docker", "compose", "-f", str(compose), "up", "-d"],
-            cwd=compose.parent, capture_output=True, text=True, timeout=120)
-    except subprocess.CalledProcessError as e:
-        return {"step": "searxng", "status": "failed",
-                "image_ref": image_ref, "pre_id": pre_id, "error": str(e)[-500:]}
+            cwd=compose.parent, capture_output=True, text=True, timeout=180)
+        if not _wait_searxng_healthy():
+            raise RuntimeError("JSON search health check timed out")
+        return {"step": "searxng", "status": "ok",
+                "pre_version": current_tag, "post_version": target_tag,
+                "pre_image": old_ref, "post_image": target_ref,
+                "release_age_days": (
+                    (now or datetime.now(timezone.utc))
+                    - _release_time(target["last_updated"])
+                ).days}
+    except Exception as exc:
+        compose.write_text(compose_text)
+        rollback_error = ""
+        try:
+            run(["docker", "compose", "-f", str(compose), "up", "-d"],
+                cwd=compose.parent, capture_output=True, text=True, timeout=180)
+            if not _wait_searxng_healthy():
+                raise RuntimeError("restored pin failed JSON search health check")
+        except Exception as rollback_exc:
+            rollback_error = str(rollback_exc)
+        return {"step": "searxng",
+                "status": "failed" if rollback_error else "reverted",
+                "pre_version": current_tag, "target_version": target_tag,
+                "reverted_to": old_ref, "error": str(exc),
+                "rollback_error": rollback_error}
 
-    post_id = run_capture(
-        ["docker", "inspect", "searxng", "--format", "{{.Image}}"], timeout=30)
-    if expected_id and post_id == expected_id:
-        changed = pre_id != post_id
-        return {"step": "searxng", "status": "ok" if changed else "skipped",
-                "image_ref": image_ref, "pre_id": pre_id, "post_id": post_id,
-                "reason": "reconciled pinned image" if changed
-                          else "pinned image already running"}
-    return {"step": "searxng", "status": "failed",
-            "image_ref": image_ref, "expected_id": expected_id,
-            "post_id": post_id, "reason": "running image does not match pin"}
+
+def _p1_llama_cpp_update(releases=None, now=None):
+    """Build a seven-day-old llama.cpp release on Linux and atomically deploy it."""
+    print("  [1i] llama.cpp mature-release update")
+    current_path = run_capture(
+        ["ssh", "-o", "BatchMode=yes", "gamingrig",
+         "readlink -f /usr/local/bin/llama-server"],
+        timeout=20,
+    )
+    current_match = re.search(r"/opt/llama\.cpp/(b\d+)/bin/llama-server$", current_path)
+    if not current_match:
+        return {"step": "llama_cpp", "status": "skipped",
+                "reason": "gaming rig Linux unavailable or current build path unreadable",
+                "current_path": current_path}
+    current_tag = current_match.group(1)
+
+    if releases is None:
+        try:
+            req = urllib.request.Request(
+                LLAMA_CPP_RELEASES_API,
+                headers={"Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=20) as response:
+                releases = json.loads(response.read().decode())
+        except Exception as exc:
+            return {"step": "llama_cpp", "status": "error",
+                    "current_tag": current_tag,
+                    "reason": f"GitHub API unreachable: {exc}"}
+
+    target = _select_mature_llama_release(releases, current_tag, now=now)
+    if not target:
+        return {"step": "llama_cpp", "status": "skipped",
+                "current_tag": current_tag,
+                "reason": f"no newer release is {UPDATE_MIN_AGE_DAYS} days old"}
+    target_tag = target["tag_name"]
+    if not LLAMA_CPP_UPDATE_SCRIPT.exists():
+        return {"step": "llama_cpp", "status": "failed",
+                "current_tag": current_tag, "target_tag": target_tag,
+                "reason": f"update helper missing: {LLAMA_CPP_UPDATE_SCRIPT}"}
+
+    stdout, stderr, code = run_capture_ok(
+        ["ssh", "-o", "BatchMode=yes", "gamingrig",
+         "bash", "-s", "--", target_tag],
+        input=LLAMA_CPP_UPDATE_SCRIPT.read_text(),
+        timeout=1800,
+    )
+    detail = f"{stdout}\n{stderr}".strip()
+    common = {
+        "step": "llama_cpp",
+        "pre_version": current_tag,
+        "target_version": target_tag,
+        "release_age_days": (
+            (now or datetime.now(timezone.utc))
+            - _release_time(target["published_at"])
+        ).days,
+        "output_tail": detail[-1000:],
+    }
+    if code == 0 and f"UPDATE_OK {target_tag}" in stdout:
+        return {**common, "status": "ok", "post_version": target_tag}
+    if "ROLLBACK_OK" in detail:
+        return {**common, "status": "reverted", "reverted_to": current_tag,
+                "error": f"deployment failed with exit {code}"}
+    return {**common, "status": "failed",
+            "error": f"deployment or rollback failed with exit {code}"}
 
 
 _OMP_PKG = "@oh-my-pi/pi-coding-agent"   # bun global package backing ~/.bun/bin/omp
@@ -1720,10 +1908,13 @@ def phase_1_apply(run_dir, dry_run=False):
     # 1g: herdr self-update (refuses inside a herdr session → skipped, not failed)
     steps.append(_p1_herdr_update())
 
-    # 1h: searxng — reconcile the immutable Compose image pin
+    # 1h: searxng — advance seven-day-old immutable pins with rollback
     steps.append(_p1_searxng_update())
 
-    # 1i: omp self-update (last — swaps the binary the steward's own agents use)
+    # 1i: llama.cpp — build seven-day-old Linux releases with atomic rollback
+    steps.append(_p1_llama_cpp_update())
+
+    # 1j: omp self-update (last — swaps the binary the steward's own agents use)
     steps.append(_p1_omp_update())
 
     data = {"steps": steps}
@@ -3649,10 +3840,9 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Compare current versions (in evidence) against latest upstream stable for components NOT "
-            "auto-updated by P1: k3s, Go, Node, Ruby (rbenv), neovim, the traefik docker image, "
-            "the pinned searxng image, and llama.cpp on the gaming rig (verify read-only via `ssh gamingrig`). "
-            "Do NOT report freshrss, open-webui, herdr, or omp — those are auto-updated "
-            "during P1 (the update phase) earlier this run. "
+            "auto-updated by P1: k3s, Go, Node, Ruby (rbenv), neovim, and the traefik docker image. "
+            "Do NOT report freshrss, open-webui, herdr, omp, the pinned searxng image, or llama.cpp "
+            "on the gaming rig — P1 updates those earlier in the same run after their safety gates. "
             "Report per component: current / latest / status (current | behind | behind-major). "
             "Do NOT exec into containers — the docker images evidence IS the current version. "
             "Checking upstream (GitHub releases, npm registry, go.dev) is allowed; mutations are not."

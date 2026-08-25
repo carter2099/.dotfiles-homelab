@@ -127,7 +127,7 @@ Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) 
 
 ## Homelab Steward
 
-Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
+Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and roll back deterministically when their post-update checks fail. **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
 
 ## Agent CLI: omp
 
@@ -213,7 +213,8 @@ Use `ssh gamingrig-linux` (or `ssh gamingrig`) for Ubuntu and `ssh gamingrig-win
 Windows. Both aliases pin distinct host keys for the shared IP.
 
 Linux-primary migration completed 2026-08-17: signed NVIDIA 595.71.05 + CUDA 13.2,
-llama.cpp b10453, and llama-swap v250 serve five retained IDs continuously under systemd:
+a versioned llama.cpp CUDA build (initially b10453; steward-managed after a 7-day
+upstream soak), and llama-swap v250 serve five retained IDs continuously under systemd:
 Qwen 3.8 27B IQ2, Ornith 35B Q8, Ornith 9B Q6, Gemma 4 12B Q6, and Gemma 4 26B Q8.
 All five passed Linux behavioral serving checks. Post-migration autoresearch completed
 2026-08-18. Current reasoning budgets in the same order are 768/256/544/112/384; Qwen now
