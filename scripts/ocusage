@@ -7,41 +7,35 @@ json=$(curl -sf http://localhost:8082/health) || {
     exit 1
 }
 
-# Print per-account table
-echo "+-------------------+----------+------+------+------+---------------+---------+---------+---------+"
-echo "| Account           | Tier     |  5h  |  7d  |  30d | PAYG balance  | R5h     | R7d     | R30d    |"
-echo "+-------------------+----------+------+------+------+---------------+---------+---------+---------+"
+echo "+-------------------+----------+-------+------+------+------+---------+---------+---------+"
+echo "| Account           | Tier     | API   |  5h  |  7d  |  30d | R5h     | R7d     | R30d    |"
+echo "+-------------------+----------+-------+------+------+------+---------+---------+---------+"
 
 echo "$json" | jq -r '
     .accounts[] |
     [
         .name,
         .tier,
+        if .usage_fresh then "ok" else "STALE" end,
         (.rolling.pct | tostring) + "%",
         (.weekly.pct | tostring) + "%",
         (.monthly.pct | tostring) + "%",
-        if .payg.present and .payg.monthly_limit_usd > 0 then
-            "$" + (.payg.balance_usd | tostring | (split(".") | .[0] + "." + (.[1] + "00")[0:2]))
-        else
-            "--"
-        end,
         .rolling.reset_in,
         .weekly.reset_in,
         .monthly.reset_in
-    ] | @tsv' | while IFS=$'\t' read -r name tier rh wh mh payg r5h r7d r30d; do
-    printf "| %-17s | %-8s | %-4s | %-4s | %-4s | %-13s | %-7s | %-7s | %-7s |\n" "$name" "$tier" "$rh" "$wh" "$mh" "$payg" "$r5h" "$r7d" "$r30d"
+    ] | @tsv' | while IFS=$'\t' read -r name tier api rh wh mh r5h r7d r30d; do
+    printf "| %-17s | %-8s | %-5s | %-4s | %-4s | %-4s | %-7s | %-7s | %-7s |\n" "$name" "$tier" "$api" "$rh" "$wh" "$mh" "$r5h" "$r7d" "$r30d"
 done
 
-echo "+-------------------+----------+------+------+------+---------------+---------+---------+---------+"
-# Aggregate summary
+echo "+-------------------+----------+-------+------+------+------+---------+---------+---------+"
 echo "$json" | jq -r '
     "Aggregate: \(.aggregate.active_accounts)/\(.aggregate.total_accounts) active accounts",
     "Peak usage:  5h \(.aggregate.max_rolling_pct)% | 7d \(.aggregate.max_weekly_pct)% | 30d \(.aggregate.max_monthly_pct)%",
-    if .aggregate.total_payg_balance_usd > 0 then
-        "PAYG:       $" + (.aggregate.total_payg_balance_usd | tostring | (split(".") | .[0] + "." + (.[1] + "00")[0:2])) + " balance, $" + (.aggregate.total_payg_usage_usd | tostring | (split(".") | .[0] + "." + (.[1] + "00")[0:2])) + "/mo used"
+    if .aggregate.any_usage_stale then
+        "Usage API:   stale data on one or more accounts"
     else
-        "PAYG:       —"
+        "Usage API:   fresh for every account"
     end,
-    "Status:     \(.status)",
-    "Upstream:   \(.upstream)"
+    "Status:      \(.status)",
+    "Upstream:    \(.upstream)"
 ' | while IFS= read -r line; do echo "  $line"; done

@@ -802,9 +802,7 @@ def phase_0_setup(args):
                 "rolling_reset_in": rolling.get("reset_in") or "",
                 "weekly_reset_in": weekly.get("reset_in") or "",
                 "monthly_reset_in": monthly.get("reset_in") or "",
-                "payg_balance": acct.get("payg", {}).get("balance_usd"),
-                "payg_monthly_used": acct.get("payg", {}).get("monthly_usage_usd"),
-                "payg_monthly_limit": acct.get("payg", {}).get("monthly_limit_usd"),
+                "usage_fresh": bool(acct.get("usage_fresh")),
             })
 
     # Dependabot management — stop the webhook so it doesn't race our executor
@@ -841,9 +839,7 @@ def phase_0_setup(args):
     # Print usage summary
     acct_lines = []
     for a in usage["accounts"]:
-        extra = ""
-        if a["payg_balance"] is not None:
-            extra = f", PAYG ${a['payg_balance']:.2f} remaining"
+        extra = "" if a.get("usage_fresh") else ", usage API STALE"
         resets = []
         if a.get("rolling_reset_in"):
             resets.append(f"5h→{a['rolling_reset_in']}")
@@ -5063,8 +5059,8 @@ def _html_usage(usage_data):
         name = acct.get("name", "?")
         tier = acct.get("tier", "?")
         extra_parts = [tier]
-        if acct.get("payg_balance") is not None:
-            extra_parts.append(f'PAYG ${acct["payg_balance"]:.2f}')
+        if not acct.get("usage_fresh"):
+            extra_parts.append("usage API stale")
         extra = " · ".join(extra_parts)
         out.append(
             f'<p style="margin:0 0 3px; font-size:13px;">'

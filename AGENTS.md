@@ -117,7 +117,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
 - **FreshRSS** (RSS reader, k3s Deployment, freshrss.carter2099.com) → [`k3s.md`](notes/docs/homelab/k3s.md) (covered as third-party k3s service)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
-- **OpenCode Go Proxy** (0.0.0.0:8082, UFW-gated to Docker bridges) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
+- **OpenCode Go Proxy** (0.0.0.0:8082, UFW-gated to Docker bridges; quota routing from the authenticated OpenCode usage API, API keys only) — if opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
 - **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges; five reasoning-enabled local entries) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
 - **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 
@@ -255,7 +255,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`omp-web.md`](notes/docs/homelab/omp-web.md) — agent web UI, next.js build quirks
 - [`searxng.md`](notes/docs/homelab/searxng.md) — metasearch backend, config
 - [`cloudflare.md`](notes/docs/homelab/cloudflare.md) — API token, tunnel ingress, DNS
-- [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md) — dual-account proxy, ufw bridge rules, cookie expiry
+- [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md) — multi-account usage API routing, ufw bridge rules
 
 `journal/` contains research notes and project records (not maintained). `logs/sessions/` contains chronological session memoirs.
 
