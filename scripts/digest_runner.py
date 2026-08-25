@@ -410,7 +410,6 @@ IMPORTANCE_RUBRIC_SPECIFIC: dict[str, str] = {
 TOPICS: dict[str, dict[str, Any]] = {
     "ai-tech": {
         "title": "AI & Tech Digest",
-        "recipients": ["carter2099@pm.me"],
         "category": "ai-tech",
         "web_slug": "ai-tech",
         "web_title": "AI & Tech",
@@ -508,7 +507,6 @@ TOPICS: dict[str, dict[str, Any]] = {
     },
     "agentic-platform": {
         "title": "Agentic Platform Digest",
-        "recipients": ["carter2099@pm.me"],
         "category": "agentic-platform",
         "web_slug": "agents",
         "web_title": "Agents",
@@ -584,7 +582,6 @@ TOPICS: dict[str, dict[str, Any]] = {
     },
     "ai-hardware": {
         "title": "AI Hardware Digest",
-        "recipients": ["carter2099@pm.me"],
         "category": "ai-hardware",
         "web_slug": "ai-hardware",
         "web_title": "AI Hardware",
@@ -695,7 +692,6 @@ TOPICS: dict[str, dict[str, Any]] = {
     },
     "gaming": {
         "title": "Gaming Digest",
-        "recipients": ["carter2099@pm.me"],
         "category": "gaming-digest",
         "web_slug": "gaming",
         "web_title": "Gaming",
@@ -764,7 +760,6 @@ TOPICS: dict[str, dict[str, Any]] = {
     },
     "world": {
         "title": "World Digest",
-        "recipients": ["carter2099@pm.me"],
         "category": "world-digest",
         "web_slug": "world",
         "web_title": "World",
