@@ -199,9 +199,13 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
         "category": "Research",
         "latest_dev": "Previous development.",
         "status": "active",
-        "importance": "medium",
+        "importance": "high",
         "first_seen": "2026-08-08",
-        "last_updated": "2026-08-08",
+        "last_updated": "2026-08-09",
+        "developments": [
+            {"date": "2026-08-08", "url": "https://example.com/existing"},
+            {"date": "2026-08-09", "url": "https://example.com/existing-update"},
+        ],
     }]}
     return candidates, tracker["stories"], tracker
 
@@ -256,16 +260,21 @@ def test_editorial_validation_and_state_application() -> None:
         proposal, candidates, sif_candidates, tracker
     )
     check(len(validated["selected_fresh"]) == 2, validated)
-    check(len(validated["story_state_proposals"]) == 1, validated)
+    check(len(validated["story_state_proposals"]) == 2, validated)
+    update_ops = [
+        op for op in validated["story_state_proposals"]
+        if op["operation"] == "update"
+    ]
+    check(len(update_ops) == 1, validated["story_state_proposals"])
     check(
         validated["balance_summary"]
-        == "Validated selection: 2 fresh, 0 ongoing; 1 source domain(s); "
-           "categories: Research.",
+        == "Validated selection: 2 fresh, 0 developing/ongoing; "
+           "1 source domain(s); categories: Research.",
         validated["balance_summary"],
     )
     check(any("unknown candidate_id" in warning for warning in warnings), warnings)
     check(
-        any("cross-story tracker update" in warning for warning in warnings),
+        any("unlinked tracker update" in warning for warning in warnings),
         warnings,
     )
     original = json.loads(json.dumps(tracker))
@@ -275,6 +284,11 @@ def test_editorial_validation_and_state_application() -> None:
     check(tracker == original, "state application mutated its input")
     check(updated["stories"][0]["latest_dev"] == "New verified development.", updated)
     check(updated["stories"][0]["last_updated"] == "2026-08-10", updated)
+    check(
+        digest._story_development_dates(updated["stories"][0])
+        == {"2026-08-08", "2026-08-09", "2026-08-10"},
+        updated["stories"][0],
+    )
 
 
 def test_editorial_critic_patch_contract() -> None:
@@ -301,10 +315,7 @@ def test_editorial_critic_patch_contract() -> None:
 
 
 def test_editorial_drops_stale_fresh_selection() -> None:
-    """Ongoing-window candidates must never ship under "Fresh — Last 24 Hours"
-    (digest-quality audit 2026-08-12: agentic-platform shipped a 5d-old Claude
-    Code story and ai-hardware a 2d-old RTX story under Fresh). A stale-dropped
-    candidate is treated as unselected, so it gets no tracker add either."""
+    """A stale Fresh pick cannot enter either output or tracker evidence."""
     candidates, sif_candidates, tracker = editorial_fixture()
     stale_day = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
     stale = copy.deepcopy(candidates[0])
@@ -336,29 +347,10 @@ def test_editorial_drops_stale_fresh_selection() -> None:
         validated["selected_fresh"],
     )
     check(any("stale fresh selection" in warning for warning in warnings), warnings)
-    # The stale-dropped candidate is still treated as unselected: it gets no
-    # tracker add. The deterministic floor fills the digest with the
-    # pre-existing active SIF story (digest-quality audit 2026-08-21), so the
-    # only state op is the synthesized tracker touch for that story.
-    check(
-        validated["story_state_proposals"]
-        == [{
-            "operation": "update",
-            "story_url": "https://example.com/existing",
-            "evidence_candidate_ids": [],
-            "latest_dev": "Previous development.",
-            "importance": "medium",
-            "status": "active",
-        }],
-        validated["story_state_proposals"],
-    )
-    check(
-        not any(
-            op.get("operation") == "add" and op.get("candidate_id") == stale["candidate_id"]
-            for op in validated["story_state_proposals"]
-        ),
-        "stale-dropped candidate received a tracker add",
-    )
+    # The qualified developing story may fill the thin digest, but display is
+    # not evidence and therefore creates no tracker update.
+    check(validated["story_state_proposals"] == [],
+          validated["story_state_proposals"])
     updated = digest._apply_story_state_proposals(
         tracker, validated, candidates, "2026-08-10"
     )
@@ -367,8 +359,8 @@ def test_editorial_drops_stale_fresh_selection() -> None:
         "stale-dropped candidate entered the tracker",
     )
     check(
-        updated["stories"][0]["last_updated"] == "2026-08-10",
-        "floor-filled ongoing story was not tracker-touched",
+        updated["stories"][0]["last_updated"] == "2026-08-09",
+        "displaying a story fabricated an evidence date",
     )
 
 
@@ -969,10 +961,9 @@ def test_critic_rejection_fails_closed() -> None:
             )
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(len(fresh) == 2, "critic rejection did not use source-ranked fallback")
-        # The rejected model proposal's state change must not be applied, but the
-        # source-ranked fallback now records today's selected stories in the
-        # tracker so a curation-model outage no longer freezes stories-in-flight
-        # (digest-quality audit fix).
+        # Rejected state cannot apply. The deterministic fallback records only
+        # selected high-importance roots; medium one-offs are not follow-up
+        # candidates for Developing and Ongoing.
         check(
             not any(
                 story.get("latest_dev") == "Proposed summary."
@@ -980,18 +971,23 @@ def test_critic_rejection_fails_closed() -> None:
             ),
             "rejected state proposal was applied",
         )
-        # The source-ranked fallback records today's selected stories in the
-        # tracker (steward digest-quality contract); compare against the real
-        # run date so the test is deterministic on any day.
         today = datetime.now().strftime("%Y-%m-%d")
         added = {
             story.get("url"): story
             for story in updated["stories"]
             if story.get("first_seen") == today
         }
-        check(len(added) == 2, f"fallback did not track both fresh stories: {added}")
         check(
-            all(story.get("last_updated") == today for story in added.values()),
+            set(added) == {"https://example.com/primary"},
+            f"fallback tracked non-high fresh stories: {added}",
+        )
+        check(
+            all(
+                story.get("last_updated") == today
+                and story.get("importance") == "high"
+                and len(story.get("developments", [])) == 1
+                for story in added.values()
+            ),
             added,
         )
         check(
@@ -1037,68 +1033,60 @@ def test_intro_boundary_and_deterministic_render() -> None:
     check("↳ New evidence." in rendered, "ongoing rationale missing")
     check("{{FRESH_STORIES}}" not in rendered, "template placeholder remained")
     check("STORY BLOCK TEMPLATE" not in rendered, "template instructions leaked")
+    check(
+        "Developing and Ongoing" in rendered,
+        "rendered section label did not match the editorial contract",
+    )
 
 
-def test_tracker_touch_updates_last_updated_for_ongoing_selection() -> None:
-    """A tracker story selected into Ongoing without a model update op must get
-    a deterministic tracker touch so last_updated advances (digest-quality
-    audit 2026-08-21: the 404 Media rare-books story and the OpenAI Agents JS
-    guide resurfaced 08-19→08-21 while last_updated stayed 2026-08-18)."""
+def test_tracker_updates_require_material_evidence() -> None:
+    """Rendering is not evidence; an exact source-linked follow-up is."""
     candidates, sif_candidates, tracker = editorial_fixture()
     proposal = {
-        "selected_fresh": [
-            {"candidate_id": candidates[0]["candidate_id"]},
-            {"candidate_id": candidates[1]["candidate_id"]},
-        ],
+        "selected_fresh": [{"candidate_id": candidates[1]["candidate_id"]}],
         "selected_ongoing": [{
             "story_url": "https://example.com/existing",
-            "summary": "Still relevant summary.",
-            "why_still_relevant": "Story is still developing.",
+            "summary": "Established multi-day development.",
+            "why_still_relevant": "Latest verified action remains in effect.",
         }],
         "story_state_proposals": [],
     }
     validated, _ = digest._validate_editorial_proposal(
         proposal, candidates, sif_candidates, tracker
     )
-    touches = [
-        op for op in validated["story_state_proposals"]
-        if op["operation"] == "update"
-    ]
-    check(len(touches) == 1, validated["story_state_proposals"])
-    check(
-        touches[0]["story_url"] == "https://example.com/existing"
-        and touches[0]["latest_dev"] == "Previous development."
-        and touches[0]["status"] == "active",
-        touches,
-    )
+    check(validated["story_state_proposals"] == [],
+          validated["story_state_proposals"])
     original = json.loads(json.dumps(tracker))
-    updated = digest._apply_story_state_proposals(
+    displayed = digest._apply_story_state_proposals(
         tracker, validated, candidates, "2026-08-10"
     )
     check(tracker == original, "state application mutated its input")
-    story = updated["stories"][0]
-    check(story["last_updated"] == "2026-08-10", story)
-    check(story["latest_dev"] == "Previous development.", story)
+    check(displayed["stories"][0]["last_updated"] == "2026-08-09",
+          displayed["stories"][0])
 
-    # A model-supplied update op suppresses the synthesized touch (no dupes).
-    # Evidence must be a same-story candidate (digest-quality audit 2026-08-22).
-    same_story = {
+    # A new article may update a tracked root only when the dedicated research
+    # path declared the exact relationship. The candidate URL may differ.
+    followup = {
         **candidates[0],
-        "title": "Existing narrative update",
-        "url": "https://example.com/existing",
-        "candidate_id": "candidate-same-story",
+        "title": "Existing narrative materially advances",
+        "url": "https://news.example.com/existing-action",
+        "candidate_id": "candidate-linked-followup",
+        "develops_story_url": "https://example.com/existing",
     }
-    candidates.append(same_story)
-    with_update = copy.deepcopy(proposal)
-    with_update["selected_fresh"] = [{"candidate_id": same_story["candidate_id"]}]
-    with_update["story_state_proposals"] = [{
-        "operation": "update",
-        "story_url": "https://example.com/existing",
-        "evidence_candidate_ids": [same_story["candidate_id"]],
-        "latest_dev": "Model-verified development.",
-        "importance": "high",
-        "status": "active",
-    }]
+    candidates.append(followup)
+    with_update = {
+        "selected_fresh": [{
+            "candidate_id": followup["candidate_id"],
+            "editorial_summary": "Officials took a new, verified action.",
+            "related_story_url": "https://example.com/existing",
+        }],
+        "selected_ongoing": [{
+            "story_url": "https://example.com/existing",
+            "summary": "The tracked story now includes the official action.",
+            "why_still_relevant": "Officials took a new action today.",
+        }],
+        "story_state_proposals": [],
+    }
     validated, _ = digest._validate_editorial_proposal(
         with_update, candidates, sif_candidates, tracker
     )
@@ -1108,9 +1096,173 @@ def test_tracker_touch_updates_last_updated_for_ongoing_selection() -> None:
     ]
     check(len(update_ops) == 1, validated["story_state_proposals"])
     check(
-        update_ops[0]["latest_dev"] == "Model-verified development.",
+        update_ops[0]["evidence_candidate_ids"] == [followup["candidate_id"]],
         update_ops,
     )
+    updated = digest._apply_story_state_proposals(
+        tracker, validated, candidates, "2026-08-10"
+    )
+    story = updated["stories"][0]
+    check(story["latest_dev"] == "Officials took a new, verified action.", story)
+    check(
+        digest._story_development_dates(story)
+        == {"2026-08-08", "2026-08-09", "2026-08-10"},
+        story,
+    )
+
+
+def test_developing_section_requires_importance_and_multiple_dates() -> None:
+    """One-off and non-high stories never qualify, regardless of age/touches."""
+    candidates, _, _ = editorial_fixture()
+    one_off = {
+        "title": "Single announcement",
+        "url": "https://tracker.example/announcement",
+        "category": "Industry",
+        "latest_dev": "The original announcement.",
+        "status": "active",
+        "importance": "high",
+        "first_seen": "2026-08-20",
+        # A legacy display touch must not count as evidence.
+        "last_updated": "2026-08-24",
+    }
+    medium_multiday = {
+        "title": "Repeated but not important",
+        "url": "https://tracker.example/medium",
+        "category": "Industry",
+        "latest_dev": "A second minor update.",
+        "status": "active",
+        "importance": "medium",
+        "first_seen": "2026-08-20",
+        "last_updated": "2026-08-22",
+        "developments": [
+            {"date": "2026-08-20", "url": "https://tracker.example/medium"},
+            {"date": "2026-08-22", "url": "https://news.example/medium-update"},
+        ],
+    }
+    qualified = {
+        "title": "Important story with real movement",
+        "url": "https://tracker.example/qualified",
+        "category": "Policy",
+        "latest_dev": "Officials issued a binding decision.",
+        "status": "active",
+        "importance": "high",
+        "first_seen": "2026-08-20",
+        "last_updated": "2026-08-22",
+        "developments": [
+            {"date": "2026-08-20", "url": "https://tracker.example/qualified"},
+            {"date": "2026-08-22", "url": "https://news.example/binding-decision"},
+        ],
+    }
+    tracker = {"stories": [one_off, medium_multiday, qualified]}
+    proposal = {
+        "selected_fresh": [
+            {"candidate_id": candidates[0]["candidate_id"]},
+            {"candidate_id": candidates[1]["candidate_id"]},
+        ],
+        "selected_ongoing": [
+            {"story_url": story["url"], "summary": story["latest_dev"],
+             "why_still_relevant": story["latest_dev"]}
+            for story in tracker["stories"]
+        ],
+        "story_state_proposals": [],
+    }
+    validated, warnings = digest._validate_editorial_proposal(
+        proposal, candidates, tracker["stories"], tracker
+    )
+    check(
+        [item["story_url"] for item in validated["selected_ongoing"]]
+        == [qualified["url"]],
+        validated["selected_ongoing"],
+    )
+    check(
+        sum("unqualified developing story" in warning for warning in warnings) == 2,
+        warnings,
+    )
+
+
+def test_followup_research_targets_prior_high_importance_stories() -> None:
+    today = datetime(2026, 8, 25, tzinfo=timezone.utc).date()
+    stories = {
+        "stories": [
+            {
+                "title": "Prior high story",
+                "url": "https://tracker.example/high",
+                "importance": "high",
+                "status": "active",
+                "first_seen": "2026-08-24",
+                "last_updated": "2026-08-24",
+            },
+            {
+                "title": "Prior medium story",
+                "url": "https://tracker.example/medium",
+                "importance": "medium",
+                "status": "active",
+                "first_seen": "2026-08-24",
+                "last_updated": "2026-08-24",
+            },
+            {
+                "title": "Same-day high story",
+                "url": "https://tracker.example/today",
+                "importance": "high",
+                "status": "active",
+                "first_seen": "2026-08-25",
+                "last_updated": "2026-08-25",
+            },
+        ]
+    }
+    angle = digest._build_developing_followup_angle(stories, today)
+    check(angle is not None, "high-priority prior story was not scheduled")
+    prompt = angle["prompt"]
+    check("https://tracker.example/high" in prompt, prompt)
+    check("https://tracker.example/medium" not in prompt, prompt)
+    check("https://tracker.example/today" not in prompt, prompt)
+
+
+def test_tracker_retention_uses_evidence_inactivity() -> None:
+    today = datetime(2026, 8, 25, tzinfo=timezone.utc).date()
+    active_long_running = {
+        "title": "Long-running active crisis",
+        "url": "https://tracker.example/active",
+        "importance": "high",
+        "status": "active",
+        "first_seen": "2026-08-01",
+        "last_updated": "2026-08-24",
+        "developments": [
+            {"date": "2026-08-01", "url": "https://tracker.example/active"},
+            {"date": "2026-08-24", "url": "https://news.example/latest-action"},
+        ],
+    }
+    inactive_active = {
+        "title": "Recently stalled story",
+        "url": "https://tracker.example/stalled",
+        "importance": "high",
+        "status": "active",
+        "first_seen": "2026-08-10",
+        "last_updated": "2026-08-20",
+        "developments": [
+            {"date": "2026-08-10", "url": "https://tracker.example/stalled"},
+            {"date": "2026-08-20", "url": "https://news.example/stalled-update"},
+        ],
+    }
+    expired_cooled = {
+        "title": "Expired cooled story",
+        "url": "https://tracker.example/expired",
+        "importance": "high",
+        "status": "cooled",
+        "first_seen": "2026-08-01",
+        "last_updated": "2026-08-10",
+        "developments": [
+            {"date": "2026-08-10", "url": "https://tracker.example/expired"},
+        ],
+    }
+    kept, cooled, pruned = digest._prune_and_cool_stories(
+        [active_long_running, inactive_active, expired_cooled], today
+    )
+    kept_by_url = {story["url"]: story for story in kept}
+    check(active_long_running["url"] in kept_by_url, kept)
+    check(kept_by_url[inactive_active["url"]]["status"] == "cooled", kept)
+    check(expired_cooled["url"] not in kept_by_url, kept)
+    check((cooled, pruned) == (1, 1), (cooled, pruned))
 
 
 def test_ongoing_resurface_cap_cools_recurring_story() -> None:
@@ -1209,24 +1361,35 @@ def test_ongoing_resurface_cap_cools_recurring_story() -> None:
 
 
 def test_editorial_floor_and_thin_send_guard() -> None:
-    """A selection below two stories must be filled from the active SIF pool
-    when available, and a digest that stays below two stories must not be
-    emailed (digest-quality audit 2026-08-21: agentic-platform 08-20 and
-    gaming-digest 08-20 each shipped a single-link digest)."""
+    """The send floor may use qualified developing stories, never filler."""
     candidates, sif_candidates, tracker = editorial_fixture()
-    second_sif = {
-        "title": "Second tracked story",
-        "url": "https://second.example/ongoing",
+    low_one_off = {
+        "title": "Low-priority one-off",
+        "url": "https://second.example/one-off",
         "category": "Policy",
-        "latest_dev": "Second development.",
+        "latest_dev": "Only one minor report.",
         "status": "active",
         "importance": "low",
-        "first_seen": "2026-08-09",
-        "last_updated": "2026-08-09",
+        "first_seen": "2026-08-10",
+        "last_updated": "2026-08-10",
     }
-    sif_candidates.append(second_sif)
+    second_sif = {
+        "title": "Second qualified developing story",
+        "url": "https://second.example/ongoing",
+        "category": "Policy",
+        "latest_dev": "A binding second development.",
+        "status": "active",
+        "importance": "high",
+        "first_seen": "2026-08-09",
+        "last_updated": "2026-08-10",
+        "developments": [
+            {"date": "2026-08-09", "url": "https://second.example/ongoing"},
+            {"date": "2026-08-10", "url": "https://news.example/second-action"},
+        ],
+    }
+    sif_candidates.extend([low_one_off, second_sif])
 
-    # 1 fresh + 0 ongoing → floor fills the most-recently-updated SIF story.
+    # 1 fresh + 0 ongoing → floor uses the newest qualified story only.
     proposal = {
         "selected_fresh": [{"candidate_id": candidates[0]["candidate_id"]}],
         "selected_ongoing": [],
@@ -1571,7 +1734,10 @@ def main() -> None:
         test_editorial_critic_retries_primary_after_transient_error,
         test_critic_rejection_fails_closed,
         test_intro_boundary_and_deterministic_render,
-        test_tracker_touch_updates_last_updated_for_ongoing_selection,
+        test_tracker_updates_require_material_evidence,
+        test_developing_section_requires_importance_and_multiple_dates,
+        test_followup_research_targets_prior_high_importance_stories,
+        test_tracker_retention_uses_evidence_inactivity,
         test_ongoing_resurface_cap_cools_recurring_story,
         test_editorial_floor_and_thin_send_guard,
         test_listing_urls_rejected,

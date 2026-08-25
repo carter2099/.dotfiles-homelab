@@ -123,7 +123,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 
 ## Email Digests
 
-Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) at 08:00 UTC via `digests-daily.timer`. Per-topic inference is bounded to two concurrent calls; curation uses a validated DeepSeek Flash proposal followed by a separate DeepSeek Flash critic pass before deterministic state application and HTML rendering, with Mimo as fallback. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
+Five daily HTML digests (ai-tech, agentic-platform, ai-hardware, gaming, world) at 08:00 UTC via `digests-daily.timer`. Per-topic inference is bounded to two concurrent calls; curation uses a validated DeepSeek Flash proposal followed by a separate DeepSeek Flash critic pass before deterministic state application and HTML rendering, with Mimo as fallback. **Developing and Ongoing** contains only high-importance stories with source-backed material developments on at least two distinct days; single announcements and one-off articles do not qualify. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
 
 ## Homelab Steward
 

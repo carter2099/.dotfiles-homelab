@@ -305,18 +305,21 @@ def check_search_health(label: str = "") -> dict[str, Any]:
 BATCH_SIZE = 10  # findings/summaries per LLM call in phases 2 and 5
 
 # ── Caps ───────────────────────────────────────────────────────────────────
-FRESH_CAP = 12      # Pool A: max fresh findings passed to Phase 4
-ONGOING_CAP = 5     # Pool B: max ongoing articles passed to Phase 4
-SIF_CAP = 3         # Pool C: max stories-in-flight passed directly to Phase 6
+FRESH_CAP = 12       # Pool A: max fresh findings passed to Phase 4
+ONGOING_CAP = 5      # Pool B: max older articles passed to Phase 4
+SIF_CAP = 3          # Pool C: max qualified developing stories passed to Phase 6
+FOLLOWUP_STORY_CAP = 8  # high-importance tracker stories checked for new developments
 
 # ── Stories-in-flight constants ────────────────────────────────────────────
-COOL_AFTER_DAYS = 5     # auto-set status to "cooled" if no updates in 5 days
-PRUNE_AFTER_DAYS = 7    # remove stories entirely after 7 days since first_seen
+MIN_DEVELOPMENT_DAYS = 2  # evidence-backed developments on distinct UTC dates
+DEVELOPMENT_HISTORY_CAP = 30
+COOL_AFTER_DAYS = 5     # auto-cool after 5 days without evidence-backed movement
+PRUNE_AFTER_DAYS = 7    # remove cooled stories after 7 days without movement
 # A tracker story may be surfaced in the digest at most RESURFACE_CAP_DAYS
 # consecutive days without an evidence-backed development; the next day it is
-# cooled (and drops out of Ongoing). Matches the auto-cool window: five days of
-# digest repetition without real movement is stale by the same measure the
-# tracker uses (digest-quality audit 2026-08-22).
+# cooled (and drops out of Developing and Ongoing). Matches the auto-cool
+# window: five days of digest repetition without real movement is stale by the
+# same measure the tracker uses (digest-quality audit 2026-08-22).
 RESURFACE_CAP_DAYS = COOL_AFTER_DAYS - 1
 
 # ── Cross-day dedup constants ──────────────────────────────────────────────
@@ -336,6 +339,21 @@ IMPORTANCE_RUBRIC_SHARED = (
     "space, but not a lead story.\n"
     "- low — incremental, niche, or minor. Worth including only on a slow day. "
     "First to get capped.\n"
+)
+
+DEVELOPING_STORY_RULES = (
+    "DEVELOPING AND ONGOING CONTRACT:\n"
+    "- Only high-importance stories qualify.\n"
+    "- A story must have material factual developments on at least two distinct "
+    "UTC dates. Age, continued relevance, or an unresolved possibility is not a "
+    "second development.\n"
+    "- Material development means the underlying event changed: a new official "
+    "action, decision, filing, vote, confirmed outcome, escalation, measurable "
+    "impact, or comparably substantive fact.\n"
+    "- Never qualify a single announcement, launch, release, patch, result, "
+    "one-off article, opinion, analysis, recap, or new commentary that merely "
+    "reframes the same facts. A different article about the same broad theme is "
+    "not a development.\n"
 )
 
 IMPORTANCE_RUBRIC_SPECIFIC: dict[str, str] = {
@@ -1359,18 +1377,13 @@ def _enforce_ongoing_resurface_cap(
     digest_dir: Path,
     today: date | None = None,
 ) -> tuple[list[str], list[dict]]:
-    """Cool Ongoing selections surfaced on too many consecutive days.
+    """Cool a qualified story after too many evidence-free resurfacings.
 
-    A tracker story is meant to stay in rotation while it develops. A story the
-    digest keeps re-surfacing day after day with no evidence-backed development
-    (the model omits an update op, so the deterministic tracker touch advances
-    last_updated) never auto-cools and repeats for days (digest-quality audit
-    2026-08-22: the 404 Media rare-books story ran in ai-tech and OpenAI's
-    PORTS-Pike story in ai-hardware on five consecutive days, 08-18→08-22, with
-    paraphrased summaries of the same facts). Once a story has been surfaced
-    RESURFACE_CAP_DAYS consecutive days, the next selection is dropped from
-    Ongoing and the story cooled; only an evidence-backed update (an actual
-    same-story development) resets the counter.
+    Displaying a story never advances evidence-backed activity. The cap still
+    bounds consecutive repetition before the five-day inactivity rule: after
+    RESURFACE_CAP_DAYS appearances, the next selection is dropped and receives
+    an administrative cooled status. Only a selected, source-linked material
+    development resets the counter.
     """
     warnings: list[str] = []
     ops: list[dict] = []
@@ -1498,6 +1511,120 @@ def _is_fresh_eligible(candidate: dict, yesterday: date, today: date | None = No
         return True
     return yesterday <= fresh_date.date() <= today
 
+def _story_development_dates(story: dict) -> set[str]:
+    """Return distinct evidence-backed UTC dates for a tracked story.
+
+    Legacy tracker entries have no evidence history. Treat only first_seen as
+    evidence; last_updated may contain an old evidence-free display touch.
+    """
+    dates: set[str] = set()
+    developments = story.get("developments", [])
+    if isinstance(developments, list):
+        for development in developments:
+            if not isinstance(development, dict):
+                continue
+            parsed = _parse_date(development.get("date"))
+            if parsed is not None:
+                dates.add(parsed.date().isoformat())
+    if dates:
+        return dates
+    initial = _parse_date(story.get("first_seen") or story.get("last_updated"))
+    return {initial.date().isoformat()} if initial is not None else set()
+
+
+def _normalize_story_tracking(story: dict, today: date | None = None) -> dict:
+    """Migrate one tracker entry to auditable evidence-backed history."""
+    if today is None:
+        today = datetime.now(timezone.utc).date()
+    if story.get("importance") not in ("high", "medium", "low"):
+        story["importance"] = "medium"
+    if not _parse_date(story.get("first_seen")):
+        fallback = _parse_date(story.get("last_updated"))
+        story["first_seen"] = (
+            fallback.date().isoformat() if fallback is not None else today.isoformat()
+        )
+
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    developments = story.get("developments", [])
+    if isinstance(developments, list):
+        for development in developments:
+            if not isinstance(development, dict):
+                continue
+            parsed = _parse_date(development.get("date"))
+            url = str(development.get("url", "")).strip()
+            if parsed is None:
+                continue
+            item = (parsed.date().isoformat(), url)
+            if item in seen:
+                continue
+            seen.add(item)
+            normalized.append({"date": item[0], "url": item[1]})
+
+    if not normalized:
+        normalized.append({
+            "date": story["first_seen"],
+            "url": str(story.get("url", "")).strip(),
+        })
+    normalized.sort(key=lambda item: (item["date"], item["url"]))
+    story["developments"] = normalized[-DEVELOPMENT_HISTORY_CAP:]
+    story["last_updated"] = max(item["date"] for item in normalized)
+    return story
+
+
+def _is_developing_story(story: dict) -> bool:
+    """True only for important stories with evidence on multiple days."""
+    return (
+        story.get("importance") == "high"
+        and len(_story_development_dates(story)) >= MIN_DEVELOPMENT_DAYS
+    )
+
+
+def _build_developing_followup_angle(
+    stories_in_flight: dict | None,
+    today: date | None = None,
+) -> dict | None:
+    """Build one bounded research angle for material tracker follow-ups."""
+    if not stories_in_flight:
+        return None
+    if today is None:
+        today = datetime.now(timezone.utc).date()
+    tracked = [
+        story for story in stories_in_flight.get("stories", [])
+        if story.get("status", "active") in ("active", "cooled")
+        and story.get("importance") == "high"
+        and story.get("first_seen") != today.isoformat()
+        and not _is_listing_url(story.get("url", ""))
+        and not _is_asset_cdn_url(story.get("url", ""))
+    ]
+    tracked = sorted(
+        tracked, key=lambda story: story.get("last_updated", ""), reverse=True
+    )[:FOLLOWUP_STORY_CAP]
+    if not tracked:
+        return None
+
+    context = [{
+        "title": story.get("title", ""),
+        "story_url": story.get("url", ""),
+        "latest_confirmed_development": story.get("latest_dev", ""),
+        "first_seen": story.get("first_seen", ""),
+        "last_evidence_date": story.get("last_updated", ""),
+        "status": story.get("status", "active"),
+    } for story in tracked]
+    prompt = (
+        "Search specifically for material developments from the last 24 hours in "
+        "the high-importance tracked stories below. Search each story; zero results "
+        "is a valid and preferable answer when nothing materially changed.\n\n"
+        f"{DEVELOPING_STORY_RULES}\n"
+        "Return only articles that report a new material fact after the supplied "
+        "last_evidence_date. Exclude recaps, explainers, opinions, reactions without "
+        "new action, and articles connected only by a broad theme. Each returned "
+        "finding must include `develops_story_url`, copied exactly from the matching "
+        "`story_url` below. Never invent a relationship or URL.\n\n"
+        f"Tracked stories:\n{json.dumps(context, indent=2)}"
+    )
+    return {"id": "developing-followups", "prompt": prompt, "optional": True}
+
 
 def _batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
     """Split items into batches of at most `size`."""
@@ -1508,11 +1635,15 @@ def _batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
 # Phase implementations
 # ═══════════════════════════════════════════════════════════════════════════
 
-def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
-    """Phase 1: Parallel research agents via omp -p.
+def phase_1_research(
+    topic: dict,
+    run_dir: Path,
+    stories_in_flight: dict | None = None,
+) -> list[dict]:
+    """Phase 1: Run broad discovery plus bounded tracked-story follow-ups.
 
-    Each research angle gets its own omp -p call. They use web_search and
-    web_fetch to find stories. Returns merged list of findings.
+    Each research angle gets its own omp call and uses web search. Returns the
+    merged findings with their originating angle preserved.
     """
     global _UPSTREAM_OUTAGE, _RESEARCH_FAILURES, _RESEARCH_SUCCESSES
     _RESEARCH_FAILURES = []
@@ -1525,6 +1656,10 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
         return json.loads(output_path.read_text())
 
     rubric = _importance_rubric_text(topic)
+    angles = list(topic["research_angles"])
+    followup_angle = _build_developing_followup_angle(stories_in_flight)
+    if followup_angle is not None:
+        angles.append(followup_angle)
 
     system_prompt = (
         "You are a research assistant for a daily news digest. Your job is to search "
@@ -1544,9 +1679,12 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
         '  {"title": "...", "url": "...", "source_domain": "...", '
         '"date_published": "YYYY-MM-DD or empty if unknown from search snippet", '
         '"summary": "1-sentence summary from search result", '
-        '"category": "...", "importance": "high|medium|low"}\n\n'
+        '"category": "...", "importance": "high|medium|low"}\n'
+        "A tracked-story follow-up must also include `develops_story_url` exactly "
+        "as supplied by that angle; otherwise omit that field.\n\n"
         "Never construct URLs — only use URLs that appeared in web_search results. "
-        "Target 5-8 findings. Be quick — search, compile, output JSON.\n\n"
+        "Target 5-8 findings for a broad angle. For a tracked-story follow-up, zero "
+        "is valid when nothing materially changed. Be quick — search, compile, output JSON.\n\n"
         f"{rubric}"
     )
 
@@ -1578,16 +1716,22 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
                 findings = []
                 failure_msg = str(e2)
 
+        if isinstance(findings, list):
+            for finding in findings:
+                if isinstance(finding, dict):
+                    finding.setdefault("research_angle_id", angle["id"])
+
         elapsed = time.time() - t0
         if findings:
             print(f"  [done] {label} — {len(findings)} findings in {elapsed:.0f}s")
             _RESEARCH_SUCCESSES += 1
+        elif angle.get("optional") and failure_msg is None:
+            print(f"  [done] {label} — no material developments in {elapsed:.0f}s")
         else:
             if failure_msg is None:
-                # HTTP 200 but empty result — the LLM stage degraded rather than
-                # finding nothing. Count as a failure so an all-empty run trips
-                # the _UPSTREAM_OUTAGE annotation below instead of emailing a
-                # misleading "No stories found today" digest.
+                # HTTP 200 but empty broad discovery is degraded rather than a
+                # trustworthy "nothing happened" result. The optional follow-up
+                # angle above is the exception: no material movement is expected.
                 failure_msg = "empty research results (LLM returned no findings)"
             print(f"  [FAIL] {label} — {failure_msg} ({elapsed:.0f}s)")
             check_search_health(f"fail-{angle['id']}")
@@ -1599,7 +1743,7 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
         return findings
 
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_RESEARCH) as pool:
-        per_angle = list(pool.map(_research_one, topic["research_angles"]))
+        per_angle = list(pool.map(_research_one, angles))
     findings = [finding for angle_findings in per_angle for finding in angle_findings]
 
     # Filter out non-dict artifacts (LLMs sometimes produce stray strings)
@@ -1629,14 +1773,13 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
                            stories_in_flight: dict | None = None) -> tuple[list[dict], list[dict]]:
     """Phase 2: Python date pre-tagging + batched LLM judge.
 
-    1. Python parses date_published → tags each finding as fresh, ongoing, or too_old.
+    1. Python parses date_published → tags each finding as fresh, older, or too_old.
        too_old findings are dropped without touching the LLM.
-    2. If stories_in_flight is provided, active SIF entries are included in the
-       judgment prompt so the LLM can reject findings that cover the same topic
-       as an already-tracked story (cross-run dedup).
+    2. Exact tracked-story links from the dedicated follow-up angle are validated.
+       The judge admits only material new developments; unchanged recaps stay deduped.
     3. Findings are split into batches of BATCH_SIZE.
-    4. Each batch gets one LLM call with the topic's judgment rules + importance rubric.
-    5. Python merges batch results, handling cross-batch duplicates.
+    4. Each batch gets one LLM call with the topic rules and importance rubric.
+    5. Python restores source metadata and enforces cross-batch/cross-day dedup.
 
     Returns (fresh_findings, ongoing_findings).
     """
@@ -1657,8 +1800,26 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
 
     pre_tagged: list[dict] = []
     too_old_count = 0
+    tracker_by_url = {
+        _normalize_url(story.get("url", "")): story
+        for story in (stories_in_flight or {}).get("stories", [])
+        if _normalize_url(story.get("url", ""))
+    }
+    invalid_followup_count = 0
 
     for f in findings:
+        if f.get("research_angle_id") == "developing-followups":
+            tracked_url = _normalize_url(f.get("develops_story_url", ""))
+            tracked_story = tracker_by_url.get(tracked_url)
+            if tracked_story is None or tracked_story.get("importance") != "high":
+                invalid_followup_count += 1
+                continue
+            f["develops_story_url"] = tracked_story.get("url", "")
+        else:
+            # Only the bounded follow-up angle may assert a cross-day story link.
+            # This prevents a broad research result from inventing a relationship.
+            f.pop("develops_story_url", None)
+
         pub_date = _parse_date(f.get("date_published"))
         if pub_date is None:
             too_old_count += 1
@@ -1674,8 +1835,8 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             too_old_count += 1
 
     print(f"  Date pre-tag: {sum(1 for f in pre_tagged if f['date_tag'] == 'fresh')} fresh, "
-          f"{sum(1 for f in pre_tagged if f['date_tag'] == 'ongoing')} ongoing, "
-          f"{too_old_count} too_old (dropped)")
+          f"{sum(1 for f in pre_tagged if f['date_tag'] == 'ongoing')} older, "
+          f"{too_old_count} too_old, {invalid_followup_count} invalid follow-up (dropped)")
 
     if not pre_tagged:
         print(f"  [done] judge_research — all findings too old or no date")
@@ -1699,26 +1860,28 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             + "\n".join(f'  - "{u}"' for u in sorted(cross_day_blocked)) + "\n\n"
         )
 
-    # Build SIF context string for cross-run dedup
+    # Build tracker context for cross-run dedup and explicit follow-up review.
     sif_context = ""
-    if stories_in_flight:
-        active_sif = [s for s in stories_in_flight.get("stories", [])
-                      if s.get("status") == "active"]
-        if active_sif:
-            sif_lines = []
-            for s in active_sif:
-                title = s.get("title", "?")[:80]
-                sif_lines.append(f'  - "{title}"')
-            sif_context = (
-                "## Stories Already in Flight (do NOT re-add these topics)\n"
-                "The following stories are already being tracked from previous days. "
-                "If a finding covers the SAME TOPIC as any of these (even with a "
-                "different URL or from a different source), mark it as rejected "
-                "with reason 'already_tracked_in_sif'. The same underlying story "
-                "should not appear as a fresh finding — ongoing updates go through "
-                "the stories-in-flight tracker, not via new fresh entries.\n\n"
-                + "\n".join(sif_lines) + "\n\n"
-            )
+    if tracker_by_url:
+        tracked_context = [{
+            "title": story.get("title", ""),
+            "story_url": story.get("url", ""),
+            "latest_confirmed_development": story.get("latest_dev", ""),
+            "importance": story.get("importance", "medium"),
+            "last_evidence_date": story.get("last_updated", ""),
+            "status": story.get("status", "active"),
+        } for story in tracker_by_url.values()]
+        sif_context = (
+            "## Tracked stories\n"
+            "A finding with `develops_story_url` came from the dedicated follow-up "
+            "search. Approve it only when it reports a material new fact after the "
+            "tracked story's last evidence date, and preserve `develops_story_url` "
+            "exactly. Reject recaps, commentary, or broad-theme connections. A finding "
+            "about a tracked topic without that exact field is not a vetted follow-up; "
+            "reject it as `already_tracked_in_sif` rather than re-adding it.\n\n"
+            f"{DEVELOPING_STORY_RULES}\n"
+            + json.dumps(tracked_context, indent=2) + "\n\n"
+        )
 
     # ── Step 2: Batch LLM calls ──
     rubric = _importance_rubric_text(topic)
@@ -1733,7 +1896,9 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         "research findings against quality rules. Be harsh — a false positive (bad "
         "story included) is worse than a false negative (good story missed).\n\n"
         "You will receive a JSON array of research findings and a set of rules. "
-        "For each finding, evaluate it against every rule and output a verdict.\n\n"
+        "For each finding, evaluate it against every rule. Preserve every source "
+        "field exactly in approved findings, especially `research_angle_id`, "
+        "`develops_story_url`, `date_tag`, URL, and publication date.\n\n"
         "Output a JSON object with two arrays wrapped in ```json fences:\n"
         '  {\n'
         '    "approved": [<findings that pass all quality checks>],\n'
@@ -1769,14 +1934,34 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             print(f"  [FAIL] judge_research batch {batch_idx + 1} — {e}, treating all as approved")
             all_approved.extend(batch)
 
-    # ── Step 3: Python merge — cross-batch + cross-day duplicate detection ──
+    # ── Step 3: Restore source metadata, then enforce deterministic dedup ──
     seen_urls: set[str] = set()
     deduped_approved: list[dict] = []
     dedup_rejected: list[dict] = []
+    original_by_url = {
+        _normalize_url(f.get("url", "")): f for f in pre_tagged
+        if _normalize_url(f.get("url", ""))
+    }
 
     for f in all_approved:
         url = _normalize_url(f.get("url", ""))
-        if url and url in seen_urls:
+        source = original_by_url.get(url)
+        if source is not None:
+            for field in ("date_tag", "research_angle_id", "develops_story_url"):
+                if field in source:
+                    f[field] = source[field]
+                else:
+                    f.pop(field, None)
+        tracked_url = _normalize_url(f.get("develops_story_url", ""))
+        if (
+            f.get("research_angle_id") == "developing-followups"
+            and (
+                tracked_url not in tracker_by_url
+                or tracker_by_url[tracked_url].get("importance") != "high"
+            )
+        ):
+            dedup_rejected.append({"finding": f, "reason": "invalid_followup_link"})
+        elif url and url in seen_urls:
             dedup_rejected.append({"finding": f, "reason": "cross_batch_duplicate"})
         elif url and url in cross_day_blocked:
             dedup_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
@@ -1827,14 +2012,14 @@ def phase_3_rank(
       - Sort by importance (high → med → low), date_published recency as tiebreaker
       - Cap: FRESH_CAP (12)
 
-    Pool B: Ongoing articles (2-5 day old articles from Phase 2)
+    Pool B: Older articles (2-5 days old from Phase 2)
       - Sort by date_published recency primary, importance as tiebreaker
       - Cap: ONGOING_CAP (5)
 
-    Pool C: Stories-in-flight — does NOT enter Phase 4
-      - Sort by last_updated descending
-      - Cap: SIF_CAP (3)
-      - Passed directly to Phase 6 with existing summaries + latest_dev fields
+    Pool C: qualified developing stories — does NOT enter Phase 4
+      - Requires high importance and evidence-backed movement on 2+ UTC dates
+      - Sort by last_updated descending and cap at SIF_CAP (3)
+      - Passed directly to Phase 6 with its evidence history and latest development
 
     Returns (phase_4_queue, sif_candidates).
     Phase 4 queue = Pool A + Pool B, with fresh first.
@@ -1900,11 +2085,15 @@ def phase_3_rank(
     pool_b = sorted(pool_b, key=lambda f: f.get("date_published", ""), reverse=True)
     pool_b = pool_b[:ONGOING_CAP]
 
-    # Pool C bypasses Phase 4 but still obeys the same cross-topic exclusion.
+    # Pool C is the only source for the rendered Developing and Ongoing section.
+    # Merely active tracker entries are not enough: every candidate must already
+    # have high importance and evidence-backed movement on multiple dates.
     active_sif = [
         story for story in stories_in_flight.get("stories", [])
         if story.get("status") == "active"
+        and _is_developing_story(story)
         and _normalize_url(story.get("url", "")) not in other_topic_urls
+        and not _is_listing_url(story.get("url", ""))
         and not _is_asset_cdn_url(story.get("url", ""))
     ]
     pool_c = sorted(
@@ -1921,8 +2110,8 @@ def phase_3_rank(
         "cross_topic_rejected": cross_topic_rejected,
     }
     output_path.write_text(json.dumps(output, indent=2))
-    print(f"  Phase 3 done: Pool A={len(pool_a)} fresh, Pool B={len(pool_b)} ongoing, "
-          f"Pool C={len(pool_c)} SIF (bypass Phase 4) → {len(phase_4_queue)} total for fetch")
+    print(f"  Phase 3 done: Pool A={len(pool_a)} fresh, Pool B={len(pool_b)} older, "
+          f"Pool C={len(pool_c)} developing SIF → {len(phase_4_queue)} total for fetch")
     return phase_4_queue, pool_c
 
 def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
@@ -2299,7 +2488,8 @@ def _validate_editorial_proposal(
 
     blocked = blocked_urls or set()
     warnings: list[str] = []
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+    today = datetime.now(timezone.utc).date()
+    yesterday = today - timedelta(days=1)
     candidate_by_id = {
         candidate["candidate_id"]: candidate
         for candidate in candidates
@@ -2371,10 +2561,25 @@ def _validate_editorial_proposal(
             )
             continue
         selected_ids.add(candidate_id)
-        related = _normalize_url(item.get("related_story_url", ""))
-        if related and related not in tracker_by_url:
-            warnings.append(f"removed unknown related story from {candidate_id}")
-            related = ""
+        declared_related = _normalize_url(source.get("develops_story_url", ""))
+        requested_related = _normalize_url(item.get("related_story_url", ""))
+        related = ""
+        if declared_related:
+            target = tracker_by_url.get(declared_related)
+            if target is None or target.get("importance") != "high":
+                warnings.append(
+                    f"removed invalid developing-story link from {candidate_id}"
+                )
+            else:
+                related = declared_related
+                if requested_related and requested_related != declared_related:
+                    warnings.append(
+                        f"replaced mismatched related story on {candidate_id}"
+                    )
+        elif requested_related:
+            # Only Phase 1's dedicated follow-up search may establish a
+            # cross-article story relationship.
+            warnings.append(f"removed unverified related story from {candidate_id}")
         fresh.append({
             "candidate_id": candidate_id,
             "rank": len(fresh) + 1,
@@ -2417,6 +2622,11 @@ def _validate_editorial_proposal(
         if source is None:
             warnings.append(f"ignored unknown ongoing story {normalized!r}")
             continue
+        if source.get("status", "active") != "active" or not _is_developing_story(source):
+            warnings.append(
+                f"ignored unqualified developing story {normalized!r}"
+            )
+            continue
         if normalized in selected_ongoing or normalized in fresh_urls:
             warnings.append(f"ignored duplicate ongoing story {normalized}")
             continue
@@ -2436,6 +2646,10 @@ def _validate_editorial_proposal(
                 warnings.append("capped selected_ongoing at 3")
             break
 
+    related_by_candidate_id = {
+        item["candidate_id"]: _normalize_url(item.get("related_story_url", ""))
+        for item in fresh
+    }
     state_proposals: list[dict] = []
     raw_state = proposal.get(
         "story_state_proposals", proposal.get("state_proposals", [])
@@ -2456,12 +2670,6 @@ def _validate_editorial_proposal(
             if candidate_id in selected_ids
         ]
         latest_dev = _clean_editorial_text(item.get("latest_dev"), limit=800)
-        importance = item.get("importance", "medium")
-        if importance not in ("high", "medium", "low"):
-            importance = "medium"
-        status = item.get("status", "active")
-        if status not in ("active", "cooled"):
-            status = "active"
 
         if operation == "add":
             candidate_id = item.get("candidate_id", "")
@@ -2470,64 +2678,120 @@ def _validate_editorial_proposal(
                     f"ignored tracker add for unselected candidate {candidate_id!r}")
                 continue
             source = candidate_by_id[candidate_id]
+            if related_by_candidate_id.get(candidate_id):
+                warnings.append(
+                    f"ignored tracker add for linked development {candidate_id}"
+                )
+                continue
+            if source.get("importance") != "high":
+                warnings.append(
+                    f"ignored non-high tracker add for {candidate_id}"
+                )
+                continue
             if _normalize_url(source.get("url", "")) in tracker_by_url:
                 warnings.append(f"ignored tracker add for existing story {candidate_id}")
                 continue
-            if _is_asset_cdn_url(source.get("url", "")):
-                warnings.append(f"ignored tracker add for asset-CDN story {candidate_id}")
+            if (
+                _is_listing_url(source.get("url", ""))
+                or _is_asset_cdn_url(source.get("url", ""))
+            ):
+                warnings.append(f"ignored invalid-URL tracker add for {candidate_id}")
                 continue
             state_proposals.append({
                 "operation": "add",
                 "candidate_id": candidate_id,
                 "evidence_candidate_ids": [candidate_id],
                 "latest_dev": latest_dev or source.get("summary", ""),
-                "importance": importance,
+                "importance": "high",
                 "status": "active",
             })
         elif operation == "update":
             normalized = _normalize_url(item.get("story_url", ""))
-            if _is_asset_cdn_url(item.get("story_url", "")):
-                warnings.append(f"ignored tracker update for asset-CDN story {normalized!r}")
-                continue
             source = tracker_by_url.get(normalized)
-            if source is None or not evidence or not latest_dev:
+            if (
+                source is None
+                or source.get("importance") != "high"
+                or not evidence
+                or not latest_dev
+                or _is_listing_url(item.get("story_url", ""))
+                or _is_asset_cdn_url(item.get("story_url", ""))
+            ):
                 warnings.append(
                     f"ignored unsupported tracker update for {normalized!r}")
                 continue
-            # An update records the tracked story's own development: its
-            # evidence must come from a candidate of the same story. A
-            # related-story candidate (different URL) cannot overwrite a
-            # tracked story's latest_dev (digest-quality audit 2026-08-22:
-            # ai-hardware's memory-prices story was overwritten with the
-            # Spanish KOSPI story's development).
-            same_story_evidence = [
+            # Cross-article evidence is safe only when the dedicated follow-up
+            # research declared the exact tracker URL and the selected Fresh
+            # item retained that validated relationship. This admits genuine
+            # multi-day developments without reopening broad-theme overwrites.
+            linked_evidence = [
                 candidate_id for candidate_id in evidence
-                if _normalize_url(candidate_by_id[candidate_id].get("url", ""))
-                == normalized
+                if (
+                    _normalize_url(candidate_by_id[candidate_id].get("url", ""))
+                    == normalized
+                    or related_by_candidate_id.get(candidate_id) == normalized
+                )
             ]
-            if not same_story_evidence:
+            if not linked_evidence:
                 warnings.append(
-                    f"ignored cross-story tracker update for {normalized!r}")
+                    f"ignored unlinked tracker update for {normalized!r}")
                 continue
             state_proposals.append({
                 "operation": "update",
                 "story_url": source.get("url", ""),
-                "evidence_candidate_ids": same_story_evidence,
+                "evidence_candidate_ids": linked_evidence,
                 "latest_dev": latest_dev,
-                "importance": importance,
-                "status": status,
+                "importance": "high",
+                "status": "active",
             })
         else:
             warnings.append(f"ignored unknown state operation {operation!r}")
 
-    # Deterministic minimum-content floor: a digest must not ship with a single
-    # link when vetted active SIF stories are available to fill it. Model picks
-    # can collapse the ongoing list (invalid picks dropped by validation above),
-    # leaving the pre-ranked, already-vetted SIF pool unused (digest-quality
-    # audit 2026-08-21: agentic-platform 08-20 and gaming-digest 08-20 both
-    # shipped a single-link digest). Fill ongoing from the active SIF pool in
-    # last_updated order until 2 total stories are selected; the Phase 8 send
-    # guard archives (instead of emailing) any digest that stays below 2.
+    # State continuity must not depend on model bookkeeping. Every selected
+    # high-importance root story gets one initial evidence record; every vetted
+    # follow-up gets an evidence-backed update. Follow-up articles never become
+    # duplicate root tracker entries.
+    added_candidate_ids = {
+        op["candidate_id"] for op in state_proposals if op["operation"] == "add"
+    }
+    updated_story_urls = {
+        _normalize_url(op.get("story_url", ""))
+        for op in state_proposals if op["operation"] == "update"
+    }
+    for selection in fresh:
+        candidate_id = selection["candidate_id"]
+        source = candidate_by_id[candidate_id]
+        related = related_by_candidate_id.get(candidate_id, "")
+        if related and related not in updated_story_urls:
+            tracked = tracker_by_url[related]
+            state_proposals.append({
+                "operation": "update",
+                "story_url": tracked.get("url", ""),
+                "evidence_candidate_ids": [candidate_id],
+                "latest_dev": selection["editorial_summary"],
+                "importance": "high",
+                "status": "active",
+            })
+            updated_story_urls.add(related)
+        elif (
+            not related
+            and source.get("importance") == "high"
+            and candidate_id not in added_candidate_ids
+            and _normalize_url(source.get("url", "")) not in tracker_by_url
+        ):
+            state_proposals.append({
+                "operation": "add",
+                "candidate_id": candidate_id,
+                "evidence_candidate_ids": [candidate_id],
+                "latest_dev": selection["editorial_summary"],
+                "importance": "high",
+                "status": "active",
+            })
+            added_candidate_ids.add(candidate_id)
+
+    # The two-story send floor may use only stories that independently satisfy
+    # the same Developing and Ongoing contract. Content volume never overrides
+    # importance or multi-day evidence; a thin digest is archived, not padded
+    # with a one-off article.
     if len(fresh) + len(ongoing) < 2:
         selected_urls = {
             _normalize_url(candidate_by_id[item["candidate_id"]].get("url", ""))
@@ -2537,7 +2801,9 @@ def _validate_editorial_proposal(
         }
         filler_pool = sorted(
             (story for story in sif_candidates
-             if not _is_listing_url(story.get("url", ""))
+             if story.get("status", "active") == "active"
+             and _is_developing_story(story)
+             and not _is_listing_url(story.get("url", ""))
              and not _is_asset_cdn_url(story.get("url", ""))
              and _normalize_url(story.get("url", "")) not in selected_urls),
             key=lambda story: story.get("last_updated", ""), reverse=True,
@@ -2550,36 +2816,12 @@ def _validate_editorial_proposal(
                 "rank": len(ongoing) + 1,
                 "summary": story.get("latest_dev", story.get("title", "")),
                 "why_still_relevant": (
-                    "Active tracked story carried into today's digest to keep "
-                    "coverage complete."
+                    "High-impact story with material developments confirmed on "
+                    "multiple days; the latest verified development remains active."
                 ),
             })
             selected_ongoing.add(story_url)
 
-    # Deterministic tracker touch: a story selected into Ongoing is being
-    # actively tracked today. If the model omitted an update op, synthesize one
-    # (evidence-free, preserving latest_dev) so last_updated advances and
-    # auto-cool cannot cull a story the digest is still surfacing while the
-    # tracker claims it is stale (digest-quality audit 2026-08-21: the 404
-    # Media rare-books story and the OpenAI Agents JS guide resurfaced on
-    # 08-19→08-21 while last_updated stayed 2026-08-18).
-    model_updated_urls = {
-        _normalize_url(op.get("story_url", ""))
-        for op in state_proposals if op["operation"] == "update"
-    }
-    for selection in ongoing:
-        selection_url = _normalize_url(selection["story_url"])
-        story = tracker_by_url.get(selection_url)
-        if story is None or selection_url in model_updated_urls:
-            continue
-        state_proposals.append({
-            "operation": "update",
-            "story_url": story.get("url", ""),
-            "evidence_candidate_ids": [],
-            "latest_dev": story.get("latest_dev", ""),
-            "importance": story.get("importance", "medium"),
-            "status": "active",
-        })
 
     domains: dict[str, int] = {}
     for item in fresh:
@@ -2609,6 +2851,23 @@ def _validate_editorial_proposal(
                 per_domain[domain] = per_domain.get(domain, 0) + 1
             capped.append(item)
         fresh = capped
+    # A source-concentration drop also removes that candidate's tracker
+    # evidence. Persistent state must describe only stories that actually ship.
+    final_selected_ids = {item["candidate_id"] for item in fresh}
+    filtered_state: list[dict] = []
+    for operation in state_proposals:
+        if operation["operation"] == "add":
+            if operation["candidate_id"] in final_selected_ids:
+                filtered_state.append(operation)
+            continue
+        evidence = [
+            candidate_id for candidate_id in operation.get("evidence_candidate_ids", [])
+            if candidate_id in final_selected_ids
+        ]
+        if not evidence:
+            continue
+        filtered_state.append({**operation, "evidence_candidate_ids": evidence})
+    state_proposals = filtered_state
     if (
         any(_is_fresh_eligible(candidate, yesterday) for candidate in candidates)
         and not fresh
@@ -2634,13 +2893,14 @@ def _validate_editorial_proposal(
     })
     if selected_sources:
         balance_summary = (
-            f"Validated selection: {len(fresh)} fresh, {len(ongoing)} ongoing; "
+            f"Validated selection: {len(fresh)} fresh, "
+            f"{len(ongoing)} developing/ongoing; "
             f"{len(selected_domains)} source domain(s); categories: "
             f"{', '.join(selected_categories)}."
         )
     else:
         balance_summary = (
-            "Validated selection: no publishable fresh or ongoing stories."
+            "Validated selection: no publishable fresh or developing stories."
         )
 
     return {
@@ -2679,21 +2939,21 @@ def _raw_editorial_proposal(
             }
             for index, story in enumerate(sif_candidates[:3], 1)
         ],
-        # Record today's selected stories in the tracker even on the degraded
-        # path. Without this a curation-model outage silently freezes
-        # stories-in-flight: every story covered during the outage is missing
-        # from future ongoing coverage (audit: world SIF lost all six fresh
-        # stories on the 2026-08-10 fallback run).
+        # Keep only high-importance root stories as follow-up candidates. A
+        # selected follow-up article updates its linked root during validation
+        # and must never become a second root entry.
         "story_state_proposals": [
             {
                 "operation": "add",
                 "candidate_id": selection["candidate_id"],
                 "evidence_candidate_ids": [selection["candidate_id"]],
                 "latest_dev": candidate.get("summary", ""),
-                "importance": candidate.get("importance", "medium"),
+                "importance": "high",
                 "status": "active",
             }
             for selection, candidate in zip(selected_fresh, candidates[:7])
+            if candidate.get("importance") == "high"
+            and not candidate.get("develops_story_url")
         ],
         "rejected": [],
         "gaps": "Curation models unavailable; source-ranked fallback used.",
@@ -2807,11 +3067,19 @@ def _apply_story_state_proposals(
     candidates: list[dict],
     today_str: str,
 ) -> dict:
-    """Apply only validated add/update operations to a copied tracker."""
+    """Apply validated operations while preserving auditable evidence history."""
     updated = copy.deepcopy(stories_in_flight)
     stories = updated.setdefault("stories", [])
+    parsed_today = _parse_date(today_str)
+    today = (
+        parsed_today.date() if parsed_today is not None
+        else datetime.now(timezone.utc).date()
+    )
+    for story in stories:
+        _normalize_story_tracking(story, today)
     candidate_by_id = {
-        candidate["candidate_id"]: candidate for candidate in candidates
+        candidate["candidate_id"]: candidate
+        for candidate in candidates if candidate.get("candidate_id")
     }
     story_by_url = {
         _normalize_url(story.get("url", "")): story
@@ -2833,19 +3101,41 @@ def _apply_story_state_proposals(
                 "status": "active",
                 "latest_dev": operation.get("latest_dev", source.get("summary", "")),
                 "last_updated": today_str,
-                "importance": operation.get("importance", source.get("importance", "medium")),
+                "importance": "high",
                 "first_seen": today_str,
+                "developments": [{
+                    "date": today_str,
+                    "url": source.get("url", ""),
+                }],
             }
             stories.append(story)
             story_by_url[normalized] = story
-        elif operation["operation"] == "update":
-            story = story_by_url.get(_normalize_url(operation.get("story_url", "")))
-            if story is None:
-                continue
-            story["latest_dev"] = operation["latest_dev"]
-            story["last_updated"] = today_str
-            story["importance"] = operation["importance"]
-            story["status"] = operation["status"]
+            continue
+
+        if operation["operation"] != "update":
+            continue
+        story = story_by_url.get(_normalize_url(operation.get("story_url", "")))
+        if story is None:
+            continue
+        evidence_sources = [
+            candidate_by_id[candidate_id]
+            for candidate_id in operation.get("evidence_candidate_ids", [])
+            if candidate_id in candidate_by_id
+        ]
+        if not evidence_sources:
+            # Evidence-free updates are administrative only (for example,
+            # deterministic cooling). They never fabricate a development date
+            # or extend the evidence-backed activity window.
+            story["status"] = operation.get("status", story.get("status", "active"))
+            continue
+        story["developments"].extend({
+            "date": today_str,
+            "url": source.get("url", ""),
+        } for source in evidence_sources)
+        story["latest_dev"] = operation["latest_dev"]
+        story["importance"] = "high"
+        story["status"] = operation.get("status", "active")
+        _normalize_story_tracking(story, today)
     return updated
 
 
@@ -2927,26 +3217,33 @@ def phase_6_curate(
     sif_candidates = [
         story for story in sif_candidates
         if _normalize_url(story.get("url", "")) not in blocked_urls
+        and story.get("status", "active") == "active"
+        and _is_developing_story(story)
+        and not _is_listing_url(story.get("url", ""))
+        and not _is_asset_cdn_url(story.get("url", ""))
     ]
     print(f"  [6a prep] {len(candidates)} candidates, {len(sif_candidates)} SIF, "
           f"{len(blocked_urls)} cross-topic URL(s) blocked")
 
     system = (
         "You are the lead editor of a daily news digest. Make one coherent editorial "
-        "proposal from vetted candidates and existing stories in flight. Selection, "
-        "ranking, source/topic balance, ongoing-story connections, and state proposals "
-        "are interdependent. Do not write an intro and do not replace the tracker.\n\n"
-        "Select 5-7 fresh stories when enough good candidates exist and 2-3 ongoing "
-        "stories only from the supplied active SIF candidates. Prefer source_verdict=fresh; "
-        "use older ongoing candidates only when needed. Every selection must use the exact "
-        "candidate_id or story_url supplied. State changes are proposals only. An update "
-        "needs selected candidate evidence; an add must reference a selected candidate. "
-        "An update's evidence_candidate_ids must reference candidates whose URL matches "
-        "the story being updated (same story) — a related story's candidate cannot update "
-        "another story. Write ALL prose (editorial_summary, selection_reason, summary, "
-        "why_still_relevant, latest_dev, gaps, balance_summary, rejected reasons) in "
-        "English, regardless of the source language; keep story titles in their original "
-        "language.\n\n"
+        "proposal from vetted candidates and qualified developing stories. Selection, "
+        "ranking, source/topic balance, story connections, and state proposals are "
+        "interdependent. Do not write an intro and do not replace the tracker.\n\n"
+        f"{DEVELOPING_STORY_RULES}\n"
+        "Select 5-7 fresh stories when enough good candidates exist. Select zero to "
+        "three Developing and Ongoing stories only from the supplied qualified SIF "
+        "candidates; zero is correct when none adds value. Never fill an ongoing quota. "
+        "Every selection must use an exact candidate_id or story_url supplied. For a "
+        "Fresh candidate carrying `develops_story_url`, copy that exact URL into "
+        "`related_story_url` and propose an evidence-backed update of that tracked "
+        "story. No other cross-article connection is allowed. Add only selected, "
+        "high-importance root candidates to the tracker. `why_still_relevant` must "
+        "name the latest material development, never merely say the item is still "
+        "relevant, recent, unresolved, or the latest commentary. Write ALL prose "
+        "(editorial_summary, selection_reason, summary, why_still_relevant, latest_dev, "
+        "gaps, balance_summary, rejected reasons) in English, regardless of source "
+        "language; keep story titles in their original language.\n\n"
         "Output one JSON object in ```json fences:\n"
         '{"selected_fresh":[{"candidate_id":"...","rank":1,'
         '"editorial_summary":"2-3 factual sentences","selection_reason":"...",'
@@ -2963,11 +3260,12 @@ def phase_6_curate(
     user = (
         f"## Date\n{today_str}\n\n"
         f"## Vetted candidates\n{json.dumps(candidates, indent=2)}\n\n"
-        f"## Active SIF candidates for ongoing selection\n"
+        f"## Qualified Developing and Ongoing candidates\n"
         f"{json.dumps(sif_candidates, indent=2)}\n\n"
         f"## Full tracker for connections and proposed updates\n"
         f"{json.dumps(stories_in_flight, indent=2)}\n\n"
         f"## Importance rubric\n{_importance_rubric_text(topic)}\n\n"
+        f"## Developing-story contract\n{DEVELOPING_STORY_RULES}\n"
         f"## Dropped summaries; never select\n"
         f"{json.dumps([{'title': item.get('title'), 'url': item.get('url'), 'reason': item.get('judge_issues', [])} for item in dropped], indent=2)}"
     )
@@ -3060,11 +3358,15 @@ def phase_6_curate(
     if proposal_status == "model":
         critic_system = (
             "You are the independent critic for a daily digest. Review the proposed "
-            "selection, ranking, source/topic balance, ongoing links, and persistent "
-            "story-state proposals. Return bounded changes only; never rewrite the whole "
-            "proposal. Check for a missed stronger candidate, unsupported connections, "
-            "source concentration, stale material, and state changes without evidence. "
-            "Write all notes and reasoning in English.\n\n"
+            "selection, ranking, source/topic balance, developing-story links, and "
+            "persistent state proposals. Return bounded changes only; never rewrite "
+            "the whole proposal. Enforce the Developing and Ongoing contract strictly: "
+            "remove anything that is merely old, still relevant, a one-off item, or "
+            "unsupported by material developments on multiple dates. Check for a missed "
+            "stronger candidate, unsupported connections, source concentration, stale "
+            "material, and state changes without selected evidence. Write all notes and "
+            "reasoning in English.\n\n"
+            f"{DEVELOPING_STORY_RULES}\n"
             "Allowed operations: remove_fresh, add_fresh, replace_fresh, move_fresh, "
             "remove_ongoing, add_ongoing, replace_ongoing, remove_state, add_state, "
             "replace_state. add/replace operations put the proposed object in item. "
@@ -3079,7 +3381,8 @@ def phase_6_curate(
             f"## SIF candidates\n{json.dumps(sif_candidates, indent=2)}\n\n"
             f"## Current tracker\n{json.dumps(stories_in_flight, indent=2)}\n\n"
             f"## Proposal\n{json.dumps(proposal, indent=2)}\n\n"
-            f"## Deterministic warnings\n{json.dumps(proposal_warnings, indent=2)}"
+            f"## Deterministic warnings\n{json.dumps(proposal_warnings, indent=2)}\n\n"
+            f"## Developing-story contract\n{DEVELOPING_STORY_RULES}"
         )
         critic_models = (MODEL_REVIEWER, MODEL_FALLBACK)
         critic_rejected = False
@@ -3151,13 +3454,9 @@ def phase_6_curate(
         "validation_warnings": review_warnings,
     }, indent=2))
 
-    # Deterministic resurface cap: an Ongoing story surfaced for
-    # RESURFACE_CAP_DAYS consecutive days without an evidence-backed
-    # development is dropped from this selection and cooled, so the digest
-    # cannot repeat the same story day after day (digest-quality audit
-    # 2026-08-22). Runs after the final proposal so it also covers the
-    # raw-fallback path; the cooled update op lands after any synthesized
-    # active touch, so cooling wins in the state apply.
+    # The resurface cap bounds repetition even before evidence inactivity reaches
+    # the five-day auto-cool threshold. Its evidence-free update is administrative:
+    # state application changes status only and never advances last_updated.
     cap_warnings, cap_ops = _enforce_ongoing_resurface_cap(
         final_proposal, stories_in_flight, run_dir.parent
     )
@@ -3387,7 +3686,7 @@ def _render_digest_html(
     ) or _empty_section_block("No fresh stories selected today.")
     ongoing_html = "\n".join(
         _render_story_block(story, ongoing=True) for story in ongoing
-    ) or _empty_section_block("No ongoing stories selected today.")
+    ) or _empty_section_block("No developing or ongoing stories selected today.")
     replacements = {
         "{{DIGEST_TITLE}}": html.escape(str(topic["title"])),
         "{{DATE}}": html.escape(datetime.now().strftime("%B %d, %Y")),
@@ -3540,8 +3839,8 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
             f"**Sent to:** {', '.join(topic['recipients'])}\n\n"
             "## Fresh\n"
             "- No stories published in the last 24 hours.\n\n"
-            "## Ongoing\n"
-            "- No ongoing stories reported.\n\n"
+            "## Developing and Ongoing\n"
+            "- No developing or ongoing stories reported.\n\n"
             "## Coverage Gaps\n"
             f"- No {topic['title']} stories were published or aggregated "
             "in the last 24 hours.\n"
@@ -3569,14 +3868,14 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
         "## Fresh\n"
         "- [Story title](URL) — one-line summary\n"
         "- [Story title](URL) — one-line summary\n\n"
-        "## Ongoing\n"
-        "- [Story title](URL) — one-line summary (why still relevant)\n\n"
+        "## Developing and Ongoing\n"
+        "- [Story title](URL) — one-line summary (latest material development)\n\n"
         "## Coverage Gaps\n"
         "- Any notable stories or angles that were missed today\n\n"
         "IMPORTANT: Every story MUST include its URL as a markdown link `[title](URL)`. "
         "This is used by the dedup system in future runs. Never omit the URL.\n\n"
         f"## Fresh Stories Data\n\n{fresh_json}\n\n"
-        f"## Ongoing Stories Data\n\n{ongoing_json}"
+        f"## Developing and Ongoing Stories Data\n\n{ongoing_json}"
     )
 
     try:
@@ -3599,7 +3898,7 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
         for s in fresh[:10]:
             lines.append(f"- [{s.get('title', '?')}]({s.get('url', '#')}) — {s.get('summary', '')[:100]}")
         lines.append("")
-        lines.append("## Ongoing")
+        lines.append("## Developing and Ongoing")
         for s in ongoing[:5]:
             lines.append(f"- [{s.get('title', '?')}]({s.get('url', '#')}) — {s.get('summary', '')[:100]}")
         output_path.write_text("\n".join(lines) + "\n")
@@ -3612,77 +3911,52 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
 # Stories-in-flight management
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _ensure_importance(s: dict) -> dict:
-    """Add default 'importance' field to a story-in-flight entry if missing."""
-    if "importance" not in s:
-        s["importance"] = "medium"
-    return s
 
 
-def _prune_and_cool_stories(stories: list[dict], today: date | None = None) -> tuple[list[dict], int, int]:
-    """Apply auto-cool and auto-prune to a list of story dicts.
-
-    Returns (kept_stories, auto_cooled_count, auto_pruned_count).
-    """
+def _prune_and_cool_stories(
+    stories: list[dict],
+    today: date | None = None,
+) -> tuple[list[dict], int, int]:
+    """Cool on evidence inactivity; prune only cooled, inactive stories."""
     if today is None:
         today = datetime.now(timezone.utc).date()
     kept: list[dict] = []
     auto_cooled = 0
     auto_pruned = 0
 
-    for s in stories:
-        _ensure_importance(s)
-
-        if "first_seen" not in s:
-            s["first_seen"] = s.get("last_updated", today.isoformat())
-
-        last_str = s.get("last_updated", "")
-        first_str = s.get("first_seen", last_str)
-        try:
-            last_date = datetime.strptime(last_str, "%Y-%m-%d").date()
-            first_date = datetime.strptime(first_str, "%Y-%m-%d").date()
-        except (ValueError, TypeError):
-            s["status"] = "cooled"
-            auto_cooled += 1
-            kept.append(s)
-            continue
-
-        total_age = (today - first_date).days
+    for story in stories:
+        _normalize_story_tracking(story, today)
+        last_date = datetime.strptime(story["last_updated"], "%Y-%m-%d").date()
         inactive_age = (today - last_date).days
-        status = s.get("status", "active")
+        status = story.get("status", "active")
 
-        # Rule 1: Auto-prune stories older than PRUNE_AFTER_DAYS since first_seen
-        if total_age >= PRUNE_AFTER_DAYS:
+        if status == "active" and inactive_age >= COOL_AFTER_DAYS:
+            story["status"] = "cooled"
+            status = "cooled"
+            auto_cooled += 1
+
+        # Active stories may run longer than seven days when real developments
+        # continue. Only cooled stories with seven evidence-free days expire.
+        if status == "cooled" and inactive_age >= PRUNE_AFTER_DAYS:
             auto_pruned += 1
             continue
 
-        # Rule 2: Auto-cool stale active stories — inactivity only (no updates in
-        # COOL_AFTER_DAYS), matching the documented rule (COOL_AFTER_DAYS comment
-        # and load_and_prune_stories_in_flight docstring). Cooling on total_age
-        # wrongly culls stories that are still being actively updated; the 7-day
-        # auto-prune above already bounds how long any story stays in the tracker.
-        if status == "active" and inactive_age >= COOL_AFTER_DAYS:
-            s["status"] = "cooled"
-            auto_cooled += 1
-            kept.append(s)
-            continue
-
-        kept.append(s)
+        kept.append(story)
 
     return kept, auto_cooled, auto_pruned
 
 
 def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
-    """Load the cross-day story tracker and apply deterministic pruning.
+    """Load, migrate, cool, and prune the cross-day story tracker.
 
-    Two rules (Python-side, not LLM-dependent):
-    1. AUTO-COOL: Any story with status "active" and last_updated older than
-       COOL_AFTER_DAYS → set status to "cooled". Removes from Ongoing pool.
-    2. AUTO-PRUNE: Any story whose first_seen is older than PRUNE_AFTER_DAYS
-       → remove from the tracker entirely (regardless of status).
+    Two deterministic rules:
+    1. AUTO-COOL: active story with no evidence-backed development for
+       COOL_AFTER_DAYS becomes cooled and leaves Developing and Ongoing.
+    2. AUTO-PRUNE: cooled story with no evidence-backed development for
+       PRUNE_AFTER_DAYS is removed. An actively developing story is not removed
+       merely because its first report is old.
 
-    Validated Phase 6 state proposals can still revive stories by updating
-    last_updated and setting status back to "active" when evidence supports it.
+    A selected, source-linked fresh development can revive a cooled story.
     """
     path = digest_dir / "stories-in-flight.json"
     if not path.exists():
@@ -3696,9 +3970,11 @@ def load_and_prune_stories_in_flight(digest_dir: Path) -> dict:
     kept, auto_cooled, auto_pruned = _prune_and_cool_stories(data.get("stories", []))
 
     if auto_cooled > 0:
-        print(f"  Auto-cooled {auto_cooled} stale stories (> {COOL_AFTER_DAYS}d no updates)")
+        print(f"  Auto-cooled {auto_cooled} stale stories "
+              f"(>= {COOL_AFTER_DAYS}d without evidence)")
     if auto_pruned > 0:
-        print(f"  Auto-pruned {auto_pruned} expired stories (first_seen > {PRUNE_AFTER_DAYS}d old)")
+        print(f"  Auto-pruned {auto_pruned} cooled stories "
+              f"(>= {PRUNE_AFTER_DAYS}d without evidence)")
 
     data["stories"] = kept
     return data
@@ -3852,7 +4128,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 print(f"  [skip] Phase 1 output exists: {phase_1_path}")
                 findings = json.loads(phase_1_path.read_text())
             else:
-                findings = phase_1_research(topic, run_dir)
+                findings = phase_1_research(topic, run_dir, stories_in_flight)
             health = check_search_health("post-phase1")
             if health.get("recommendation") == "halt":
                 print("  *** HALT: Search engine health critical. Stopping digest. ***")
@@ -3872,7 +4148,9 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                     print(f"  *** RETRY: No findings. Retrying Phase 1 with fallback: {fallback}")
                     MODEL_OVERRIDE = fallback
                     _archive_stub_attempt(run_dir)
-                    findings = phase_1_research(topic, run_dir)
+                    findings = phase_1_research(
+                        topic, run_dir, stories_in_flight
+                    )
                     if findings:
                         print(f"  *** RETRY succeeded with fallback model: {fallback}")
                 if not findings:
@@ -3907,10 +4185,10 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 phase_4_queue = ranked.get("phase_4_queue", [])
                 sif_candidates = ranked.get("sif_candidates", [])
             elif fresh_findings or ongoing_findings or any(
-                    s.get("status") == "active"
+                    s.get("status") == "active" and _is_developing_story(s)
                     for s in stories_in_flight.get("stories", [])):
-                # Run ranking even with zero findings so active stories-in-flight
-                # still flow to Phase 6 as Ongoing candidates (SIF injection).
+                # Run ranking without findings only when a qualified Developing
+                # and Ongoing story can still flow into Phase 6.
                 phase_4_queue, sif_candidates = phase_3_rank(
                     topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir)
             else:
