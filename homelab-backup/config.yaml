@@ -1,7 +1,7 @@
 schedule: "0 3 * * *"
 backup_dir: /home/carter/backups
 
-# 14 daily + 1 monthly + 1 yearly; observed archive sizes 57.3–62.3 MB (recent ~62 MB/day), worst case ≈ 1.0 GB (well under R2 free 10 GB)
+# 14 scheduled dailies + 1 monthly + 1 yearly; 57.3–62.3 MB each, ≈1.0 GB scheduled baseline (manual runs add one retained daily object apiece; well under R2 free 10 GB)
 retention:
   daily_days: 14
   monthly_count: 1

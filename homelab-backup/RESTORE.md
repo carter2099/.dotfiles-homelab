@@ -159,7 +159,7 @@ bash ~/homelab-backup/restore-drill.sh
 ## Notes
 - Secrets are stored **unencrypted** in R2. Bucket access = full compromise by
   design; protecting the bucket is the trust boundary.
-- Retention: 14 daily + 1 monthly + 1 yearly (about 1.0 GB at the current 62.3 MB high-water mark, well under R2 free 10 GB).
+- Retention baseline: 14 scheduled dailies + 1 monthly + 1 yearly (about 1.0 GB at 62.3 MB each). Manual runs remain as additional daily objects until the 14-day window expires.
 - The Open WebUI `cache/` (1.1 GB of regenerable embeddings) is intentionally
   **not** backed up — only `webui.db` is. Re-open the UI to regenerate it.
 - The `pkg-manifest/` target lists `dpkg --get-selections`, `apt-mark showmanual`,
