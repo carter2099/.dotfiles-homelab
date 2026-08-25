@@ -14,7 +14,7 @@ tar tzf homelab-backup-*.tar.gz | awk -F/ '{print $1}' | sort -u
 
 | Group | Targets |
 |---|---|
-| App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `agent-state`, `daily-news-publications` |
+| App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `agent-state`, `daily-news-data` |
 | FreshRSS | `freshrss-db`, `freshrss-config` |
 | Open WebUI | `open-webui-db` |
 | Config/code | `homelab-backup-config`, `k3s-manifests`, `omp-web-app`, `host-etc`, `pkg-manifest` |
@@ -120,9 +120,10 @@ sudo cp /tmp/restore/open-webui-db/webui.db /var/lib/docker/volumes/open-webui_o
 # agent-state
 rsync -a /tmp/restore/agent-state/ ~/agent-state/
 
-# Daily News authoritative artifacts (the static site is regenerated from these)
-mkdir -p ~/digests/news/publications
-rsync -a /tmp/restore/daily-news-publications/ ~/digests/news/publications/
+# Daily News publications, attention observations, and mail markers
+mkdir -p ~/digests/news
+rsync -a /tmp/restore/daily-news-data/ ~/digests/news/
+python3 ~/scripts/news_publish.py --date "$(date -u +%Y-%m-%d)" --skip-email
 ```
 
 ### 3f. FreshRSS (k3s) — paths are in the freshrss PVC

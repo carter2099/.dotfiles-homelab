@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deterministic 9-phase daily digest curation runner.
+Deterministic nine-phase Daily News curation runner.
 
 Independent model work is bounded and connected by deterministic Python contracts.
 Caps, caching, and two-worker concurrency prevent one topic from starving the others
@@ -16,12 +16,13 @@ Usage:
 
 Phases:
     1. Research        — omp -p web_search (3 angles, concurrency 2)
-    2. Judge Research  — batched LLM: Python date pre-tag + LLM quality filter
-    3. Rank URLs       — Python: early cross-topic dedup, rank, and caps
+    2. Judge Research  — batched LLM: date, relevance, source, significance
+   2b. Observe Attention — GDELT coverage time series; deterministic scores
+    3. Rank URLs       — Python: cross-topic dedup, product priority, and caps
     4. Fetch + Summarize — cached omp -p web_fetch (concurrency 2, ≤17 total)
     5. Judge Summaries — batched LLM: accuracy/fidelity check
     6. Curate          — proposal → Python validation → independent critic → state apply
-    7. Write HTML      — final intro call + deterministic escaped archive rendering
+    7. Write HTML      — newspaper standfirst + deterministic escaped archive rendering
     8. Archive         — local HTML + stable public publication artifact
     9. Summary         — one lightweight LLM call
 """
@@ -49,13 +50,22 @@ try:
 except ImportError:
     yaml = None
 import requests
+from news_attention import (
+    EDITORIAL_POINTS,
+    normalize_editorial_significance,
+    score_attention,
+)
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 DIGESTS_DIR = Path.home() / "digests"
 TEMPLATE_PATH = DIGESTS_DIR / "template.html"
-SEND_DIGEST_SCRIPT = Path.home() / "scripts" / "send_digest.py"
 DIGEST_OMP_SANDBOX = Path.home() / "scripts" / "digest-omp-sandbox.ts"
 ARTICLE_CACHE_DIR = DIGESTS_DIR / ".article-cache"
+ATTENTION_CACHE_DIR = DIGESTS_DIR / ".attention-cache"
+ATTENTION_ARCHIVE_DIR = DIGESTS_DIR / "news" / "attention"
+
+RANKING_SCHEMA_VERSION = 2
+STANDFIRST_PROMPT_VERSION = 2
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
@@ -308,7 +318,7 @@ BATCH_SIZE = 10  # findings/summaries per LLM call in phases 2 and 5
 FRESH_CAP = 12       # Pool A: max fresh findings passed to Phase 4
 ONGOING_CAP = 5      # Pool B: max older articles passed to Phase 4
 SIF_CAP = 3          # Pool C: max qualified developing stories passed to Phase 6
-FOLLOWUP_STORY_CAP = 8  # high-importance tracker stories checked for new developments
+FOLLOWUP_STORY_CAP = 8  # high-significance tracker stories checked for developments
 
 # ── Stories-in-flight constants ────────────────────────────────────────────
 MIN_DEVELOPMENT_DAYS = 2  # evidence-backed developments on distinct UTC dates
@@ -328,22 +338,23 @@ CROSS_DAY_DEDUP_DAYS = 5  # block URLs covered in the last N days' digests;
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Importance rubric — shared rules + per-topic specifics
+# Editorial-significance rubric — separate from observed public attention
 # ═══════════════════════════════════════════════════════════════════════════
 
-IMPORTANCE_RUBRIC_SHARED = (
-    "IMPORTANCE RUBRIC (shared — applies to every topic):\n"
-    "- high — front-page / lead-story material. Major consequence, broad impact, "
-    "or significant change to the landscape. Would you open the email with it?\n"
-    "- medium — notable and worth including. Meaningful to people who follow the "
-    "space, but not a lead story.\n"
-    "- low — incremental, niche, or minor. Worth including only on a slow day. "
-    "First to get capped.\n"
+EDITORIAL_SIGNIFICANCE_RUBRIC_SHARED = (
+    "EDITORIAL SIGNIFICANCE RUBRIC (shared — applies to every topic):\n"
+    "- high — major consequence, broad impact, or a significant change to the "
+    "landscape; plausible front-page material on consequence alone.\n"
+    "- medium — notable and meaningful to people who follow the space, but not "
+    "a lead story on consequence alone.\n"
+    "- low — incremental, niche, minor, or speculative.\n"
+    "Judge consequence only. Never infer popularity, virality, coverage volume, "
+    "or audience interest; those are measured separately from observable signals.\n"
 )
 
 DEVELOPING_STORY_RULES = (
     "DEVELOPING AND ONGOING CONTRACT:\n"
-    "- Only high-importance stories qualify.\n"
+    "- Only stories with high editorial significance qualify.\n"
     "- A story must have material factual developments on at least two distinct "
     "UTC dates. Age, continued relevance, or an unresolved possibility is not a "
     "second development.\n"
@@ -356,9 +367,9 @@ DEVELOPING_STORY_RULES = (
     "not a development.\n"
 )
 
-IMPORTANCE_RUBRIC_SPECIFIC: dict[str, str] = {
+EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC: dict[str, str] = {
     "ai-tech": (
-        "PER-TOPIC IMPORTANCE:\n"
+        "PER-TOPIC EDITORIAL SIGNIFICANCE:\n"
         "- high: Major model release (GPT/Claude-tier), $100M+ funding, landmark regulation, "
         "significant breach.\n"
         "- medium: New tool/feature from known player, $10M+ round, research paper with "
@@ -367,7 +378,7 @@ IMPORTANCE_RUBRIC_SPECIFIC: dict[str, str] = {
         "\"X announced they will announce\".\n"
     ),
     "agentic-platform": (
-        "PER-TOPIC IMPORTANCE:\n"
+        "PER-TOPIC EDITORIAL SIGNIFICANCE:\n"
         "- high: Breaking change to a major platform (Claude Code, Codex, Copilot), "
         "new agent architecture that meaningfully changes capabilities, critical vulnerability.\n"
         "- medium: New feature in a known platform, MCP/server tool releases, "
@@ -375,7 +386,7 @@ IMPORTANCE_RUBRIC_SPECIFIC: dict[str, str] = {
         "- low: Minor patch notes, small community projects, pre-announcements without substance.\n"
     ),
     "gaming": (
-        "PER-TOPIC IMPORTANCE:\n"
+        "PER-TOPIC EDITORIAL SIGNIFICANCE:\n"
         "- high: AAA release or announcement, major studio news (closure, acquisition), "
         "platform-shifting event, esports championship result.\n"
         "- medium: Notable indie release, significant patch/expansion, industry trend piece, "
@@ -383,7 +394,7 @@ IMPORTANCE_RUBRIC_SPECIFIC: dict[str, str] = {
         "- low: Minor updates, DLC announcements, rumors, small esports events.\n"
     ),
     "world": (
-        "PER-TOPIC IMPORTANCE:\n"
+        "PER-TOPIC EDITORIAL SIGNIFICANCE:\n"
         "- high: Armed conflict escalation, major election result, natural disaster with "
         "casualties, significant policy change, international crisis.\n"
         "- medium: Diplomatic development, economic data release, legislative progress, "
@@ -391,7 +402,7 @@ IMPORTANCE_RUBRIC_SPECIFIC: dict[str, str] = {
         "- low: Process stories, incremental political maneuvering, local-interest pieces.\n"
     ),
     "ai-hardware": (
-        "PER-TOPIC IMPORTANCE:\n"
+        "PER-TOPIC EDITORIAL SIGNIFICANCE:\n"
         "- high: Flagship accelerator launch (NVIDIA/AMD datacenter-class), $1B+ chip or "
         "datacenter deal, export control change, major supply disruption (HBM, CoWoS, "
         "TSMC capacity).\n"
@@ -413,7 +424,7 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "ai-tech",
         "web_slug": "ai-tech",
         "web_title": "AI & Tech",
-        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["ai-tech"],
+        "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["ai-tech"],
         "research_angles": [
             {
                 "id": "models-releases",
@@ -430,7 +441,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Publication date (from the article, ISO format if available)\n"
                     "- 1-2 sentence factual summary (no opinion, just what happened)\n"
                     "- Category: Model Releases, AI Infrastructure, or Research\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "If a source fails to load, try another. Prioritize stories from today. "
                     "Only include stories you actually fetched and confirmed. "
                     "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
@@ -449,7 +460,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Publication date (from the article, ISO format if available)\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Agentic/Agent Platforms, Open Source, or Tools & Developer\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Prioritize stories from today. Only include stories you actually fetched "
                     "and confirmed. If a source fails, try another. "
                     "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
@@ -468,7 +479,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Publication date (from the article, ISO format if available)\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Industry News, Policy, Funding, or Community\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Prioritize stories from today. Only include stories you actually fetched "
                     "and confirmed. If a source fails, try another. "
                     "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
@@ -492,11 +503,11 @@ TOPICS: dict[str, dict[str, Any]] = {
             "4. SUBSTANCE CHECK: Does this story have actual news value? Press releases with "
             "no new information, minor version bumps, and 'X company announced they will announce "
             "something' should be dropped with reason 'no_substance'.\n"
-            "5. IMPORTANCE REVIEW: Review the importance label from research. Adjust if the "
-            "story's significance differs from the initial estimate.\n\n"
+            "5. EDITORIAL SIGNIFICANCE REVIEW: Review the consequence-only label from "
+            "research. Adjust it if impact differs; never infer popularity or attention.\n\n"
             "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
             "to re-check dates. All findings you receive have been pre-filtered for freshness. "
-            "Focus on source quality, relevance, duplicates, substance, and importance accuracy.\n\n"
+            "Focus on source quality, relevance, duplicates, substance, and significance accuracy.\n\n"
             "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
@@ -510,7 +521,7 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "agentic-platform",
         "web_slug": "agents",
         "web_title": "Agents",
-        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["agentic-platform"],
+        "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["agentic-platform"],
         "research_angles": [
             {
                 "id": "platforms-features",
@@ -526,7 +537,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Platform Updates, New Features, or Launches\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include stories you actually fetched and confirmed."
                 ),
             },
@@ -541,7 +552,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: MCP/Ecosystem, SDKs & Frameworks, Benchmarks, or Community Projects\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include stories you actually fetched and confirmed."
                 ),
             },
@@ -555,7 +566,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Techniques & Patterns, Research, or Evaluation\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include findings you actually fetched and confirmed."
                 ),
             },
@@ -569,9 +580,9 @@ TOPICS: dict[str, dict[str, Any]] = {
             "without an agent angle.\n"
             "3. DUPLICATE CHECK: Same story? Keep the best version, drop duplicates.\n"
             "4. SUBSTANCE CHECK: Actual news or meaningful analysis? Drop empty announcements.\n"
-            "5. IMPORTANCE REVIEW: Review and adjust the importance label from research.\n\n"
+            "5. EDITORIAL SIGNIFICANCE REVIEW: Review consequence only; never infer popularity.\n\n"
             "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
-            "to re-check dates. Focus on source, relevance, duplicates, substance, and importance.\n\n"
+            "to re-check dates. Focus on source, relevance, duplicates, substance, and significance.\n\n"
             "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
@@ -585,7 +596,7 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "ai-hardware",
         "web_slug": "ai-hardware",
         "web_title": "AI Hardware",
-        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["ai-hardware"],
+        "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["ai-hardware"],
         "research_angles": [
             {
                 "id": "accelerators-silicon",
@@ -604,7 +615,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Publication date (from the article, ISO format if available)\n"
                     "- 1-2 sentence factual summary (no opinion, just what happened)\n"
                     "- Category: Accelerators & Silicon or Custom/Startup Silicon\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "If a source fails to load, try another. Prioritize stories from today. "
                     "Only include stories you actually fetched and confirmed."
                 ),
@@ -630,7 +641,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- 1-2 sentence factual summary\n"
                     "- Category: Memory & HBM, Networking & Interconnect, Datacenter & Power, "
                     "or Supply Chain & Fabs\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "If a source fails to load, try another. Prioritize stories from today. "
                     "Only include stories you actually fetched and confirmed."
                 ),
@@ -653,7 +664,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Publication date (from the article, ISO format if available)\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Consumer & Edge\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "If a source fails to load, try another. Prioritize stories from today. "
                     "Only include stories you actually fetched and confirmed."
                 ),
@@ -677,11 +688,11 @@ TOPICS: dict[str, dict[str, Any]] = {
             "4. SUBSTANCE CHECK: Does this story have actual news value? Press releases with "
             "no new information, unconfirmed leaks without evidence, and 'X announced they "
             "will announce something' should be dropped with reason 'no_substance'.\n"
-            "5. IMPORTANCE REVIEW: Review the importance label from research. Adjust if the "
-            "story's significance differs from the initial estimate.\n\n"
+            "5. EDITORIAL SIGNIFICANCE REVIEW: Review the consequence-only label from "
+            "research. Adjust it if impact differs; never infer popularity or attention.\n\n"
             "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
             "to re-check dates. All findings you receive have been pre-filtered for freshness. "
-            "Focus on source quality, relevance, duplicates, substance, and importance accuracy.\n\n"
+            "Focus on source quality, relevance, duplicates, substance, and significance accuracy.\n\n"
             "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
@@ -695,7 +706,7 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "gaming-digest",
         "web_slug": "gaming",
         "web_title": "Gaming",
-        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["gaming"],
+        "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["gaming"],
         "research_angles": [
             {
                 "id": "releases-announcements",
@@ -707,7 +718,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Releases, Updates & Patches, DLC/Expansions, or Platform News\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include stories you actually fetched and confirmed."
                 ),
             },
@@ -721,7 +732,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Industry, Esports, Hardware, or Community\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include stories you actually fetched and confirmed."
                 ),
             },
@@ -735,7 +746,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Indie, Early Access, or Dev Stories\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include stories you actually fetched and confirmed."
                 ),
             },
@@ -747,9 +758,9 @@ TOPICS: dict[str, dict[str, Any]] = {
             "Not general entertainment.\n"
             "3. DUPLICATE CHECK: Same story? Keep best version, drop duplicates.\n"
             "4. SUBSTANCE CHECK: 'Game X tweeted an emoji' is not news. Drop empty stories.\n"
-            "5. IMPORTANCE REVIEW: Review and adjust the importance label from research.\n\n"
+            "5. EDITORIAL SIGNIFICANCE REVIEW: Review consequence only; never infer popularity.\n\n"
             "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
-            "to re-check dates. Focus on source, relevance, duplicates, substance, and importance.\n\n"
+            "to re-check dates. Focus on source, relevance, duplicates, substance, and significance.\n\n"
             "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
@@ -763,7 +774,7 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "world-digest",
         "web_slug": "world",
         "web_title": "World",
-        "importance_rubric_specific": IMPORTANCE_RUBRIC_SPECIFIC["world"],
+        "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["world"],
         "research_angles": [
             {
                 "id": "us-news",
@@ -775,7 +786,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary (strictly factual, no editorializing)\n"
                     "- Category: Politics, Policy, Economy, Judiciary, or Executive\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include stories you actually fetched and confirmed."
                 ),
             },
@@ -789,7 +800,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Geopolitics, Conflict, Diplomacy, Global Economy, or International\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include stories you actually fetched and confirmed."
                 ),
             },
@@ -803,7 +814,7 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Science, Health, Environment, Technology, or Culture\n"
-                    "- Estimated importance: high / medium / low\n\n"
+                    "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
                     "Only include stories you actually fetched and confirmed."
                 ),
             },
@@ -817,9 +828,9 @@ TOPICS: dict[str, dict[str, Any]] = {
             "3. DUPLICATE CHECK: Same story? Keep best version, drop duplicates.\n"
             "4. SUBSTANCE CHECK: Is this actually news? 'Politician says something' "
             "without significant context or consequence is not news.\n"
-            "5. IMPORTANCE REVIEW: Review and adjust the importance label from research.\n\n"
+            "5. EDITORIAL SIGNIFICANCE REVIEW: Review consequence only; never infer popularity.\n\n"
             "CRITICAL: The date has ALREADY been checked by a pre-processor. You do NOT need "
-            "to re-check dates. Focus on source, relevance, duplicates, substance, and importance.\n\n"
+            "to re-check dates. Focus on source, relevance, duplicates, substance, and significance.\n\n"
             "Output each finding in the 'approved' or 'rejected' array based on your verdict."
         ),
         "categories": [
@@ -833,13 +844,16 @@ TOPICS: dict[str, dict[str, Any]] = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Utility: importance rubric injection
+# Utility: editorial-significance rubric injection
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _importance_rubric_text(topic: dict) -> str:
-    """Build the full importance rubric for a topic (shared + specific)."""
-    specific = topic.get("importance_rubric_specific", "")
-    return f"{IMPORTANCE_RUBRIC_SHARED}\n{specific}" if specific else IMPORTANCE_RUBRIC_SHARED
+def _editorial_significance_rubric_text(topic: dict) -> str:
+    """Build the consequence-only editorial rubric for a topic."""
+    specific = topic.get("editorial_significance_rubric_specific", "")
+    return (
+        f"{EDITORIAL_SIGNIFICANCE_RUBRIC_SHARED}\n{specific}"
+        if specific else EDITORIAL_SIGNIFICANCE_RUBRIC_SHARED
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1420,7 +1434,7 @@ def _enforce_ongoing_resurface_cap(
                     "story_url": story.get("url", ""),
                     "evidence_candidate_ids": [],
                     "latest_dev": story.get("latest_dev", ""),
-                    "importance": story.get("importance", "medium"),
+                    "editorial_significance": story.get("editorial_significance", "medium"),
                     "status": "cooled",
                 })
             continue
@@ -1538,11 +1552,10 @@ def _story_development_dates(story: dict) -> set[str]:
 
 
 def _normalize_story_tracking(story: dict, today: date | None = None) -> dict:
-    """Migrate one tracker entry to auditable evidence-backed history."""
+    """Migrate one tracker entry to auditable evidence and significance fields."""
     if today is None:
         today = datetime.now(timezone.utc).date()
-    if story.get("importance") not in ("high", "medium", "low"):
-        story["importance"] = "medium"
+    normalize_editorial_significance(story)
     if not _parse_date(story.get("first_seen")):
         fallback = _parse_date(story.get("last_updated"))
         story["first_seen"] = (
@@ -1578,9 +1591,9 @@ def _normalize_story_tracking(story: dict, today: date | None = None) -> dict:
 
 
 def _is_developing_story(story: dict) -> bool:
-    """True only for important stories with evidence on multiple days."""
+    """True only for high-significance stories with evidence on multiple days."""
     return (
-        story.get("importance") == "high"
+        story.get("editorial_significance") == "high"
         and len(_story_development_dates(story)) >= MIN_DEVELOPMENT_DAYS
     )
 
@@ -1597,7 +1610,7 @@ def _build_developing_followup_angle(
     tracked = [
         story for story in stories_in_flight.get("stories", [])
         if story.get("status", "active") in ("active", "cooled")
-        and story.get("importance") == "high"
+        and story.get("editorial_significance") == "high"
         and story.get("first_seen") != today.isoformat()
         and not _is_listing_url(story.get("url", ""))
         and not _is_asset_cdn_url(story.get("url", ""))
@@ -1618,7 +1631,7 @@ def _build_developing_followup_angle(
     } for story in tracked]
     prompt = (
         "Search specifically for material developments from the last 24 hours in "
-        "the high-importance tracked stories below. Search each story; zero results "
+        "the high-significance tracked stories below. Search each story; zero results "
         "is a valid and preferable answer when nothing materially changed.\n\n"
         f"{DEVELOPING_STORY_RULES}\n"
         "Return only articles that report a new material fact after the supplied "
@@ -1660,15 +1673,15 @@ def phase_1_research(
         print(f"  [skip] Phase 1 output exists: {output_path}")
         return json.loads(output_path.read_text())
 
-    rubric = _importance_rubric_text(topic)
+    rubric = _editorial_significance_rubric_text(topic)
     angles = list(topic["research_angles"])
     followup_angle = _build_developing_followup_angle(stories_in_flight)
     if followup_angle is not None:
         angles.append(followup_angle)
 
     system_prompt = (
-        "You are a research assistant for a daily news digest. Your job is to search "
-        "the web for recent news stories and report your findings in structured JSON. "
+        "You are a research assistant for a daily newspaper. Search the web for recent "
+        "news events and report source-grounded findings in structured JSON. "
         "Write every finding, summary, and reason in English regardless of the source "
         "article's language; keep story titles in their original language.\n\n"
         "IMPORTANT: Do NOT use web_fetch to read articles. Only use web_search to find "
@@ -1684,7 +1697,12 @@ def phase_1_research(
         '  {"title": "...", "url": "...", "source_domain": "...", '
         '"date_published": "YYYY-MM-DD or empty if unknown from search snippet", '
         '"summary": "1-sentence summary from search result", '
-        '"category": "...", "importance": "high|medium|low"}\n'
+        '"category": "...", "editorial_significance": "high|medium|low", '
+        '"event": "concise canonical statement of what happened", '
+        '"event_terms": ["2-4 distinctive English names or phrases that must all identify '
+        'this event"]}\n'
+        "Event terms are for deterministic coverage measurement. Generate terms and aliases, "
+        "but never estimate popularity, virality, audience interest, or an attention score. "
         "A tracked-story follow-up must also include `develops_story_url` exactly "
         "as supplied by that angle; otherwise omit that field.\n\n"
         "Never construct URLs — only use URLs that appeared in web_search results. "
@@ -1783,7 +1801,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     2. Exact tracked-story links from the dedicated follow-up angle are validated.
        The judge admits only material new developments; unchanged recaps stay deduped.
     3. Findings are split into batches of BATCH_SIZE.
-    4. Each batch gets one LLM call with the topic rules and importance rubric.
+    4. Each batch gets one LLM call with topic rules and editorial-significance rubric.
     5. Python restores source metadata and enforces cross-batch/cross-day dedup.
 
     Returns (fresh_findings, ongoing_findings).
@@ -1802,6 +1820,8 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     today = now.date()
     yesterday = today - timedelta(days=1)
     ongoing_cutoff_date = today - timedelta(days=5)
+    for finding in findings:
+        normalize_editorial_significance(finding)
 
     pre_tagged: list[dict] = []
     too_old_count = 0
@@ -1816,7 +1836,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         if f.get("research_angle_id") == "developing-followups":
             tracked_url = _normalize_url(f.get("develops_story_url", ""))
             tracked_story = tracker_by_url.get(tracked_url)
-            if tracked_story is None or tracked_story.get("importance") != "high":
+            if tracked_story is None or tracked_story.get("editorial_significance") != "high":
                 invalid_followup_count += 1
                 continue
             f["develops_story_url"] = tracked_story.get("url", "")
@@ -1872,7 +1892,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             "title": story.get("title", ""),
             "story_url": story.get("url", ""),
             "latest_confirmed_development": story.get("latest_dev", ""),
-            "importance": story.get("importance", "medium"),
+            "editorial_significance": story.get("editorial_significance", "medium"),
             "last_evidence_date": story.get("last_updated", ""),
             "status": story.get("status", "active"),
         } for story in tracker_by_url.values()]
@@ -1889,7 +1909,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         )
 
     # ── Step 2: Batch LLM calls ──
-    rubric = _importance_rubric_text(topic)
+    rubric = _editorial_significance_rubric_text(topic)
     batches = _batch(pre_tagged, BATCH_SIZE)
     print(f"  Batched into {len(batches)} LLM call(s) ({BATCH_SIZE}/batch)")
 
@@ -1897,13 +1917,13 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     all_rejected: list[dict] = []
 
     system = (
-        "You are a strict editor for a daily news digest. Your job is to filter "
-        "research findings against quality rules. Be harsh — a false positive (bad "
-        "story included) is worse than a false negative (good story missed).\n\n"
+        "You are a strict newspaper editor filtering research findings against quality "
+        "rules. Be harsh — a false positive is worse than a false negative.\n\n"
         "You will receive a JSON array of research findings and a set of rules. "
-        "For each finding, evaluate it against every rule. Preserve every source "
-        "field exactly in approved findings, especially `research_angle_id`, "
-        "`develops_story_url`, `date_tag`, URL, and publication date.\n\n"
+        "For each finding, evaluate every rule. Preserve source fields, especially "
+        "`research_angle_id`, `develops_story_url`, `date_tag`, `event`, `event_terms`, "
+        "URL, and publication date. You may adjust `editorial_significance` based only "
+        "on consequence. Never estimate popularity or attention.\n\n"
         "Output a JSON object with two arrays wrapped in ```json fences:\n"
         '  {\n'
         '    "approved": [<findings that pass all quality checks>],\n'
@@ -1917,7 +1937,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             f"{cross_day_context}"
             f"{sif_context}"
             f"## Rules\n\n{topic['judgment_rules']}\n\n"
-            f"## Importance Rubric\n\n{rubric}\n\n"
+            f"## Editorial Significance Rubric\n\n{rubric}\n\n"
             f"## Findings to evaluate (batch {batch_idx + 1}/{len(batches)})\n\n"
             f"{batch_json}\n\n"
             "Evaluate each finding against every rule. Output the approved and "
@@ -1935,6 +1955,8 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             all_approved.extend(batch_approved)
             all_rejected.extend(batch_rejected)
             print(f"  Batch {batch_idx + 1}: {len(batch_approved)} approved, {len(batch_rejected)} rejected")
+            for finding in batch_approved:
+                normalize_editorial_significance(finding)
         except Exception as e:
             print(f"  [FAIL] judge_research batch {batch_idx + 1} — {e}, treating all as approved")
             all_approved.extend(batch)
@@ -1952,7 +1974,10 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         url = _normalize_url(f.get("url", ""))
         source = original_by_url.get(url)
         if source is not None:
-            for field in ("date_tag", "research_angle_id", "develops_story_url"):
+            for field in (
+                "date_tag", "research_angle_id", "develops_story_url",
+                "event", "event_terms",
+            ):
                 if field in source:
                     f[field] = source[field]
                 else:
@@ -1962,7 +1987,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             f.get("research_angle_id") == "developing-followups"
             and (
                 tracked_url not in tracker_by_url
-                or tracker_by_url[tracked_url].get("importance") != "high"
+                or tracker_by_url[tracked_url].get("editorial_significance") != "high"
             )
         ):
             dedup_rejected.append({"finding": f, "reason": "invalid_followup_link"})
@@ -2003,6 +2028,91 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     output_path.write_text(json.dumps(output, indent=2))
     return fresh, ongoing
 
+def _editorial_only_priority(item: dict) -> dict:
+    normalize_editorial_significance(item)
+    significance = item["editorial_significance"]
+    item.setdefault("attention", {
+        "schema_version": 1,
+        "provider": "GDELT DOC 2.0",
+        "status": "out_of_scope",
+        "attention_now": 50.0,
+        "digest_prominence": 50.0,
+        "confidence": 0.0,
+        "age_bucket": "over-24h",
+        "normalized_signals": {},
+        "evidence": {
+            "channels_available": [],
+            "channels_unavailable": ["news_coverage", "homepage_prominence", "social", "video"],
+        },
+    })
+    item["priority_score"] = EDITORIAL_POINTS[significance]
+    item["priority_explanation"] = (
+        f"{significance.title()} editorial significance; attention scoring applies only "
+        "to events first observed or materially updated in the last 24 hours."
+    )
+    return item
+
+
+def phase_2b_attention(
+    topic: dict,
+    fresh: list[dict],
+    ongoing: list[dict],
+    run_dir: Path,
+) -> tuple[list[dict], list[dict]]:
+    """Measure observable news attention without asking an LLM for popularity."""
+    output_path = run_dir / "02b-attention.json"
+    if output_path.exists():
+        try:
+            cached = json.loads(output_path.read_text())
+            if cached.get("schema_version") == 1:
+                return cached.get("fresh", []), cached.get("ongoing", [])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    print(f"  [run ] attention — {len(fresh)} fresh event(s)")
+    started = time.time()
+    scored_fresh, attention_artifact = score_attention(
+        fresh,
+        ATTENTION_CACHE_DIR,
+    )
+    scored_ongoing = [
+        _editorial_only_priority(copy.deepcopy(item)) for item in ongoing
+    ]
+    output = {
+        **attention_artifact,
+        "fresh": scored_fresh,
+        "ongoing": scored_ongoing,
+    }
+    output_path.write_text(json.dumps(output, indent=2, ensure_ascii=False) + "\n")
+
+    issue_date = (
+        run_dir.name
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", run_dir.name)
+        else datetime.now(timezone.utc).date().isoformat()
+    )
+    archive_path = ATTENTION_ARCHIVE_DIR / issue_date / f"{topic['web_slug']}.json"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = archive_path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(attention_artifact, indent=2, ensure_ascii=False) + "\n")
+    temporary.replace(archive_path)
+
+    if ATTENTION_CACHE_DIR.exists():
+        cutoff = time.time() - 48 * 3600
+        for cache_path in ATTENTION_CACHE_DIR.glob("*.json"):
+            try:
+                if cache_path.stat().st_mtime < cutoff:
+                    cache_path.unlink()
+            except OSError:
+                pass
+
+    elapsed = time.time() - started
+    print(
+        f"  [done] attention — {attention_artifact['available']} observed, "
+        f"{attention_artifact['unavailable']} unavailable, "
+        f"{attention_artifact['cache_hits']} cache hit(s) ({elapsed:.0f}s)"
+    )
+    return scored_fresh, scored_ongoing
+
 
 def phase_3_rank(
     topic: dict,
@@ -2011,18 +2121,18 @@ def phase_3_rank(
     stories_in_flight: dict,
     run_dir: Path,
 ) -> tuple[list[dict], list[dict]]:
-    """Phase 3: Python-side ranking with caps.
+    """Phase 3: Deterministic priority ranking with caps.
 
     Pool A: Fresh findings
-      - Sort by importance (high → med → low), date_published recency as tiebreaker
+      - Sort by final product priority (editorial significance + observed attention)
       - Cap: FRESH_CAP (12)
 
     Pool B: Older articles (2-5 days old from Phase 2)
-      - Sort by date_published recency primary, importance as tiebreaker
+      - Sort by editorial-only priority, then publication recency
       - Cap: ONGOING_CAP (5)
 
     Pool C: qualified developing stories — does NOT enter Phase 4
-      - Requires high importance and evidence-backed movement on 2+ UTC dates
+      - Requires high editorial significance and evidence-backed movement on 2+ UTC dates
       - Sort by last_updated descending and cap at SIF_CAP (3)
       - Passed directly to Phase 6 with its evidence history and latest development
 
@@ -2031,11 +2141,16 @@ def phase_3_rank(
     """
     output_path = run_dir / "03-urls-ranked.json"
     if output_path.exists():
-        print(f"  [skip] Phase 3 output exists: {output_path}")
-        data = json.loads(output_path.read_text())
-        return data.get("phase_4_queue", []), data.get("sif_candidates", [])
+        try:
+            data = json.loads(output_path.read_text())
+            if data.get("ranking_schema_version") == RANKING_SCHEMA_VERSION:
+                print(f"  [skip] Phase 3 output exists: {output_path}")
+                return data.get("phase_4_queue", []), data.get("sif_candidates", [])
+        except (json.JSONDecodeError, OSError):
+            pass
 
-    importance_order = {"high": 0, "medium": 1, "low": 2}
+    fresh = [normalize_editorial_significance(item) for item in fresh]
+    ongoing = [normalize_editorial_significance(item) for item in ongoing]
 
     # Tag each finding with source_verdict for downstream phases
     for f in fresh:
@@ -2079,20 +2194,28 @@ def phase_3_rank(
         print(f"  [Phase 3 URL-host] rejected {len(asset_cdn_rejected)} "
               "asset-CDN URL(s) (not article hosts) before fetch")
 
-    # Pool A: stable importance-first ranking, then publication recency.
-    pool_a = sorted(eligible_fresh, key=lambda f: f.get("date_published", ""), reverse=True)
-    pool_a = sorted(pool_a, key=lambda f: importance_order.get(f.get("importance", "low"), 2))
-    pool_a = pool_a[:FRESH_CAP]
+    # Product priority combines editorial consequence with observed attention.
+    pool_a = sorted(
+        eligible_fresh,
+        key=lambda item: (
+            float(item.get("priority_score", 0.0) or 0.0),
+            item.get("date_published", ""),
+        ),
+        reverse=True,
+    )[:FRESH_CAP]
 
-    # Pool B: publication recency first, then importance.
-    pool_b = sorted(eligible_ongoing,
-                    key=lambda f: importance_order.get(f.get("importance", "low"), 2))
-    pool_b = sorted(pool_b, key=lambda f: f.get("date_published", ""), reverse=True)
-    pool_b = pool_b[:ONGOING_CAP]
+    pool_b = sorted(
+        eligible_ongoing,
+        key=lambda item: (
+            float(item.get("priority_score", 0.0) or 0.0),
+            item.get("date_published", ""),
+        ),
+        reverse=True,
+    )[:ONGOING_CAP]
 
     # Pool C is the only source for the rendered Developing and Ongoing section.
-    # Merely active tracker entries are not enough: every candidate must already
-    # have high importance and evidence-backed movement on multiple dates.
+    # Every candidate must already have high editorial significance and
+    # evidence-backed movement on multiple dates.
     active_sif = [
         story for story in stories_in_flight.get("stories", [])
         if story.get("status") == "active"
@@ -2108,6 +2231,7 @@ def phase_3_rank(
     phase_4_queue = pool_a + pool_b
 
     output = {
+        "ranking_schema_version": RANKING_SCHEMA_VERSION,
         "phase_4_queue": phase_4_queue,
         "sif_candidates": pool_c,
         "pool_a": pool_a,
@@ -2123,8 +2247,13 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
     """Fetch and summarize articles with a shared cache and two-worker bound."""
     output_path = run_dir / "04-fetch-summaries.json"
     if output_path.exists():
-        print(f"  [skip] Phase 4 output exists: {output_path}")
-        return json.loads(output_path.read_text())
+        try:
+            cached = json.loads(output_path.read_text())
+            if all("priority_score" in item for item in cached):
+                print(f"  [skip] Phase 4 output exists: {output_path}")
+                return cached
+        except (json.JSONDecodeError, OSError):
+            pass
     pruned_cache_entries = _prune_article_cache()
     if pruned_cache_entries:
         print(f"  [cache] pruned {pruned_cache_entries} expired/invalid entry(s)")
@@ -2241,8 +2370,13 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     """
     output_path = run_dir / "05-summaries-judged.json"
     if output_path.exists():
-        print(f"  [skip] Phase 5 output exists: {output_path}")
-        return json.loads(output_path.read_text())
+        try:
+            cached = json.loads(output_path.read_text())
+            if all("priority_score" in item for item in cached):
+                print(f"  [skip] Phase 5 output exists: {output_path}")
+                return cached
+        except (json.JSONDecodeError, OSError):
+            pass
 
     to_judge = [s for s in summaries if s.get("fetch_success", True)]
     failed = [s for s in summaries if not s.get("fetch_success", True)]
@@ -2442,8 +2576,12 @@ def _editorial_candidate_id(candidate: dict) -> str:
 
 
 def _clean_editorial_text(value: Any, fallback: str = "", limit: int = 1200) -> str:
-    text = value.strip() if isinstance(value, str) else ""
-    return (text or fallback.strip())[:limit]
+    source = value if isinstance(value, str) and value.strip() else fallback
+    text = " ".join(source.split()) if isinstance(source, str) else ""
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit + 1].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return f"{clipped}…"
 
 
 def _summarize_model_error(error: Exception) -> str:
@@ -2465,17 +2603,17 @@ def _prepare_editorial_candidates(
         if not normalized or normalized in seen or normalized in blocked_urls:
             continue
         seen.add(normalized)
-        candidate = copy.deepcopy(item)
+        candidate = normalize_editorial_significance(copy.deepcopy(item))
         candidate["candidate_id"] = _editorial_candidate_id(candidate)
         eligible.append(candidate)
 
-    importance_order = {"high": 0, "medium": 1, "low": 2}
-    eligible = sorted(
-        eligible, key=lambda item: item.get("date_published", ""), reverse=True
-    )
     eligible = sorted(
         eligible,
-        key=lambda item: importance_order.get(item.get("importance", "low"), 2),
+        key=lambda item: (
+            float(item.get("priority_score", 0.0) or 0.0),
+            item.get("date_published", ""),
+        ),
+        reverse=True,
     )
     return eligible[:15], rejected
 
@@ -2571,7 +2709,7 @@ def _validate_editorial_proposal(
         related = ""
         if declared_related:
             target = tracker_by_url.get(declared_related)
-            if target is None or target.get("importance") != "high":
+            if target is None or target.get("editorial_significance") != "high":
                 warnings.append(
                     f"removed invalid developing-story link from {candidate_id}"
                 )
@@ -2688,7 +2826,7 @@ def _validate_editorial_proposal(
                     f"ignored tracker add for linked development {candidate_id}"
                 )
                 continue
-            if source.get("importance") != "high":
+            if source.get("editorial_significance") != "high":
                 warnings.append(
                     f"ignored non-high tracker add for {candidate_id}"
                 )
@@ -2707,7 +2845,7 @@ def _validate_editorial_proposal(
                 "candidate_id": candidate_id,
                 "evidence_candidate_ids": [candidate_id],
                 "latest_dev": latest_dev or source.get("summary", ""),
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             })
         elif operation == "update":
@@ -2715,7 +2853,7 @@ def _validate_editorial_proposal(
             source = tracker_by_url.get(normalized)
             if (
                 source is None
-                or source.get("importance") != "high"
+                or source.get("editorial_significance") != "high"
                 or not evidence
                 or not latest_dev
                 or _is_listing_url(item.get("story_url", ""))
@@ -2745,14 +2883,14 @@ def _validate_editorial_proposal(
                 "story_url": source.get("url", ""),
                 "evidence_candidate_ids": linked_evidence,
                 "latest_dev": latest_dev,
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             })
         else:
             warnings.append(f"ignored unknown state operation {operation!r}")
 
     # State continuity must not depend on model bookkeeping. Every selected
-    # high-importance root story gets one initial evidence record; every vetted
+    # high-significance root story gets one initial evidence record; every vetted
     # follow-up gets an evidence-backed update. Follow-up articles never become
     # duplicate root tracker entries.
     added_candidate_ids = {
@@ -2773,13 +2911,13 @@ def _validate_editorial_proposal(
                 "story_url": tracked.get("url", ""),
                 "evidence_candidate_ids": [candidate_id],
                 "latest_dev": selection["editorial_summary"],
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             })
             updated_story_urls.add(related)
         elif (
             not related
-            and source.get("importance") == "high"
+            and source.get("editorial_significance") == "high"
             and candidate_id not in added_candidate_ids
             and _normalize_url(source.get("url", "")) not in tracker_by_url
         ):
@@ -2788,14 +2926,14 @@ def _validate_editorial_proposal(
                 "candidate_id": candidate_id,
                 "evidence_candidate_ids": [candidate_id],
                 "latest_dev": selection["editorial_summary"],
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             })
             added_candidate_ids.add(candidate_id)
 
     # The two-story send floor may use only stories that independently satisfy
     # the same Developing and Ongoing contract. Content volume never overrides
-    # importance or multi-day evidence; a thin digest is archived, not padded
+    # editorial significance or multi-day evidence; a thin section is not padded
     # with a one-off article.
     if len(fresh) + len(ongoing) < 2:
         selected_urls = {
@@ -2944,7 +3082,7 @@ def _raw_editorial_proposal(
             }
             for index, story in enumerate(sif_candidates[:3], 1)
         ],
-        # Keep only high-importance root stories as follow-up candidates. A
+        # Keep only high-significance root stories as follow-up candidates. A
         # selected follow-up article updates its linked root during validation
         # and must never become a second root entry.
         "story_state_proposals": [
@@ -2953,11 +3091,11 @@ def _raw_editorial_proposal(
                 "candidate_id": selection["candidate_id"],
                 "evidence_candidate_ids": [selection["candidate_id"]],
                 "latest_dev": candidate.get("summary", ""),
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             }
             for selection, candidate in zip(selected_fresh, candidates[:7])
-            if candidate.get("importance") == "high"
+            if candidate.get("editorial_significance") == "high"
             and not candidate.get("develops_story_url")
         ],
         "rejected": [],
@@ -3106,7 +3244,7 @@ def _apply_story_state_proposals(
                 "status": "active",
                 "latest_dev": operation.get("latest_dev", source.get("summary", "")),
                 "last_updated": today_str,
-                "importance": "high",
+                "editorial_significance": "high",
                 "first_seen": today_str,
                 "developments": [{
                     "date": today_str,
@@ -3138,7 +3276,7 @@ def _apply_story_state_proposals(
             "url": source.get("url", ""),
         } for source in evidence_sources)
         story["latest_dev"] = operation["latest_dev"]
-        story["importance"] = "high"
+        story["editorial_significance"] = "high"
         story["status"] = operation.get("status", "active")
         _normalize_story_tracking(story, today)
     return updated
@@ -3202,9 +3340,17 @@ def phase_6_curate(
     """Propose, validate, independently review, then apply editorial state changes."""
     output_path = run_dir / "06-curated.json"
     if output_path.exists():
-        print(f"  [skip] Phase 6 output exists: {output_path}")
-        data = json.loads(output_path.read_text())
-        return data["fresh"], data.get("stories_in_flight", stories_in_flight), data["ongoing"]
+        try:
+            data = json.loads(output_path.read_text())
+            if data.get("ranking_schema_version") == RANKING_SCHEMA_VERSION:
+                print(f"  [skip] Phase 6 output exists: {output_path}")
+                return (
+                    data["fresh"],
+                    data.get("stories_in_flight", stories_in_flight),
+                    data["ongoing"],
+                )
+        except (json.JSONDecodeError, OSError, KeyError):
+            pass
 
     started = time.time()
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -3231,10 +3377,12 @@ def phase_6_curate(
           f"{len(blocked_urls)} cross-topic URL(s) blocked")
 
     system = (
-        "You are the lead editor of a daily news digest. Make one coherent editorial "
+        "You are the lead editor of a daily newspaper section. Make one coherent "
         "proposal from vetted candidates and qualified developing stories. Selection, "
-        "ranking, source/topic balance, story connections, and state proposals are "
-        "interdependent. Do not write an intro and do not replace the tracker.\n\n"
+        "source/topic balance, story connections, and state proposals are interdependent. "
+        "Treat the deterministic `priority_score` as the primary ranking signal; never "
+        "alter or invent attention, confidence, or priority values. Do not write a "
+        "section standfirst and do not replace the tracker.\n\n"
         f"{DEVELOPING_STORY_RULES}\n"
         "Select 5-7 fresh stories when enough good candidates exist. Select zero to "
         "three Developing and Ongoing stories only from the supplied qualified SIF "
@@ -3243,11 +3391,11 @@ def phase_6_curate(
         "Fresh candidate carrying `develops_story_url`, copy that exact URL into "
         "`related_story_url` and propose an evidence-backed update of that tracked "
         "story. No other cross-article connection is allowed. Add only selected, "
-        "high-importance root candidates to the tracker. `why_still_relevant` must "
+        "high-significance root candidates to the tracker. `why_still_relevant` must "
         "name the latest material development, never merely say the item is still "
-        "relevant, recent, unresolved, or the latest commentary. Write ALL prose "
-        "(editorial_summary, selection_reason, summary, why_still_relevant, latest_dev, "
-        "gaps, balance_summary, rejected reasons) in English, regardless of source "
+        "relevant, recent, unresolved, or the latest commentary. Write concise newspaper "
+        "copy that leads with facts; never refer to a digest, edition, candidate list, "
+        "ranking process, or the reader. Write all prose in English regardless of source "
         "language; keep story titles in their original language.\n\n"
         "Output one JSON object in ```json fences:\n"
         '{"selected_fresh":[{"candidate_id":"...","rank":1,'
@@ -3258,7 +3406,7 @@ def phase_6_curate(
         '"story_state_proposals":[{"operation":"add|update",'
         '"candidate_id":"for add","story_url":"for update",'
         '"evidence_candidate_ids":["..."],"latest_dev":"...",'
-        '"importance":"high|medium|low","status":"active|cooled"}],'
+        '"editorial_significance":"high|medium|low","status":"active|cooled"}],'
         '"rejected":[{"candidate_id":"...","reason":"..."}],'
         '"gaps":"...","balance_summary":"..."}'
     )
@@ -3269,7 +3417,7 @@ def phase_6_curate(
         f"{json.dumps(sif_candidates, indent=2)}\n\n"
         f"## Full tracker for connections and proposed updates\n"
         f"{json.dumps(stories_in_flight, indent=2)}\n\n"
-        f"## Importance rubric\n{_importance_rubric_text(topic)}\n\n"
+        f"## Editorial significance rubric\n{_editorial_significance_rubric_text(topic)}\n\n"
         f"## Developing-story contract\n{DEVELOPING_STORY_RULES}\n"
         f"## Dropped summaries; never select\n"
         f"{json.dumps([{'title': item.get('title'), 'url': item.get('url'), 'reason': item.get('judge_issues', [])} for item in dropped], indent=2)}"
@@ -3362,15 +3510,16 @@ def phase_6_curate(
     applied_changes: list[dict] = []
     if proposal_status == "model":
         critic_system = (
-            "You are the independent critic for a daily digest. Review the proposed "
-            "selection, ranking, source/topic balance, developing-story links, and "
-            "persistent state proposals. Return bounded changes only; never rewrite "
-            "the whole proposal. Enforce the Developing and Ongoing contract strictly: "
-            "remove anything that is merely old, still relevant, a one-off item, or "
-            "unsupported by material developments on multiple dates. Check for a missed "
-            "stronger candidate, unsupported connections, source concentration, stale "
-            "material, and state changes without selected evidence. Write all notes and "
-            "reasoning in English.\n\n"
+            "You are the independent critic for a daily newspaper section. Review the "
+            "selection, source/topic balance, developing-story links, and persistent "
+            "state proposals. Return bounded changes only; never rewrite the whole proposal. "
+            "The deterministic `priority_score` owns ranking: move a story only to correct "
+            "a clear ordering violation and never estimate or alter attention. Enforce the "
+            "Developing and Ongoing contract strictly: remove anything merely old, still "
+            "relevant, one-off, or unsupported by material developments on multiple dates. "
+            "Check for a missed higher-priority candidate, unsupported connections, source "
+            "concentration, stale material, and state changes without selected evidence. "
+            "Write all notes and reasoning in English.\n\n"
             f"{DEVELOPING_STORY_RULES}\n"
             "Allowed operations: remove_fresh, add_fresh, replace_fresh, move_fresh, "
             "remove_ongoing, add_ongoing, replace_ongoing, remove_state, add_state, "
@@ -3480,7 +3629,14 @@ def phase_6_curate(
     fresh, ongoing = _materialize_editorial_selection(
         final_proposal, candidates, updated_sif
     )
+    fresh.sort(
+        key=lambda item: float(item.get("priority_score", 0.0) or 0.0),
+        reverse=True,
+    )
+    for rank, item in enumerate(fresh, 1):
+        item["rank"] = rank
     output = {
+        "ranking_schema_version": RANKING_SCHEMA_VERSION,
         "fresh": fresh,
         "ongoing": ongoing,
         "stories_in_flight": updated_sif,
@@ -3518,30 +3674,42 @@ def phase_6_curate(
     return fresh, updated_sif, ongoing
 
 
-def _validate_intro(intro: str, stories: list[dict]) -> tuple[bool, str]:
-    text = _clean_editorial_text(intro, limit=700)
+def _validate_standfirst(standfirst: str, stories: list[dict]) -> tuple[bool, str]:
+    text = " ".join(standfirst.split()) if isinstance(standfirst, str) else ""
     if len(text) < 40:
-        return False, "intro is too short"
+        return False, "standfirst is too short"
+    if len(text) > 900:
+        return False, "standfirst exceeds 900 characters"
+    if not re.search(r"""[.!?…]["'’”)]*$""", text):
+        return False, "standfirst ends mid-sentence"
     if re.search(r"https?://|www\.", text, re.IGNORECASE):
-        return False, "intro contains a URL"
+        return False, "standfirst contains a URL"
     if "<" in text or ">" in text:
-        return False, "intro contains HTML"
+        return False, "standfirst contains HTML"
+    if re.search(
+        r"\b(?:today[’']s|this)\s+(?:digest|edition|briefing)\b|"
+        r"\b(?:digest|edition)\s+(?:leads|focuses|covers|includes)\b|"
+        r"\bread on\b|\balso in focus\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return False, "standfirst uses digest-style meta language"
     source_text = " ".join(
         f"{story.get('title', '')} {story.get('summary', '')} "
         f"{story.get('why_still_relevant', '')}"
         for story in stories
     )
     source_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", source_text))
-    intro_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", text))
-    unsupported = sorted(intro_numbers - source_numbers)
+    standfirst_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", text))
+    unsupported = sorted(standfirst_numbers - source_numbers)
     if unsupported:
-        return False, f"intro introduced unsupported numbers: {', '.join(unsupported)}"
+        return False, f"standfirst introduced unsupported numbers: {', '.join(unsupported)}"
     entity_pattern = r"\b[A-Z][A-Za-z0-9’'-]{1,}\b"
     source_entities = {
         re.sub(r"[’']s$", "", entity.casefold())
         for entity in re.findall(entity_pattern, source_text)
     }
-    intro_entities = {
+    standfirst_entities = {
         re.sub(r"[’']s$", "", entity.casefold())
         for entity in re.findall(entity_pattern, text)
         if (
@@ -3552,59 +3720,81 @@ def _validate_intro(intro: str, stories: list[dict]) -> tuple[bool, str]:
             )
         )
     }
-    unsupported_entities = sorted(intro_entities - source_entities)
+    unsupported_entities = sorted(standfirst_entities - source_entities)
     if unsupported_entities:
         return False, (
-            "intro introduced unsupported names: "
+            "standfirst introduced unsupported names: "
             + ", ".join(unsupported_entities)
         )
     return True, ""
 
 
-def _fallback_intro(fresh: list[dict], ongoing: list[dict]) -> str:
+def _first_complete_sentence(value: Any) -> str:
+    text = " ".join(value.split()) if isinstance(value, str) else ""
+    if not text:
+        return ""
+    match = re.match(r"""^.*?[.!?…]["'’”)]*(?:\s|$)""", text)
+    if match and len(match.group(0).strip()) <= 850:
+        return match.group(0).strip()
+    if len(text) <= 850:
+        return text if re.search(r"""[.!?…]["'’”)]*$""", text) else f"{text}."
+    return ""
+
+
+def _fallback_standfirst(fresh: list[dict], ongoing: list[dict]) -> str:
     stories = fresh or ongoing
     if not stories:
-        return "No stories were selected for today’s digest."
-    lead = stories[0].get("title", "the lead story")
-    if len(stories) == 1:
-        return (
-            f"Today’s digest focuses on {lead}. Read on for the verified details "
-            "and why the development matters."
-        )
-    secondary = " and ".join(
-        story.get("title", "") for story in stories[1:3] if story.get("title")
-    )
-    return (
-        f"Today’s digest leads with {lead}. Also in focus: {secondary}."
-    )
+        return "No publishable stories were selected for this section."
+    sentences = [
+        _first_complete_sentence(story.get("summary", ""))
+        for story in stories[:3]
+    ]
+    sentences = [sentence for sentence in sentences if sentence]
+    if not sentences:
+        title = " ".join(str(stories[0].get("title", "Lead story")).split())
+        return title if re.search(r"[.!?…]$", title) else f"{title}."
+    standfirst = sentences[0]
+    if len(sentences) > 1 and len(f"{standfirst} {sentences[1]}") <= 850:
+        standfirst = f"{standfirst} {sentences[1]}"
+    return standfirst
 
 
-def _generate_final_intro(
+def _generate_section_standfirst(
     topic: dict,
     fresh: list[dict],
     ongoing: list[dict],
     run_dir: Path,
 ) -> str:
-    """Generate copy only after selection review; deterministic HTML comes later."""
-    artifact_path = run_dir / "07-intro.json"
-    if artifact_path.exists():
-        data = json.loads(artifact_path.read_text())
-        return data.get("intro", _fallback_intro(fresh, ongoing))
-
+    """Generate newspaper copy only after selection and priority ranking."""
+    artifact_path = run_dir / "07-standfirst.json"
     stories = fresh + ongoing
+    if artifact_path.exists():
+        try:
+            data = json.loads(artifact_path.read_text())
+            cached = data.get("standfirst", "")
+            valid, _ = _validate_standfirst(cached, stories)
+            if data.get("prompt_version") == STANDFIRST_PROMPT_VERSION and valid:
+                return cached
+        except (json.JSONDecodeError, OSError):
+            pass
+
     system = (
-        "Write a concise 2-3 sentence editorial introduction for a daily digest. "
-        "Use only facts, entities, and numbers in the approved story data. Do not add "
-        "URLs, HTML, new reporting, or claims about rejected stories. Write it in "
-        "English — the digest language is always English regardless of source language. "
-        'Output one JSON object: {"intro":"..."}'
+        "Write a concise two- or three-sentence newspaper standfirst for one section. "
+        "Lead directly with the most consequential verified fact, then connect one or "
+        "two supporting developments in natural newspaper prose. Use only facts, names, "
+        "and numbers in the approved story data. Do not add URLs, HTML, new reporting, "
+        "or claims about rejected stories. Never mention a digest, edition, briefing, "
+        "candidate list, ranking, the writing process, or the reader. Do not use phrases "
+        "such as 'today's digest leads with', 'also in focus', or 'read on'. Finish every "
+        "sentence completely. Write in English while preserving source titles. "
+        'Output one JSON object: {\"standfirst\":\"...\"}'
     )
     user = (
-        f"Digest: {topic['title']}\n\n"
-        f"Approved stories:\n{json.dumps(stories, indent=2)}"
+        f"Newspaper section: {topic['web_title']}\n\n"
+        f"Approved stories in priority order:\n{json.dumps(stories, indent=2)}"
     )
     errors: list[str] = []
-    intro = ""
+    standfirst = ""
     model_used = ""
     status = "model"
     for requested_model, effective_model in _model_attempts(MODEL, MODEL_FALLBACK):
@@ -3612,30 +3802,34 @@ def _generate_final_intro(
             raw = _call_llm_proxy(
                 system, user, model=requested_model, timeout=INTRO_TIMEOUT
             )
-            result = _extract_json(raw, f"final intro ({effective_model})")
+            result = _extract_json(raw, f"section standfirst ({effective_model})")
             if not isinstance(result, dict):
-                raise ValueError("intro output must be a JSON object")
-            candidate = _clean_editorial_text(result.get("intro"), limit=700)
-            valid, reason = _validate_intro(candidate, stories)
+                raise ValueError("standfirst output must be a JSON object")
+            candidate = " ".join(str(result.get("standfirst", "")).split())
+            valid, reason = _validate_standfirst(candidate, stories)
             if not valid:
                 raise ValueError(reason)
-            intro = candidate
+            standfirst = candidate
             model_used = effective_model
             break
         except Exception as error:
             error_summary = _summarize_model_error(error)
             errors.append(f"{effective_model}: {error_summary}")
-            print(f"  [7 retry] intro failed with {effective_model}: {error_summary}")
-    if not intro:
-        intro = _fallback_intro(fresh, ongoing)
+            print(
+                f"  [7 retry] standfirst failed with {effective_model}: "
+                f"{error_summary}"
+            )
+    if not standfirst:
+        standfirst = _fallback_standfirst(fresh, ongoing)
         status = "deterministic_fallback"
     artifact_path.write_text(json.dumps({
-        "intro": intro,
+        "prompt_version": STANDFIRST_PROMPT_VERSION,
+        "standfirst": standfirst,
         "status": status,
         "model": model_used,
         "errors": errors,
-    }, indent=2))
-    return intro
+    }, indent=2, ensure_ascii=False) + "\n")
+    return standfirst
 
 
 def _render_story_block(story: dict, *, ongoing: bool = False) -> str:
@@ -3677,7 +3871,7 @@ def _render_digest_html(
     topic: dict,
     fresh: list[dict],
     ongoing: list[dict],
-    intro: str,
+    standfirst: str,
     *,
     notice: str = "",
 ) -> str:
@@ -3685,7 +3879,7 @@ def _render_digest_html(
     template = re.sub(
         r"\n<!--\nSTORY BLOCK TEMPLATE[\s\S]*?-->\s*$", "\n", template
     )
-    intro_text = f"{notice} {intro}".strip()
+    standfirst_text = f"{notice} {standfirst}".strip()
     fresh_html = "\n".join(
         _render_story_block(story) for story in fresh
     ) or _empty_section_block("No fresh stories selected today.")
@@ -3695,7 +3889,7 @@ def _render_digest_html(
     replacements = {
         "{{DIGEST_TITLE}}": html.escape(str(topic["title"])),
         "{{DATE}}": html.escape(datetime.now().strftime("%B %d, %Y")),
-        "{{INTRO}}": html.escape(intro_text),
+        "{{INTRO}}": html.escape(standfirst_text),
         "{{FRESH_STORIES}}": fresh_html,
         "{{ONGOING_STORIES}}": ongoing_html,
     }
@@ -3713,17 +3907,29 @@ def phase_7_write(
     *,
     notice: str = "",
 ) -> str:
-    """Generate the approved intro, then render the archival HTML deterministically."""
+    """Generate the approved standfirst, then render archival HTML deterministically."""
     output_path = run_dir / "digest.html"
-    if output_path.exists():
-        print(f"  [skip] Phase 7 output exists: {output_path}")
-        return output_path.read_text()
+    standfirst_path = run_dir / "07-standfirst.json"
+    if output_path.exists() and standfirst_path.exists():
+        try:
+            cached = json.loads(standfirst_path.read_text())
+            valid, _ = _validate_standfirst(
+                cached.get("standfirst", ""), fresh + ongoing
+            )
+            if (
+                cached.get("prompt_version") == STANDFIRST_PROMPT_VERSION
+                and valid
+            ):
+                print(f"  [skip] Phase 7 output exists: {output_path}")
+                return output_path.read_text()
+        except (json.JSONDecodeError, OSError):
+            pass
 
     print(f"  [run ] write_html — {len(fresh)} fresh, {len(ongoing)} ongoing")
     started = time.time()
-    intro = _generate_final_intro(topic, fresh, ongoing, run_dir)
+    standfirst = _generate_section_standfirst(topic, fresh, ongoing, run_dir)
     rendered = _render_digest_html(
-        topic, fresh, ongoing, intro, notice=notice
+        topic, fresh, ongoing, standfirst, notice=notice
     )
     output_path.write_text(rendered)
     elapsed = time.time() - started
@@ -3735,11 +3941,24 @@ def _public_story(story: dict, *, ongoing: bool = False) -> dict:
     """Return only the source-backed fields safe to publish on the news site."""
     fields = (
         "title", "url", "source_domain", "date_published", "date_confirmed",
-        "summary", "category", "importance", "author",
+        "summary", "category", "editorial_significance", "author", "event",
+        "priority_score", "priority_explanation",
     )
-    public = {key: story.get(key) for key in fields if story.get(key)}
-    if ongoing and story.get("why_still_relevant"):
-        public["why_still_relevant"] = story["why_still_relevant"]
+    normalized = normalize_editorial_significance(copy.deepcopy(story))
+    public = {key: normalized.get(key) for key in fields if normalized.get(key) is not None}
+    attention = normalized.get("attention")
+    if isinstance(attention, dict):
+        public["attention"] = {
+            key: attention.get(key)
+            for key in (
+                "schema_version", "provider", "status", "attention_now",
+                "digest_prominence", "confidence", "age_bucket",
+                "normalized_signals", "evidence",
+            )
+            if attention.get(key) is not None
+        }
+    if ongoing and normalized.get("why_still_relevant"):
+        public["why_still_relevant"] = normalized["why_still_relevant"]
     return public
 
 
@@ -3783,24 +4002,24 @@ def phase_8_archive(
         archive_path.write_text(rendered_html)
     print(f"  [done] archived HTML → {archive_path}")
 
-    intro_path = run_dir / "07-intro.json"
-    intro = ""
-    if intro_path.exists():
+    standfirst_path = run_dir / "07-standfirst.json"
+    standfirst = ""
+    if standfirst_path.exists():
         try:
-            intro = json.loads(intro_path.read_text()).get("intro", "")
+            standfirst = json.loads(standfirst_path.read_text()).get("standfirst", "")
         except (json.JSONDecodeError, OSError):
-            intro = ""
-    intro = intro or _fallback_intro(fresh, ongoing)
+            standfirst = ""
+    standfirst = standfirst or _fallback_standfirst(fresh, ongoing)
     publication = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "ranking_schema_version": RANKING_SCHEMA_VERSION,
         "date": today_str,
         "slug": topic["web_slug"],
         "title": topic["web_title"],
-        "digest_title": topic["title"],
         "source_category": topic["category"],
         "status": "degraded" if notice else ("published" if fresh or ongoing else "empty"),
         "notice": notice,
-        "intro": intro,
+        "standfirst": standfirst,
         "fresh": [_public_story(story) for story in fresh],
         "ongoing": [_public_story(story, ongoing=True) for story in ongoing],
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -4181,21 +4400,24 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 fresh_findings, ongoing_findings = [], []
             _phase_done("Phase 2: Judge Research", t2)
 
+            # Phase 2b: Observable Attention
+            t2b = _phase_start("Phase 2b: Observe Attention")
+            if fresh_findings or ongoing_findings:
+                fresh_findings, ongoing_findings = phase_2b_attention(
+                    topic, fresh_findings, ongoing_findings, run_dir
+                )
+            _phase_done("Phase 2b: Observe Attention", t2b)
+
             # Phase 3: Rank URLs
             t3 = _phase_start("Phase 3: Rank URLs")
-            phase_3_path = run_dir / "03-urls-ranked.json"
-            if phase_3_path.exists():
-                print(f"  [skip] Phase 3 output exists: {phase_3_path}")
-                ranked = json.loads(phase_3_path.read_text())
-                phase_4_queue = ranked.get("phase_4_queue", [])
-                sif_candidates = ranked.get("sif_candidates", [])
-            elif fresh_findings or ongoing_findings or any(
+            if fresh_findings or ongoing_findings or any(
                     s.get("status") == "active" and _is_developing_story(s)
                     for s in stories_in_flight.get("stories", [])):
                 # Run ranking without findings only when a qualified Developing
                 # and Ongoing story can still flow into Phase 6.
                 phase_4_queue, sif_candidates = phase_3_rank(
-                    topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir)
+                    topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir
+                )
             else:
                 phase_4_queue, sif_candidates = [], []
             _phase_done("Phase 3: Rank URLs", t3)
@@ -4203,51 +4425,28 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             # Phase 4: Fetch + Summarize
             t4 = _phase_start("Phase 4: Fetch & Summarize")
             check_search_health("pre-phase4")
-            phase_4_path = run_dir / "04-fetch-summaries.json"
-            if phase_4_path.exists():
-                print(f"  [skip] Phase 4 output exists: {phase_4_path}")
-                summaries = json.loads(phase_4_path.read_text())
-            elif phase_4_queue:
-                summaries = phase_4_fetch(topic, phase_4_queue, run_dir)
-            else:
-                summaries = []
+            summaries = (
+                phase_4_fetch(topic, phase_4_queue, run_dir)
+                if phase_4_queue else []
+            )
             _phase_done("Phase 4: Fetch & Summarize", t4)
 
             # Phase 5: Judge Summaries
             t5 = _phase_start("Phase 5: Judge Summaries")
-            phase_5_path = run_dir / "05-summaries-judged.json"
-            if phase_5_path.exists():
-                print(f"  [skip] Phase 5 output exists: {phase_5_path}")
-                judged = json.loads(phase_5_path.read_text())
-            elif summaries:
-                judged = phase_5_judge_summaries(topic, summaries, run_dir)
-            else:
-                judged = []
+            judged = (
+                phase_5_judge_summaries(topic, summaries, run_dir)
+                if summaries else []
+            )
             _phase_done("Phase 5: Judge Summaries", t5)
 
             # Phase 6: Curate
             t6 = _phase_start("Phase 6: Curate")
-            phase_6_path = run_dir / "06-curated.json"
-            if phase_6_path.exists():
-                print(f"  [skip] Phase 6 output exists: {phase_6_path}")
-                curated = json.loads(phase_6_path.read_text())
-                fresh = curated.get("fresh", [])
-                ongoing = curated.get("ongoing", [])
-                if "stories_in_flight" in curated:
-                    stories_in_flight = curated["stories_in_flight"]
-                    # Re-apply cooling/pruning to cached data (Phase 0 pruning was lost by cache)
-                    sif_stories = stories_in_flight.get("stories", [])
-                    if sif_stories:
-                        kept, re_cooled, re_pruned = _prune_and_cool_stories(sif_stories)
-                        if re_cooled > 0 or re_pruned > 0:
-                            print(f"  [phase6-cache] Re-cooled {re_cooled} stale, "
-                                  f"re-pruned {re_pruned} expired stories")
-                            stories_in_flight["stories"] = kept
-            elif judged or sif_candidates:
+            if judged or sif_candidates:
                 # Curation runs on SIF candidates alone (judged empty) so ongoing
-                # stories from previous days are reported instead of a blank digest.
+                # stories from previous days are reported instead of a blank section.
                 fresh, stories_in_flight, ongoing = phase_6_curate(
-                    topic, judged, sif_candidates, stories_in_flight, run_dir)
+                    topic, judged, sif_candidates, stories_in_flight, run_dir
+                )
             else:
                 fresh, ongoing = [], []
             _phase_done("Phase 6: Curate", t6)

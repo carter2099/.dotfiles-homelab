@@ -20,15 +20,14 @@ def check(condition: bool, message: object) -> None:
 
 def sample_publication(topic: dict, issue_date: str, marker: str) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "date": issue_date,
         "slug": topic["web_slug"],
         "title": topic["web_title"],
-        "digest_title": topic["title"],
         "source_category": topic["category"],
         "status": "published",
         "notice": "",
-        "intro": f"{marker} briefing summarizes the verified developments for this category.",
+        "standfirst": f"{marker} reporting details the verified developments shaping this section.",
         "fresh": [{
             "title": f"{marker} lead story",
             "url": f"https://example.com/{topic['web_slug']}/lead",
@@ -36,12 +35,17 @@ def sample_publication(topic: dict, issue_date: str, marker: str) -> dict:
             "date_published": issue_date,
             "summary": f"{marker} source-backed summary with the material facts.",
             "category": "News",
+            "editorial_significance": "high",
+            "priority_score": 80.0,
+            "priority_explanation": "High significance with observed coverage.",
         }],
         "ongoing": [{
             "title": f"{marker} developing story",
             "url": f"https://example.com/{topic['web_slug']}/developing",
             "summary": f"{marker} ongoing source-backed summary.",
             "category": "Developing",
+            "editorial_significance": "high",
+            "priority_score": 70.0,
             "why_still_relevant": "A second-day source established a material change.",
         }],
         "generated_at": f"{issue_date}T12:00:00+00:00",
@@ -68,10 +72,32 @@ def test_legacy_html_migration() -> None:
       <p><a href="https://example.com/ongoing">Ongoing title</a><span> · Policy</span></p>
       <p>Ongoing factual summary.</p><p>↳ Material second-day change.</p>
     """)
-    check(parser.intro.startswith("A sufficiently"), parser.intro)
+    check(parser.standfirst.startswith("A sufficiently"), parser.standfirst)
     check(parser.fresh[0]["category"] == "Industry", parser.fresh)
     check(parser.fresh[0]["summary"] == "Fresh factual summary.", parser.fresh)
     check(parser.ongoing[0]["why_still_relevant"] == "Material second-day change.", parser.ongoing)
+
+
+def test_digest_meta_and_truncated_copy_are_rewritten() -> None:
+    topic = news.TOPICS["ai-hardware"]
+    publication = news._normalize_publication({
+        "status": "published",
+        "intro": "Today’s digest leads with new accelerator designs at Ho",
+        "fresh": [{
+            "title": "New accelerator designs",
+            "url": "https://example.com/hardware",
+            "summary": "Chipmakers introduced new accelerator designs with higher memory bandwidth. Production begins next quarter.",
+            "editorial_significance": "high",
+            "priority_score": 90.0,
+        }],
+        "ongoing": [],
+    }, topic, "2026-08-25")
+    standfirst = publication["standfirst"]
+    check("digest" not in standfirst.casefold(), standfirst)
+    check(standfirst.endswith("."), standfirst)
+    check("higher memory bandwidth" in standfirst, standfirst)
+
+
 
 
 def test_publish_builds_separate_history_and_one_email() -> None:
@@ -91,6 +117,8 @@ def test_publish_builds_separate_history_and_one_email() -> None:
             publication = sample_publication(topic, current_date, marker)
             if key == "ai-tech":
                 publication["fresh"][0]["title"] = "AI <script>alert(1)</script> lead"
+            if key == "gaming":
+                publication["fresh"][0]["priority_score"] = 99.0
             (run_dir / "publication.json").write_text(json.dumps(publication))
 
         gaming_dir = digests / news.TOPICS["gaming"]["category"]
@@ -128,6 +156,18 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         ai_page = (current / current_date / "ai-tech" / "index.html").read_text()
         check("&lt;script&gt;alert(1)&lt;/script&gt;" in ai_page, ai_page)
         check("Gaming lead story" not in ai_page, "category content leaked onto AI page")
+        front_page = (current / current_date / "index.html").read_text()
+        check("<h1>Front Page</h1>" in front_page, front_page)
+        for key in news.TOPIC_ORDER:
+            marker = news.TOPICS[key]["web_title"]
+            expected = (
+                "AI &lt;script&gt;alert(1)&lt;/script&gt; lead"
+                if key == "ai-tech"
+                else f"{marker} lead story".replace("&", "&amp;")
+            )
+            check(expected in front_page, marker)
+        check("FRONT PAGE" in (current / "archive" / "index.html").read_text().upper(),
+              "archive omitted front-page links")
         check((current / current_date / "gaming" / "index.html").exists(), "gaming page missing")
         check((current / older_date / "gaming" / "index.html").exists(), "historical page missing")
         check("Legacy gaming story" in (current / older_date / "gaming" / "index.html").read_text(),
@@ -151,6 +191,7 @@ def test_publish_builds_separate_history_and_one_email() -> None:
 def main() -> None:
     tests = [
         test_legacy_html_migration,
+        test_digest_meta_and_truncated_copy_are_rewritten,
         test_publish_builds_separate_history_and_one_email,
     ]
     for test in tests:

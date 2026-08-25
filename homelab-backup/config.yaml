@@ -82,10 +82,14 @@ targets:
     type: directory
     source: /home/carter/k3s
 
-  # Durable source artifacts for news.carter2099.com. Static HTML is regenerated.
-  - name: daily-news-publications
+  # Durable publications, attention observations, and mail markers for Daily News.
+  # Static releases are regenerated from these sources and stay out of R2.
+  - name: daily-news-data
     type: directory
-    source: /home/carter/digests/news/publications
+    source: /home/carter/digests/news
+    excludes:
+      - releases
+      - current
 
   - name: omp-web-app
     type: directory

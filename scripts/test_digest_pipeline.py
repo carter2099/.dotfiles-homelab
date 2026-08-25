@@ -91,13 +91,13 @@ def test_cross_topic_dedup_precedes_fetch_queue() -> None:
             {
                 "title": "Duplicate",
                 "url": "https://www.example.com/shared",
-                "importance": "high",
+                "editorial_significance": "high",
                 "date_published": "2026-08-10",
             },
             {
                 "title": "Unique",
                 "url": "https://example.com/unique",
-                "importance": "medium",
+                "editorial_significance": "medium",
                 "date_published": "2026-08-10",
             },
         ]
@@ -108,6 +108,92 @@ def test_cross_topic_dedup_precedes_fetch_queue() -> None:
         check([item["title"] for item in queue] == ["Unique"], f"queue={queue!r}")
         artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
         check(len(artifact["cross_topic_rejected"]) == 1, "skip was not audited")
+
+
+def test_attention_phase_persists_durable_observations() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "run" / "2026-08-25"
+        run_dir.mkdir(parents=True)
+        fresh = [{
+            "title": "Observed event",
+            "url": "https://example.com/observed",
+            "editorial_significance": "medium",
+        }]
+        ongoing = [{
+            "title": "Older event",
+            "url": "https://example.com/older",
+            "editorial_significance": "high",
+        }]
+        scored = [{
+            **fresh[0],
+            "priority_score": 82.0,
+            "priority_explanation": "Observed coverage breakout.",
+            "attention": {"status": "ok", "confidence": 0.8},
+        }]
+        artifact = {
+            "schema_version": 1,
+            "provider": "GDELT DOC 2.0",
+            "observed_at": "2026-08-25T12:00:00+00:00",
+            "requests": 1,
+            "cache_hits": 0,
+            "available": 1,
+            "unavailable": 0,
+            "observations": [],
+        }
+        with (
+            patch.object(digest, "ATTENTION_CACHE_DIR", root / "cache"),
+            patch.object(digest, "ATTENTION_ARCHIVE_DIR", root / "attention"),
+            patch("digest_runner.score_attention", return_value=(scored, artifact)),
+        ):
+            scored_fresh, scored_ongoing = digest.phase_2b_attention(
+                digest.TOPICS["ai-tech"], fresh, ongoing, run_dir
+            )
+        check(scored_fresh[0]["priority_score"] == 82.0, scored_fresh)
+        check(scored_ongoing[0]["priority_score"] == 100.0, scored_ongoing)
+        check((run_dir / "02b-attention.json").exists(), "run attention artifact missing")
+        durable = root / "attention" / "2026-08-25" / "ai-tech.json"
+        check(durable.exists(), "durable attention observation missing")
+
+
+def test_phase_three_uses_product_priority() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "ai-tech" / "2026-08-25"
+        run_dir.mkdir(parents=True)
+        fresh = [
+            {
+                "title": "High consequence, quieter coverage",
+                "url": "https://example.com/consequence",
+                "editorial_significance": "high",
+                "priority_score": 76.0,
+                "date_published": "2026-08-25",
+            },
+            {
+                "title": "Medium consequence, attention breakout",
+                "url": "https://example.com/breakout",
+                "editorial_significance": "medium",
+                "priority_score": 89.0,
+                "date_published": "2026-08-25",
+            },
+        ]
+        with patch.object(digest, "DIGESTS_DIR", root):
+            queue, _ = digest.phase_3_rank(
+                digest.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
+            )
+        check(
+            [item["title"] for item in queue]
+            == [
+                "Medium consequence, attention breakout",
+                "High consequence, quieter coverage",
+            ],
+            queue,
+        )
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        check(
+            artifact["ranking_schema_version"] == digest.RANKING_SCHEMA_VERSION,
+            artifact,
+        )
 
 
 def test_phase_four_concurrency_and_shared_cache() -> None:
@@ -176,7 +262,7 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
             "source_domain": "example.com",
             "summary": "Primary verified summary.",
             "category": "Research",
-            "importance": "high",
+            "editorial_significance": "high",
             "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
@@ -187,7 +273,7 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
             "source_domain": "second.example",
             "summary": "Secondary verified summary.",
             "category": "Policy",
-            "importance": "medium",
+            "editorial_significance": "medium",
             "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
@@ -199,7 +285,7 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
         "category": "Research",
         "latest_dev": "Previous development.",
         "status": "active",
-        "importance": "high",
+        "editorial_significance": "high",
         "first_seen": "2026-08-08",
         "last_updated": "2026-08-09",
         "developments": [
@@ -239,7 +325,7 @@ def test_editorial_validation_and_state_application() -> None:
                 "story_url": "https://example.com/existing",
                 "evidence_candidate_ids": [same_story_id],
                 "latest_dev": "New verified development.",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             },
             {
@@ -334,7 +420,7 @@ def test_editorial_drops_stale_fresh_selection() -> None:
             "candidate_id": stale["candidate_id"],
             "evidence_candidate_ids": [stale["candidate_id"]],
             "latest_dev": "Prices still climbing.",
-            "importance": "high",
+            "editorial_significance": "high",
             "status": "active",
         }],
     }
@@ -419,7 +505,7 @@ def test_editorial_caps_source_concentration() -> None:
             "source_domain": "techcrunch.com",
             "summary": f"Verified summary {index}.",
             "category": "Research",
-            "importance": "high" if index == 0 else "medium",
+            "editorial_significance": "high" if index == 0 else "medium",
             "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
@@ -432,7 +518,7 @@ def test_editorial_caps_source_concentration() -> None:
             "source_domain": "other.example",
             "summary": "Verified other summary.",
             "category": "Policy",
-            "importance": "medium",
+            "editorial_significance": "medium",
             "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
@@ -479,14 +565,14 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
         fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
         stale_day = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
 
-        def build(title: str, url: str, day: str, importance: str) -> dict:
+        def build(title: str, url: str, day: str, significance: str) -> dict:
             return {
                 "title": title,
                 "url": url,
                 "source_domain": "example.com",
                 "summary": f"{title} verified summary.",
                 "category": "Research",
-                "importance": importance,
+                "editorial_significance": significance,
                 "date_published": day,
                 "date_confirmed": day,
                 "date_tag": "fresh" if day == fresh_day else "ongoing",
@@ -526,7 +612,7 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
                 "candidate_id": fresh_c_id,
                 "evidence_candidate_ids": [fresh_c_id],
                 "latest_dev": "Reviewed factual summary.",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             }],
             "rejected": [],
@@ -595,7 +681,7 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
             "source_domain": "example.com",
             "summary": "Prices up as much as 39%.",
             "category": "GPUs",
-            "importance": "high",
+            "editorial_significance": "high",
             "date_published": stale_day,
             "date_confirmed": stale_day,
             "date_tag": "ongoing",
@@ -617,7 +703,7 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
                 "candidate_id": candidate_id,
                 "evidence_candidate_ids": [candidate_id],
                 "latest_dev": "Prices spiked 39%.",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             }],
             "rejected": [],
@@ -738,7 +824,7 @@ def test_phase_six_fallback_and_review_chain() -> None:
                 "candidate_id": selected_id,
                 "rank": 1,
                 "editorial_summary": "Reviewed factual summary.",
-                "selection_reason": "Highest importance.",
+                "selection_reason": "Highest product priority.",
                 "related_story_url": None,
             }],
             "selected_ongoing": [],
@@ -747,7 +833,7 @@ def test_phase_six_fallback_and_review_chain() -> None:
                 "candidate_id": selected_id,
                 "evidence_candidate_ids": [selected_id],
                 "latest_dev": "Reviewed factual summary.",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             }],
             "rejected": [],
@@ -802,7 +888,7 @@ def test_editorial_proposal_retries_primary_before_fallback() -> None:
                 "candidate_id": selected_id,
                 "rank": 1,
                 "editorial_summary": "Retried primary summary.",
-                "selection_reason": "Highest importance.",
+                "selection_reason": "Highest product priority.",
                 "related_story_url": None,
             }],
             "selected_ongoing": [],
@@ -811,7 +897,7 @@ def test_editorial_proposal_retries_primary_before_fallback() -> None:
                 "candidate_id": selected_id,
                 "evidence_candidate_ids": [selected_id],
                 "latest_dev": "Retried primary summary.",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             }],
             "rejected": [],
@@ -874,7 +960,7 @@ def test_editorial_critic_retries_primary_after_transient_error() -> None:
                 "candidate_id": selected_id,
                 "rank": 1,
                 "editorial_summary": "Reviewed factual summary.",
-                "selection_reason": "Highest importance.",
+                "selection_reason": "Highest product priority.",
                 "related_story_url": None,
             }],
             "selected_ongoing": [],
@@ -883,7 +969,7 @@ def test_editorial_critic_retries_primary_after_transient_error() -> None:
                 "candidate_id": selected_id,
                 "evidence_candidate_ids": [selected_id],
                 "latest_dev": "Reviewed factual summary.",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             }],
             "rejected": [],
@@ -944,7 +1030,7 @@ def test_critic_rejection_fails_closed() -> None:
                 "candidate_id": selected_id,
                 "evidence_candidate_ids": [selected_id],
                 "latest_dev": "Proposed summary.",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
             }],
         }
@@ -962,7 +1048,7 @@ def test_critic_rejection_fails_closed() -> None:
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(len(fresh) == 2, "critic rejection did not use source-ranked fallback")
         # Rejected state cannot apply. The deterministic fallback records only
-        # selected high-importance roots; medium one-offs are not follow-up
+        # selected high-significance roots; medium one-offs are not follow-up
         # candidates for Developing and Ongoing.
         check(
             not any(
@@ -984,7 +1070,7 @@ def test_critic_rejection_fails_closed() -> None:
         check(
             all(
                 story.get("last_updated") == today
-                and story.get("importance") == "high"
+                and story.get("editorial_significance") == "high"
                 and len(story.get("developments", [])) == 1
                 for story in added.values()
             ),
@@ -996,20 +1082,32 @@ def test_critic_rejection_fails_closed() -> None:
         )
 
 
-def test_intro_boundary_and_deterministic_render() -> None:
+def test_standfirst_boundary_and_deterministic_render() -> None:
     stories = [{"title": "Safe <Title>", "summary": "Verified 12% result."}]
-    valid, _ = digest._validate_intro(
-        "Today’s result reached 12%. The verified change leads the digest.", stories
+    valid, _ = digest._validate_standfirst(
+        "Verified results reached 12%. The source-backed change reshapes the market.",
+        stories,
     )
-    check(valid, "source-backed intro was rejected")
-    valid, reason = digest._validate_intro(
-        "Today’s result reached 99%. The change leads the digest.", stories
+    check(valid, "source-backed newspaper standfirst was rejected")
+    valid, reason = digest._validate_standfirst(
+        "Verified results reached 99%. The change reshapes the market.", stories
     )
     check(not valid and "99" in reason, reason)
-    valid, reason = digest._validate_intro(
-        "UnknownAI leads today’s digest. The verified change follows.", stories
+    valid, reason = digest._validate_standfirst(
+        "Today’s digest leads with the verified 12% result. Read on for details.",
+        stories,
     )
-    check(not valid and "unknownai" in reason, reason)
+    check(not valid and "meta language" in reason, reason)
+    valid, reason = digest._validate_standfirst(
+        "Verified results reached 12% while the market", stories
+    )
+    check(not valid and "mid-sentence" in reason, reason)
+    fallback = digest._fallback_standfirst(
+        [{"summary": "A verified change occurred. Additional detail follows."}], []
+    )
+    check(fallback == "A verified change occurred.", fallback)
+    clipped = digest._clean_editorial_text("word " * 300, limit=80)
+    check(clipped.endswith("word…") and len(clipped) <= 81, clipped)
 
     fresh = [{
         "title": "Safe <Title>",
@@ -1025,7 +1123,7 @@ def test_intro_boundary_and_deterministic_render() -> None:
         "why_still_relevant": "New evidence.",
     }]
     rendered = digest._render_digest_html(
-        {"title": "Test Digest"}, fresh, ongoing, "Approved intro."
+        {"title": "Test Section"}, fresh, ongoing, "Verified source-backed standfirst."
     )
     check("Safe &lt;Title&gt;" in rendered, "title was not escaped")
     check('href="https://example.com/story?a=1&amp;b=2"' in rendered,
@@ -1111,7 +1209,7 @@ def test_tracker_updates_require_material_evidence() -> None:
     )
 
 
-def test_developing_section_requires_importance_and_multiple_dates() -> None:
+def test_developing_section_requires_significance_and_multiple_dates() -> None:
     """One-off and non-high stories never qualify, regardless of age/touches."""
     candidates, _, _ = editorial_fixture()
     one_off = {
@@ -1120,7 +1218,7 @@ def test_developing_section_requires_importance_and_multiple_dates() -> None:
         "category": "Industry",
         "latest_dev": "The original announcement.",
         "status": "active",
-        "importance": "high",
+        "editorial_significance": "high",
         "first_seen": "2026-08-20",
         # A legacy display touch must not count as evidence.
         "last_updated": "2026-08-24",
@@ -1131,7 +1229,7 @@ def test_developing_section_requires_importance_and_multiple_dates() -> None:
         "category": "Industry",
         "latest_dev": "A second minor update.",
         "status": "active",
-        "importance": "medium",
+        "editorial_significance": "medium",
         "first_seen": "2026-08-20",
         "last_updated": "2026-08-22",
         "developments": [
@@ -1145,7 +1243,7 @@ def test_developing_section_requires_importance_and_multiple_dates() -> None:
         "category": "Policy",
         "latest_dev": "Officials issued a binding decision.",
         "status": "active",
-        "importance": "high",
+        "editorial_significance": "high",
         "first_seen": "2026-08-20",
         "last_updated": "2026-08-22",
         "developments": [
@@ -1180,14 +1278,14 @@ def test_developing_section_requires_importance_and_multiple_dates() -> None:
     )
 
 
-def test_followup_research_targets_prior_high_importance_stories() -> None:
+def test_followup_research_targets_prior_high_significance_stories() -> None:
     today = datetime(2026, 8, 25, tzinfo=timezone.utc).date()
     stories = {
         "stories": [
             {
                 "title": "Prior high story",
                 "url": "https://tracker.example/high",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
                 "first_seen": "2026-08-24",
                 "last_updated": "2026-08-24",
@@ -1195,7 +1293,7 @@ def test_followup_research_targets_prior_high_importance_stories() -> None:
             {
                 "title": "Prior medium story",
                 "url": "https://tracker.example/medium",
-                "importance": "medium",
+                "editorial_significance": "medium",
                 "status": "active",
                 "first_seen": "2026-08-24",
                 "last_updated": "2026-08-24",
@@ -1203,7 +1301,7 @@ def test_followup_research_targets_prior_high_importance_stories() -> None:
             {
                 "title": "Same-day high story",
                 "url": "https://tracker.example/today",
-                "importance": "high",
+                "editorial_significance": "high",
                 "status": "active",
                 "first_seen": "2026-08-25",
                 "last_updated": "2026-08-25",
@@ -1223,7 +1321,7 @@ def test_tracker_retention_uses_evidence_inactivity() -> None:
     active_long_running = {
         "title": "Long-running active crisis",
         "url": "https://tracker.example/active",
-        "importance": "high",
+        "editorial_significance": "high",
         "status": "active",
         "first_seen": "2026-08-01",
         "last_updated": "2026-08-24",
@@ -1235,7 +1333,7 @@ def test_tracker_retention_uses_evidence_inactivity() -> None:
     inactive_active = {
         "title": "Recently stalled story",
         "url": "https://tracker.example/stalled",
-        "importance": "high",
+        "editorial_significance": "high",
         "status": "active",
         "first_seen": "2026-08-10",
         "last_updated": "2026-08-20",
@@ -1247,7 +1345,7 @@ def test_tracker_retention_uses_evidence_inactivity() -> None:
     expired_cooled = {
         "title": "Expired cooled story",
         "url": "https://tracker.example/expired",
-        "importance": "high",
+        "editorial_significance": "high",
         "status": "cooled",
         "first_seen": "2026-08-01",
         "last_updated": "2026-08-10",
@@ -1280,7 +1378,7 @@ def test_ongoing_resurface_cap_cools_recurring_story() -> None:
         "category": "Research",
         "latest_dev": "No new development.",
         "status": "active",
-        "importance": "medium",
+        "editorial_significance": "medium",
         "first_seen": "2026-08-18",
         "last_updated": "2026-08-21",
     }]}
@@ -1349,7 +1447,7 @@ def test_ongoing_resurface_cap_cools_recurring_story() -> None:
                 "story_url": story_url,
                 "evidence_candidate_ids": ["candidate-x"],
                 "latest_dev": "New development.",
-                "importance": "medium",
+                "editorial_significance": "medium",
                 "status": "active",
             }],
         }
@@ -1369,7 +1467,7 @@ def test_editorial_floor_and_publication_artifact() -> None:
         "category": "Policy",
         "latest_dev": "Only one minor report.",
         "status": "active",
-        "importance": "low",
+        "editorial_significance": "low",
         "first_seen": "2026-08-10",
         "last_updated": "2026-08-10",
     }
@@ -1379,7 +1477,7 @@ def test_editorial_floor_and_publication_artifact() -> None:
         "category": "Policy",
         "latest_dev": "A binding second development.",
         "status": "active",
-        "importance": "high",
+        "editorial_significance": "high",
         "first_seen": "2026-08-09",
         "last_updated": "2026-08-10",
         "developments": [
@@ -1442,20 +1540,26 @@ def test_editorial_floor_and_publication_artifact() -> None:
         digest_dir.mkdir(parents=True)
         run_dir.mkdir()
         (run_dir / "06-curated.json").write_text(json.dumps({"fresh": [], "ongoing": []}))
-        (run_dir / "07-intro.json").write_text(json.dumps({
-            "intro": "Two verified stories lead this published World edition."
+        (run_dir / "07-standfirst.json").write_text(json.dumps({
+            "prompt_version": digest.STANDFIRST_PROMPT_VERSION,
+            "standfirst": "Two verified stories reshape policy and public debate."
         }))
         fresh_story = {
             "title": "First",
             "url": "https://example.com/a",
             "summary": "First source-backed summary.",
             "category": "Policy",
+            "editorial_significance": "high",
+            "priority_score": 91.5,
+            "priority_explanation": "High significance and broad observed coverage.",
             "candidate_id": "private-editorial-id",
         }
         ongoing_story = {
             "title": "Second",
             "url": "https://example.com/b",
             "summary": "Second source-backed summary.",
+            "editorial_significance": "high",
+            "priority_score": 100.0,
             "why_still_relevant": "A material development occurred today.",
             "selection_reason": "private editorial reasoning",
         }
@@ -1475,7 +1579,8 @@ def test_editorial_floor_and_publication_artifact() -> None:
               "daily HTML archive missing")
         publication = json.loads(publication_path.read_text())
         check(publication["slug"] == "world", publication)
-        check(publication["intro"].startswith("Two verified"), publication["intro"])
+        check(publication["schema_version"] == 2, publication)
+        check(publication["standfirst"].startswith("Two verified"), publication["standfirst"])
         check(len(publication["fresh"]) + len(publication["ongoing"]) == 2, publication)
         check("candidate_id" not in publication["fresh"][0], publication["fresh"][0])
         check("selection_reason" not in publication["ongoing"][0], publication["ongoing"][0])
@@ -1504,7 +1609,7 @@ def test_listing_urls_rejected() -> None:
             "source_domain": "theguardian.com",
             "summary": "Search result title on the listing page.",
             "category": "Technology",
-            "importance": "high",
+            "editorial_significance": "high",
             "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
@@ -1516,7 +1621,7 @@ def test_listing_urls_rejected() -> None:
         "category": "Technology",
         "latest_dev": "Development.",
         "status": "active",
-        "importance": "medium",
+        "editorial_significance": "medium",
         "first_seen": "2026-08-18",
         "last_updated": "2026-08-19",
     }
@@ -1534,7 +1639,7 @@ def test_listing_urls_rejected() -> None:
             "story_url": listing,
             "evidence_candidate_ids": [candidates[0]["candidate_id"]],
             "latest_dev": "Updated.",
-            "importance": "medium",
+            "editorial_significance": "medium",
             "status": "active",
         }],
     }
@@ -1607,7 +1712,7 @@ def test_asset_cdn_urls_rejected() -> None:
             "source_domain": "theregister.com",
             "summary": "Baidu chip demand rising.",
             "category": "AI Infrastructure",
-            "importance": "high",
+            "editorial_significance": "high",
             "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
@@ -1619,7 +1724,7 @@ def test_asset_cdn_urls_rejected() -> None:
         "category": "AI Infrastructure",
         "latest_dev": "Development.",
         "status": "active",
-        "importance": "medium",
+        "editorial_significance": "medium",
         "first_seen": "2026-08-20",
         "last_updated": "2026-08-20",
     }
@@ -1637,7 +1742,7 @@ def test_asset_cdn_urls_rejected() -> None:
             "story_url": cdn,
             "evidence_candidate_ids": [candidates[0]["candidate_id"]],
             "latest_dev": "Updated.",
-            "importance": "medium",
+            "editorial_significance": "medium",
             "status": "active",
         }],
     }
@@ -1728,6 +1833,8 @@ def main() -> None:
         test_url_normalization,
         test_article_cache_contract,
         test_cross_topic_dedup_precedes_fetch_queue,
+        test_attention_phase_persists_durable_observations,
+        test_phase_three_uses_product_priority,
         test_phase_four_concurrency_and_shared_cache,
         test_editorial_validation_and_state_application,
         test_editorial_critic_patch_contract,
@@ -1743,10 +1850,10 @@ def main() -> None:
         test_editorial_proposal_retries_primary_before_fallback,
         test_editorial_critic_retries_primary_after_transient_error,
         test_critic_rejection_fails_closed,
-        test_intro_boundary_and_deterministic_render,
+        test_standfirst_boundary_and_deterministic_render,
         test_tracker_updates_require_material_evidence,
-        test_developing_section_requires_importance_and_multiple_dates,
-        test_followup_research_targets_prior_high_importance_stories,
+        test_developing_section_requires_significance_and_multiple_dates,
+        test_followup_research_targets_prior_high_significance_stories,
         test_tracker_retention_uses_evidence_inactivity,
         test_ongoing_resurface_cap_cools_recurring_story,
         test_editorial_floor_and_publication_artifact,

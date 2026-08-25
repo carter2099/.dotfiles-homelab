@@ -3460,6 +3460,8 @@ def _audit_collector_3_digest_quality():
                     "date": d.name,
                     "artifacts": artifacts,
                     "placeholder_leaks": placeholder_count,
+                    "attention_artifact": "02b-attention.json" in artifacts,
+                    "standfirst_artifact": "07-standfirst.json" in artifacts,
                 })
                 evidence["placeholder_leakage"] += placeholder_count
         evidence["topics"][topic] = tev
@@ -3481,18 +3483,61 @@ def _audit_collector_3_digest_quality():
                 entry = {"exists": path.exists(), "valid": False, "stories": 0}
                 if path.exists():
                     try:
-                        publication = json.loads(path.read_text())
+                        publication_text = path.read_text()
+                        publication = json.loads(publication_text)
+                        stories = (
+                            publication.get("fresh", [])
+                            + publication.get("ongoing", [])
+                        )
+                        standfirst = publication.get("standfirst", "")
+                        attention_path = (
+                            news_root / "attention" / date_dir.name / f"{slug}.json"
+                        )
                         entry.update({
                             "valid": (
                                 publication.get("date") == date_dir.name
                                 and publication.get("slug") == slug
+                                and publication.get("schema_version") == 2
                             ),
                             "status": publication.get("status", ""),
-                            "stories": len(publication.get("fresh", []))
-                            + len(publication.get("ongoing", [])),
+                            "stories": len(stories),
+                            "ranking_schema_version": publication.get(
+                                "ranking_schema_version"
+                            ),
+                            "significance_complete": all(
+                                story.get("editorial_significance")
+                                in {"high", "medium", "low"}
+                                for story in stories
+                            ),
+                            "priority_complete": all(
+                                isinstance(story.get("priority_score"), (int, float))
+                                for story in stories
+                            ),
+                            "attention_complete": (
+                                date_dir.name < "2026-08-25"
+                                or all(
+                                    isinstance(story.get("attention"), dict)
+                                    and story["attention"].get("status")
+                                    in {"ok", "no_matches", "unavailable", "out_of_scope"}
+                                    for story in stories
+                                )
+                            ),
+                            "attention_artifact_exists": (
+                                date_dir.name < "2026-08-25" or attention_path.exists()
+                            ),
+                            "standfirst_complete": (
+                                isinstance(standfirst, str)
+                                and 40 <= len(standfirst) <= 900
+                                and bool(re.search(r"""[.!?…]["'’”)]*$""", standfirst))
+                                and not bool(re.search(
+                                    r"today[’']s digest|digest leads|read on|also in focus",
+                                    standfirst,
+                                    re.IGNORECASE,
+                                ))
+                            ),
                             "placeholder_leaks": len(re.findall(
                                 r"\{\{[A-Z_]+\}\}|https?://example\.com\b",
-                                path.read_text(),
+                                publication_text,
                             )),
                         })
                     except (json.JSONDecodeError, OSError) as error:
@@ -3523,8 +3568,8 @@ def _audit_collector_3_digest_quality():
         "site_index_exists": (current_site / "index.html").exists(),
         "build": build,
         "r2_target_configured": (
-            "name: daily-news-publications" in backup_config
-            and "source: /home/carter/digests/news/publications" in backup_config
+            "name: daily-news-data" in backup_config
+            and "source: /home/carter/digests/news" in backup_config
         ),
         "backup_config_mtime": (
             datetime.fromtimestamp(
@@ -3821,6 +3866,19 @@ def _audit_collector_6_notes_resources():
     # R2 size
     r2_list = run_capture(
         [str(HOME / "homelab-backup" / "homelab-backup"), "list"])
+    news_state_sizes = {}
+    news_root = HOME / "digests" / "news"
+    for name in ("publications", "attention", "mail"):
+        root = news_root / name
+        total = 0
+        if root.exists():
+            for path in root.rglob("*"):
+                try:
+                    if path.is_file():
+                        total += path.stat().st_size
+                except OSError:
+                    pass
+        news_state_sizes[name] = total
 
     return {
         "disk_df": run_capture(["df", "-h", "/"]),
@@ -3828,6 +3886,7 @@ def _audit_collector_6_notes_resources():
         "oom_count": oom_count,
         "exit_255_containers": exit_255,
         "r2_list_tail": "\n".join(r2_list.splitlines()[-20:]) if r2_list else "",
+        "daily_news_state_bytes": news_state_sizes,
         "journal_size": run_capture(
             ["journalctl", "--disk-usage"]),
     }
@@ -3925,14 +3984,14 @@ AUDIT_SECTIONS = [
         "artifact": "07-audit-3-digests.json",
         "timeout": 600,
         "guidance": (
-            "Judge the unchanged curation pipeline plus its publication contract, focusing on the "
-            "last 48 hours and ongoing systemic regressions: run completeness, story freshness, "
-            "cross-day duplication, stories-in-flight.json hygiene (5d cool / 7d prune), five valid "
-            "publication JSON artifacts per completed date, active static-site build, and one "
-            "summary-email marker for dates on/after the 2026-08-25 publication cutover, plus the "
-            "daily-news-publications target in the existing R2 backup. Do NOT file historical "
-            "empty-digest days as findings once known; only flag recent misses. Sample up "
-            "to 3 source links read-only."
+            "Judge Daily News curation and publication over the last 48 hours plus systemic "
+            "regressions: run completeness, freshness, cross-day duplication, stories-in-flight "
+            "hygiene (5d cool / 7d prune), five schema-v2 publications, complete newspaper "
+            "standfirsts, editorial_significance/priority_score separation, observable attention "
+            "records, active front page, and one summary-email marker after the 2026-08-25 cutover. "
+            "Attention may be `unavailable` when GDELT fails; that is valid only with confidence 0 "
+            "and editorial-only priority—not invented popularity. Require the daily-news-data R2 "
+            "target. Do not reopen known historical empty days. Sample up to 3 source links read-only."
         ),
     },
     {
@@ -3971,10 +4030,11 @@ AUDIT_SECTIONS = [
         "artifact": "07-audit-6-resources.json",
         "timeout": 600,
         "guidance": (
-            "Interpret the resource evidence: disk / usage and growth, docker system df (reclaimable), journal "
-            "size, R2 backup archive growth, OOM kills, exited containers (the known intermittent exit-255 "
-            "pattern — flag repeats on the same container). Only report ATTENTION when a trend is actionable "
-            "(e.g. disk >80%, steady week-over-week growth, recurring OOM on one service)."
+            "Interpret the resource evidence: disk usage/growth, docker reclaimable space, journal "
+            "size, R2 archive growth, Daily News publication/attention/mail growth, OOM kills, and "
+            "exited containers (known intermittent exit-255; flag repeats on one container). Report "
+            "ATTENTION only for actionable trends such as disk >80%, sustained week-over-week "
+            "attention-history growth that threatens R2 limits, or recurring OOM."
         ),
     },
     {

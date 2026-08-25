@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from digest_runner import DIGESTS_DIR, TOPICS
+from digest_runner import (
+    DIGESTS_DIR,
+    TOPICS,
+    _fallback_standfirst,
+    _validate_standfirst,
+)
+from news_attention import EDITORIAL_POINTS, normalize_editorial_significance
 from send_digest import send as smtp_send
 
 HOME = Path.home()
@@ -27,7 +33,7 @@ ASSET_DIR = HOME / "news" / "assets"
 BASE_URL = "https://news.carter2099.com"
 SUMMARY_RECIPIENT = "carter2099@pm.me"
 TOPIC_ORDER = tuple(TOPICS)
-PUBLICATION_SCHEMA_VERSION = 1
+PUBLICATION_SCHEMA_VERSION = 2
 
 
 class LegacyDigestParser(HTMLParser):
@@ -37,7 +43,7 @@ class LegacyDigestParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.section: str | None = None
         self.title = ""
-        self.intro = ""
+        self.standfirst = ""
         self.fresh: list[dict[str, str]] = []
         self.ongoing: list[dict[str, str]] = []
         self._h1: list[str] | None = None
@@ -104,7 +110,7 @@ class LegacyDigestParser(HTMLParser):
             text = _clean_text("".join(self._p))
             if self.section is None:
                 if self.title and len(text) >= 40 and "carter2099.com" not in text:
-                    self.intro = self.intro or text
+                    self.standfirst = self.standfirst or text
             elif self._current_story is not None and not self._p_had_story_link and text:
                 if text.startswith("↳"):
                     self._current_story["why_still_relevant"] = text.lstrip("↳ ")
@@ -134,20 +140,42 @@ def _safe_url(value: Any) -> str:
     return candidate
 
 
-def _public_story(story: dict[str, Any], *, ongoing: bool = False) -> dict[str, str]:
-    result: dict[str, str] = {}
+def _public_story(story: dict[str, Any], *, ongoing: bool = False) -> dict[str, Any]:
+    normalized = normalize_editorial_significance(dict(story))
+    result: dict[str, Any] = {}
     for key in (
         "title", "source_domain", "date_published", "date_confirmed", "summary",
-        "category", "importance", "author",
+        "category", "editorial_significance", "author", "event",
+        "priority_explanation",
     ):
-        value = _clean_text(story.get(key))
+        value = _clean_text(normalized.get(key))
         if value:
             result[key] = value
-    url = _safe_url(story.get("url"))
+    url = _safe_url(normalized.get("url"))
     if url:
         result["url"] = url
+    try:
+        result["priority_score"] = round(float(
+            normalized.get(
+                "priority_score",
+                EDITORIAL_POINTS[normalized["editorial_significance"]],
+            )
+        ), 1)
+    except (TypeError, ValueError):
+        result["priority_score"] = EDITORIAL_POINTS[normalized["editorial_significance"]]
+    attention = normalized.get("attention")
+    if isinstance(attention, dict):
+        result["attention"] = {
+            key: attention.get(key)
+            for key in (
+                "schema_version", "provider", "status", "attention_now",
+                "digest_prominence", "confidence", "age_bucket",
+                "normalized_signals", "evidence",
+            )
+            if attention.get(key) is not None
+        }
     if ongoing:
-        why = _clean_text(story.get("why_still_relevant"))
+        why = _clean_text(normalized.get("why_still_relevant"))
         if why:
             result["why_still_relevant"] = why
     return result
@@ -167,11 +195,10 @@ def _empty_publication(topic: dict[str, Any], issue_date: str) -> dict[str, Any]
         "date": issue_date,
         "slug": topic["web_slug"],
         "title": topic["web_title"],
-        "digest_title": topic["title"],
         "source_category": topic["category"],
         "status": "unavailable",
         "notice": "",
-        "intro": "No edition was published for this category on this date.",
+        "standfirst": "No section was published for this category on this date.",
         "fresh": [],
         "ongoing": [],
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -185,7 +212,7 @@ def _normalize_publication(
     publication.update({
         "status": _clean_text(raw.get("status")) or "published",
         "notice": _clean_text(raw.get("notice")),
-        "intro": _clean_text(raw.get("intro")),
+        "standfirst": _clean_text(raw.get("standfirst") or raw.get("intro")),
         "generated_at": _clean_text(raw.get("generated_at"))
         or datetime.now(timezone.utc).isoformat(),
     })
@@ -200,11 +227,17 @@ def _normalize_publication(
             for story in raw.get("ongoing", []) if isinstance(story, dict)
         ) if item.get("title") and item.get("url")
     ]
-    if not publication["intro"]:
-        count = len(publication["fresh"]) + len(publication["ongoing"])
-        publication["intro"] = (
-            f"This edition contains {count} curated {'story' if count == 1 else 'stories'}."
-            if count else "No stories were selected for this edition."
+    publication["fresh"].sort(
+        key=lambda item: float(item.get("priority_score", 0.0) or 0.0),
+        reverse=True,
+    )
+    valid_standfirst, _ = _validate_standfirst(
+        publication["standfirst"],
+        publication["fresh"] + publication["ongoing"],
+    )
+    if not valid_standfirst:
+        publication["standfirst"] = _fallback_standfirst(
+            publication["fresh"], publication["ongoing"]
         )
     return publication
 
@@ -231,18 +264,22 @@ def _publication_from_run(
     if not isinstance(curated, dict):
         return None
 
-    intro = ""
-    intro_path = run_dir / "07-intro.json"
-    if intro_path.exists():
+    standfirst = ""
+    standfirst_path = run_dir / "07-standfirst.json"
+    legacy_intro_path = run_dir / "07-intro.json"
+    source_path = standfirst_path if standfirst_path.exists() else legacy_intro_path
+    if source_path.exists():
         try:
-            intro_raw = json.loads(intro_path.read_text())
-            if isinstance(intro_raw, dict):
-                intro = _clean_text(intro_raw.get("intro"))
+            copy_raw = json.loads(source_path.read_text())
+            if isinstance(copy_raw, dict):
+                standfirst = _clean_text(
+                    copy_raw.get("standfirst") or copy_raw.get("intro")
+                )
         except (json.JSONDecodeError, OSError):
             pass
     raw = {
         "status": "published" if curated.get("fresh") or curated.get("ongoing") else "empty",
-        "intro": intro,
+        "standfirst": standfirst,
         "fresh": curated.get("fresh", []),
         "ongoing": curated.get("ongoing", []),
         "generated_at": datetime.fromtimestamp(
@@ -264,7 +301,7 @@ def _publication_from_legacy_html(
         return None
     raw = {
         "status": "published",
-        "intro": parser.intro,
+        "standfirst": parser.standfirst,
         "fresh": parser.fresh,
         "ongoing": parser.ongoing,
         "generated_at": datetime.fromtimestamp(
@@ -377,32 +414,39 @@ def _edition_date(issue_date: str) -> str:
     return parsed.strftime("%A, %B %-d, %Y")
 
 
-def _story_meta(story: dict[str, str]) -> str:
-    parts = []
+def _story_meta(story: dict[str, Any], section_title: str = "") -> str:
+    parts = [section_title] if section_title else []
     if story.get("category"):
-        parts.append(story["category"])
+        parts.append(str(story["category"]))
     if story.get("source_domain"):
-        parts.append(story["source_domain"])
+        parts.append(str(story["source_domain"]))
     published = story.get("date_confirmed") or story.get("date_published")
     if published:
-        parts.append(published)
+        parts.append(str(published))
     return " · ".join(parts)
 
 
-def _render_story(story: dict[str, str], *, lead: bool = False, ongoing: bool = False) -> str:
-    title = html.escape(story.get("title", ""))
+def _render_story(
+    story: dict[str, Any],
+    *,
+    lead: bool = False,
+    ongoing: bool = False,
+    section_title: str = "",
+) -> str:
+    title = html.escape(str(story.get("title", "")))
     url = html.escape(_safe_url(story.get("url")), quote=True)
-    summary = html.escape(story.get("summary", ""))
-    meta = html.escape(_story_meta(story))
+    summary = html.escape(str(story.get("summary", "")))
+    meta = html.escape(_story_meta(story, section_title))
     why = ""
     if ongoing and story.get("why_still_relevant"):
         why = (
-            '<p class="story-context"><span>Why it remains relevant</span> '
-            f'{html.escape(story["why_still_relevant"])}</p>'
+            '<p class="story-context"><span>What changed</span> '
+            f'{html.escape(str(story["why_still_relevant"]))}</p>'
         )
     classes = "story lead-story" if lead else ("story ongoing-story" if ongoing else "story")
+    priority = html.escape(str(story.get("priority_score", "")), quote=True)
     return (
-        f'<article class="{classes}">'
+        f'<article class="{classes}" data-priority="{priority}">'
         f'<p class="story-meta">{meta}</p>'
         f'<h2 class="story-title"><a href="{url}" target="_blank" '
         f'rel="noopener noreferrer">{title}<span class="external" aria-hidden="true">↗</span></a></h2>'
@@ -412,7 +456,8 @@ def _render_story(story: dict[str, str], *, lead: bool = False, ongoing: bool = 
 
 
 def _category_nav(issue_date: str, active_slug: str) -> str:
-    links = []
+    front_current = ' aria-current="page"' if active_slug == "front-page" else ""
+    links = [f'<a href="/{issue_date}/"{front_current}>Front Page</a>']
     for key in TOPIC_ORDER:
         topic = TOPICS[key]
         slug = topic["web_slug"]
@@ -433,8 +478,8 @@ def _date_options(dates: list[str], issue_date: str) -> str:
 
 
 def _page_description(publication: dict[str, Any]) -> str:
-    intro = _clean_text(publication.get("intro"))
-    return intro[:157] + "…" if len(intro) > 160 else intro
+    standfirst = _clean_text(publication.get("standfirst"))
+    return standfirst[:157] + "…" if len(standfirst) > 160 else standfirst
 
 
 def render_category_page(
@@ -449,7 +494,7 @@ def render_category_page(
     newer = dates[date_index - 1] if date_index > 0 else None
     older = dates[date_index + 1] if date_index + 1 < len(dates) else None
     count = len(publication["fresh"]) + len(publication["ongoing"])
-    count_text = f"{count} curated {'story' if count == 1 else 'stories'}"
+    count_text = f"{count} {'story' if count == 1 else 'stories'}"
     notice = ""
     if publication.get("notice"):
         notice = f'<aside class="edition-notice">{html.escape(publication["notice"])}</aside>'
@@ -479,7 +524,7 @@ def render_category_page(
     )
     canonical = f"{BASE_URL}/{issue_date}/{slug}/"
     description = html.escape(_page_description(publication), quote=True)
-    intro = html.escape(publication["intro"])
+    standfirst = html.escape(publication["standfirst"])
     page_title = html.escape(f"{title} — {_edition_date(issue_date)}")
 
     return f'''<!doctype html>
@@ -518,8 +563,8 @@ def render_category_page(
 <main id="content" class="shell">
   {notice}
   <section class="introduction" aria-labelledby="briefing-heading">
-    <p class="section-label" id="briefing-heading">Today’s briefing</p>
-    <p class="introduction-copy">{intro}</p>
+    <p class="section-label" id="briefing-heading">In brief</p>
+    <p class="introduction-copy">{standfirst}</p>
   </section>
   <section class="fresh-section" aria-labelledby="fresh-heading">
     <div class="section-heading"><h2 id="fresh-heading">Latest</h2><span>Last 24 hours</span></div>
@@ -532,7 +577,148 @@ def render_category_page(
   <nav class="edition-pagination" aria-label="Adjacent editions">{older_link}{newer_link}</nav>
 </main>
 <footer class="site-footer"><div class="shell">
-  <span>Updated daily after curation completes.</span><a href="/archive/">Browse all editions</a>
+  <span>Updated daily after curation completes. Attention data provided by <a href="https://www.gdeltproject.org/" target="_blank" rel="noopener noreferrer">GDELT</a>.</span><a href="/archive/">Browse all editions</a>
+</div></footer>
+</body>
+</html>
+'''
+
+
+def _front_page_sections(
+    date_editions: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    sections: list[dict[str, Any]] = []
+    all_candidates: list[dict[str, Any]] = []
+    for key in TOPIC_ORDER:
+        topic = TOPICS[key]
+        publication = date_editions.get(topic["web_slug"])
+        if publication is None:
+            continue
+        source = publication["fresh"] or publication["ongoing"]
+        stories = sorted(
+            (dict(story) for story in source),
+            key=lambda story: float(story.get("priority_score", 0.0) or 0.0),
+            reverse=True,
+        )[:2]
+        for story in stories:
+            story["_section_slug"] = topic["web_slug"]
+            story["_section_title"] = topic["web_title"]
+            story["_ongoing"] = not bool(publication["fresh"])
+            all_candidates.append(story)
+        sections.append({
+            "slug": topic["web_slug"],
+            "title": topic["web_title"],
+            "stories": stories,
+        })
+    lead = max(
+        all_candidates,
+        key=lambda story: float(story.get("priority_score", 0.0) or 0.0),
+        default=None,
+    )
+    return lead, sections
+
+
+def render_front_page(
+    date_editions: dict[str, dict[str, Any]],
+    issue_date: str,
+    dates: list[str],
+) -> str:
+    lead, sections = _front_page_sections(date_editions)
+    date_index = dates.index(issue_date)
+    newer = dates[date_index - 1] if date_index > 0 else None
+    older = dates[date_index + 1] if date_index + 1 < len(dates) else None
+    selected_count = sum(len(section["stories"]) for section in sections)
+    if lead is not None:
+        lead_html = _render_story(
+            lead,
+            lead=True,
+            ongoing=bool(lead.get("_ongoing")),
+            section_title=str(lead.get("_section_title", "")),
+        )
+        description_text = _clean_text(lead.get("summary"))
+    else:
+        lead_html = '<p class="empty-state">No front-page stories were selected.</p>'
+        description_text = "The highest-priority stories from each Daily News section."
+
+    section_html = []
+    lead_url = _safe_url(lead.get("url")) if lead else ""
+    for section in sections:
+        stories = [
+            story for story in section["stories"]
+            if _safe_url(story.get("url")) != lead_url
+        ]
+        if stories:
+            cards = "".join(
+                _render_story(
+                    story,
+                    ongoing=bool(story.get("_ongoing")),
+                    section_title=section["title"],
+                )
+                for story in stories
+            )
+        else:
+            cards = '<p class="front-section-reference">Lead story above.</p>'
+        section_html.append(
+            f'<section class="front-section" aria-labelledby="front-{html.escape(section["slug"], quote=True)}">'
+            f'<div class="front-section-heading"><h2 id="front-{html.escape(section["slug"], quote=True)}">'
+            f'<a href="/{issue_date}/{html.escape(section["slug"], quote=True)}/">'
+            f'{html.escape(section["title"])}</a></h2><span>Top coverage</span></div>'
+            f'<div class="front-story-list">{cards}</div></section>'
+        )
+
+    older_link = (
+        f'<a class="edition-link" href="/{older}/"><span>Older front page</span>'
+        f'<strong>{html.escape(_edition_date(older))}</strong></a>'
+        if older else '<span></span>'
+    )
+    newer_link = (
+        f'<a class="edition-link align-right" href="/{newer}/"><span>Newer front page</span>'
+        f'<strong>{html.escape(_edition_date(newer))}</strong></a>'
+        if newer else '<span></span>'
+    )
+    description = html.escape(
+        description_text[:157] + "…" if len(description_text) > 160 else description_text,
+        quote=True,
+    )
+    canonical = f"{BASE_URL}/{issue_date}/"
+    return f'''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Front Page — {html.escape(_edition_date(issue_date))}</title>
+  <meta name="description" content="{description}">
+  <link rel="canonical" href="{canonical}">
+  <link rel="stylesheet" href="/assets/news.css">
+  <script src="/assets/news.js" defer></script>
+</head>
+<body class="front-page">
+<a class="skip-link" href="#content">Skip to stories</a>
+<header class="site-header">
+  <div class="utility-bar shell">
+    <a class="publication-name" href="/{issue_date}/">Daily News</a>
+    <div class="edition-controls">
+      <a class="archive-link" href="/archive/">Archive</a>
+      <label for="edition-date">Edition</label>
+      <select id="edition-date" data-category="front-page">{_date_options(dates, issue_date)}</select>
+    </div>
+  </div>
+  <div class="masthead shell">
+    <p class="eyebrow">{html.escape(_edition_date(issue_date))}</p>
+    <h1>Front Page</h1>
+    <p>{len(sections)} sections · {selected_count} top stories</p>
+  </div>
+  <nav class="category-nav" aria-label="News categories"><div class="shell">
+    {_category_nav(issue_date, "front-page")}
+  </div></nav>
+</header>
+<main id="content" class="shell front-page-main">
+  <section class="front-lead-section" aria-label="Lead story">{lead_html}</section>
+  <div class="front-sections">{''.join(section_html)}</div>
+  <nav class="edition-pagination" aria-label="Adjacent front pages">{older_link}{newer_link}</nav>
+</main>
+<footer class="site-footer"><div class="shell">
+  <span>Priority combines editorial consequence with observed coverage attention. Data provided by <a href="https://www.gdeltproject.org/" target="_blank" rel="noopener noreferrer">GDELT</a>.</span><a href="/archive/">Browse all editions</a>
 </div></footer>
 </body>
 </html>
@@ -544,7 +730,7 @@ def render_archive_page(
 ) -> str:
     rows = []
     for issue_date in dates:
-        links = []
+        links = [f'<a href="/{issue_date}/">Front Page</a>']
         for key in TOPIC_ORDER:
             topic = TOPICS[key]
             slug = topic["web_slug"]
@@ -596,7 +782,7 @@ def build_site(
     asset_dir: Path = ASSET_DIR,
 ) -> Path:
     if not editions:
-        raise ValueError("no digest publications are available")
+        raise ValueError("no news publications are available")
     dates = sorted(editions, reverse=True)
     build_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     release = news_dir / "releases" / build_id
@@ -612,13 +798,10 @@ def build_site(
             publication = date_editions.get(slug) or _empty_publication(topic, issue_date)
             page = render_category_page(publication, issue_date, dates, editions)
             _write_page(release, f"{issue_date}/{slug}", page)
-        first_topic = TOPICS[TOPIC_ORDER[0]]
-        first_publication = date_editions.get(first_topic["web_slug"]) or _empty_publication(
-            first_topic, issue_date
-        )
         _write_page(
-            release, issue_date,
-            render_category_page(first_publication, issue_date, dates, editions),
+            release,
+            issue_date,
+            render_front_page(date_editions, issue_date, dates),
         )
 
     latest = dates[0]
@@ -634,12 +817,8 @@ def build_site(
         )
         _write_page(release, slug, page)
 
-    first_slug = TOPICS[TOPIC_ORDER[0]]["web_slug"]
-    root_publication = editions[latest].get(first_slug)
-    if root_publication is None:
-        root_publication = next(iter(editions[latest].values()))
     (release / "index.html").write_text(
-        render_category_page(root_publication, latest, dates, editions)
+        render_front_page(editions[latest], latest, dates)
     )
     _write_page(release, "archive", render_archive_page(dates, editions))
     (release / "404.html").write_text(
@@ -682,14 +861,14 @@ def render_summary_email(
         topic = TOPICS[key]
         slug = topic["web_slug"]
         publication = editions.get(slug) or _empty_publication(topic, issue_date)
-        intro = html.escape(publication["intro"])
+        standfirst = html.escape(publication["standfirst"])
         link = f"{base_url}/{issue_date}/{slug}/"
         count = len(publication["fresh"]) + len(publication["ongoing"])
         sections.append(f'''
 <tr><td style="padding:22px 30px;border-top:1px solid #dedbd3;">
   <p style="margin:0 0 5px;color:#77736b;font:600 11px/1.3 Arial,sans-serif;text-transform:uppercase;letter-spacing:1.2px;">{count} {'story' if count == 1 else 'stories'}</p>
   <h2 style="margin:0 0 8px;color:#171716;font:700 21px/1.2 Georgia,serif;">{html.escape(topic['web_title'])}</h2>
-  <p style="margin:0 0 12px;color:#45433f;font:14px/1.55 Arial,sans-serif;">{intro}</p>
+  <p style="margin:0 0 12px;color:#45433f;font:14px/1.55 Arial,sans-serif;">{standfirst}</p>
   <a href="{html.escape(link, quote=True)}" style="color:#7b2f2f;font:700 13px/1.4 Arial,sans-serif;text-decoration:none;">Read {html.escape(topic['web_title'])} →</a>
 </td></tr>''')
     today_link = f"{base_url}/{issue_date}/"
@@ -701,8 +880,8 @@ def render_summary_email(
 <tr><td style="padding:30px;border-top:4px solid #171716;">
   <p style="margin:0 0 7px;color:#77736b;font:600 11px/1.3 Arial,sans-serif;text-transform:uppercase;letter-spacing:1.2px;">{html.escape(_edition_date(issue_date))}</p>
   <h1 style="margin:0 0 10px;color:#171716;font:700 32px/1.05 Georgia,serif;">Today’s news</h1>
-  <p style="margin:0 0 18px;color:#45433f;font:15px/1.55 Arial,sans-serif;">Five focused briefings, published together in one daily edition.</p>
-  <a href="{html.escape(today_link, quote=True)}" style="display:inline-block;background:#171716;color:#fffdfa;padding:10px 15px;font:700 13px/1 Arial,sans-serif;text-decoration:none;">Open today’s edition</a>
+  <p style="margin:0 0 18px;color:#45433f;font:15px/1.55 Arial,sans-serif;">The day’s leading coverage across AI, agents, hardware, gaming, and world affairs.</p>
+  <a href="{html.escape(today_link, quote=True)}" style="display:inline-block;background:#171716;color:#fffdfa;padding:10px 15px;font:700 13px/1 Arial,sans-serif;text-decoration:none;">Open the front page</a>
 </td></tr>
 {''.join(sections)}
 <tr><td style="padding:18px 30px;border-top:1px solid #dedbd3;color:#77736b;font:12px/1.5 Arial,sans-serif;">news.carter2099.com</td></tr>
