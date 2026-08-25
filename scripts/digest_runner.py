@@ -59,9 +59,9 @@ ARTICLE_CACHE_DIR = DIGESTS_DIR / ".article-cache"
 
 # ── LLM Proxy ──────────────────────────────────────────────────────────────
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
-MODEL = "openai-codex/gpt-5.6-luna:high"       # OMP-based primary
-MODEL_FALLBACK = "mimo-v2.5"                   # API fallback via opencode-go
-MODEL_REVIEWER = "deepseek-v4-flash"            # independent API critic
+MODEL = "deepseek-v4-flash"                     # API primary
+MODEL_FALLBACK = "mimo-v2.5"                    # API fallback via opencode-go
+MODEL_REVIEWER = "deepseek-v4-flash"            # separate critic pass
 DEFAULT_TIMEOUT = 900
 EDITORIAL_TIMEOUT = 300
 INTRO_TIMEOUT = 90
@@ -4162,7 +4162,7 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true",
                         help="Test mode: isolate output in ~/digests/test/, copy prod SIF, write report")
     parser.add_argument("--model", type=str, default=None,
-                        help="Override the LLM model (e.g. openai-codex/gpt-5.6-luna:high)")
+                        help="Override the LLM model (e.g. deepseek-v4-flash)")
     parser.add_argument("--test-label", type=str, default=None,
                         help="Label for test run directory (default: model name or 'test')")
     args = parser.parse_args()
