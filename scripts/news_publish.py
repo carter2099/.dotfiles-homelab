@@ -29,6 +29,7 @@ NEWS_DIR = DIGESTS_DIR / "news"
 PUBLICATIONS_DIR = NEWS_DIR / "publications"
 RELEASES_DIR = NEWS_DIR / "releases"
 CURRENT_SITE = NEWS_DIR / "current"
+ASSET_VERSION = 2
 ASSET_DIR = HOME / "news" / "assets"
 BASE_URL = "https://news.carter2099.com"
 SUMMARY_RECIPIENT = "carter2099@pm.me"
@@ -535,8 +536,8 @@ def render_category_page(
   <title>{page_title}</title>
   <meta name="description" content="{description}">
   <link rel="canonical" href="{canonical}">
-  <link rel="stylesheet" href="/assets/news.css">
-  <script src="/assets/news.js" defer></script>
+  <link rel="stylesheet" href="/assets/news.css?v={ASSET_VERSION}">
+  <script src="/assets/news.js?v={ASSET_VERSION}" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#content">Skip to stories</a>
@@ -689,8 +690,8 @@ def render_front_page(
   <title>Front Page — {html.escape(_edition_date(issue_date))}</title>
   <meta name="description" content="{description}">
   <link rel="canonical" href="{canonical}">
-  <link rel="stylesheet" href="/assets/news.css">
-  <script src="/assets/news.js" defer></script>
+  <link rel="stylesheet" href="/assets/news.css?v={ASSET_VERSION}">
+  <script src="/assets/news.js?v={ASSET_VERSION}" defer></script>
 </head>
 <body class="front-page">
 <a class="skip-link" href="#content">Skip to stories</a>
@@ -753,7 +754,7 @@ def render_archive_page(
   <title>Archive — Daily News</title>
   <meta name="description" content="Previous daily news editions by date and category.">
   <link rel="canonical" href="{BASE_URL}/archive/">
-  <link rel="stylesheet" href="/assets/news.css">
+  <link rel="stylesheet" href="/assets/news.css?v={ASSET_VERSION}">
 </head>
 <body class="archive-page">
 <a class="skip-link" href="#content">Skip to editions</a>
@@ -824,7 +825,7 @@ def build_site(
     (release / "404.html").write_text(
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>Page not found — Daily News</title><link rel="stylesheet" href="/assets/news.css">'
+        f'<title>Page not found — Daily News</title><link rel="stylesheet" href="/assets/news.css?v={ASSET_VERSION}">'
         '</head><body class="error-page"><main><p class="eyebrow">404</p><h1>Page not found</h1>'
         '<p>The edition or category you requested does not exist.</p><a href="/">Latest news</a>'
         '</main></body></html>'
