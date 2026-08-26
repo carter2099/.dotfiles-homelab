@@ -61,6 +61,14 @@ def write_assets(root: Path) -> Path:
     return assets
 
 
+def test_external_link_arrow_uses_neutral_ink() -> None:
+    css_path = Path(__file__).resolve().parents[1] / "news" / "assets" / "news.css"
+    css = css_path.read_text()
+    block = css.split(".external {", 1)[1].split("}", 1)[0]
+    check("color: var(--ink);" in block, block)
+    check("color: var(--accent);" not in block, block)
+
+
 def test_legacy_html_migration() -> None:
     parser = news.LegacyDigestParser()
     parser.feed("""
@@ -204,6 +212,9 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check("Gaming lead story" not in ai_page, "category content leaked onto AI page")
         front_page = (current / current_date / "index.html").read_text()
         check("<h1>Front Page</h1>" in front_page, front_page)
+        check("Priority combines editorial consequence" not in front_page, front_page)
+        check("<span>Updated daily.</span>" in front_page, front_page)
+        check("/assets/news.css?v=3" in front_page, front_page)
         for key in news.TOPIC_ORDER:
             marker = news.TOPICS[key]["web_title"]
             expected = (
@@ -241,6 +252,7 @@ def test_publish_builds_separate_history_and_one_email() -> None:
 def main() -> None:
     tests = [
         test_legacy_html_migration,
+        test_external_link_arrow_uses_neutral_ink,
         test_digest_meta_and_truncated_copy_are_rewritten,
         test_front_page_guarantees_sections_then_applies_global_floor,
         test_publish_builds_separate_history_and_one_email,

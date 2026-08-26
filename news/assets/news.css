@@ -293,7 +293,7 @@ main.shell {
 .external {
   display: inline-block;
   margin-left: 0.28em;
-  color: var(--accent);
+  color: var(--ink);
   font: 600 0.55em/1 var(--sans);
   vertical-align: 0.45em;
 }

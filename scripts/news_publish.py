@@ -34,7 +34,7 @@ NEWS_DIR = DIGESTS_DIR / "news"
 PUBLICATIONS_DIR = NEWS_DIR / "publications"
 RELEASES_DIR = NEWS_DIR / "releases"
 CURRENT_SITE = NEWS_DIR / "current"
-ASSET_VERSION = 2
+ASSET_VERSION = 3
 ASSET_DIR = HOME / "news" / "assets"
 BASE_URL = "https://news.carter2099.com"
 SUMMARY_RECIPIENT = "carter2099@pm.me"
@@ -761,7 +761,7 @@ def render_front_page(
   <nav class="edition-pagination" aria-label="Adjacent front pages">{older_link}{newer_link}</nav>
 </main>
 <footer class="site-footer"><div class="shell">
-  <span>Priority combines editorial consequence with observed coverage attention. Data provided by <a href="https://www.gdeltproject.org/" target="_blank" rel="noopener noreferrer">GDELT</a>.</span><a href="/archive/">Browse all editions</a>
+  <span>Updated daily.</span><a href="/archive/">Browse all editions</a>
 </div></footer>
 </body>
 </html>
