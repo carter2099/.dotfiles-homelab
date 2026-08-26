@@ -108,7 +108,7 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 
 Each app has a reference doc in `~/notes/docs/homelab/`:
 
-- **Blog** (Rails 8, port 33099) → [`blog.md`](notes/docs/homelab/blog.md)
+- **Blog** (Rails 8, Docker on port 33099; public blog.carter2099.com served via k3s Traefik ingress — tunnel origin is 127.0.0.1:80, not 33099) → [`blog.md`](notes/docs/homelab/blog.md)
 - **Beatz** (public Go music player branded “Beats” in-app, localhost:30142; no Cloudflare Access; media: `~/beatz-selected/`; play history: `~/beatz-data/plays.jsonl`) → [`beatz.md`](notes/docs/homelab/beatz.md)
 - **Daily News** (public static newspaper UI, localhost:30144, news.carter2099.com; priority-ranked front page + five category pages, historical editions, one summary email, durable data in the existing R2 backup) → [`email-digests.md`](notes/docs/homelab/email-digests.md)
 - **Hyperliquid SDK maintenance** (automated dependency maintenance; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
