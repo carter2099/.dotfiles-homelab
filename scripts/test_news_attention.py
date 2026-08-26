@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from news_attention import (
     _observation_from_response,
+    canonicalize_publisher_url,
     enforce_editorial_significance,
     event_terms,
     normalize_editorial_significance,
@@ -298,6 +299,32 @@ def test_event_term_fallback_and_legacy_migration() -> None:
     check("Nvidia" in terms[0], terms)
 
 
+def test_canonicalize_publisher_url_maps_sample_hosts_only() -> None:
+    canonical = canonicalize_publisher_url(
+        "https://monorepo-sample1.nyt.net/2026/08/24/world/europe/"
+        "russia-drones-autonomous-ai-kill-ukraine-war.html"
+    )
+    check(
+        canonical
+        == "https://www.nytimes.com/2026/08/24/world/europe/"
+        "russia-drones-autonomous-ai-kill-ukraine-war.html",
+        canonical,
+    )
+    check(
+        canonicalize_publisher_url("https://sample2.nyt.net/story?ref=test")
+        == "https://www.nytimes.com/story?ref=test",
+        "query preserved",
+    )
+    for untouched in (
+        "https://www.nytimes.com/2026/08/24/world/europe/story.html",
+        "https://arstechnica.com/ai/2026/08/none",
+        "https://blogs.nvidia.com/blog/2026/08/none",
+        "",
+        "not-a-url",
+    ):
+        check(canonicalize_publisher_url(untouched) == untouched, untouched)
+
+
 def main() -> None:
     tests = [
         test_gdelt_timeline_observation_and_syndication_dedup,
@@ -307,6 +334,7 @@ def main() -> None:
         test_confirmed_no_matches_is_low_attention_not_neutral,
         test_priority_ties_use_evidence_not_discovery_order,
         test_event_term_fallback_and_legacy_migration,
+        test_canonicalize_publisher_url_maps_sample_hosts_only,
     ]
     for test in tests:
         test()

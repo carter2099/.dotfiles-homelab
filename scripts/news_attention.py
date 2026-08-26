@@ -62,6 +62,30 @@ def _clean_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+def canonicalize_publisher_url(url: str) -> str:
+    """Rewrite publisher sample/test hosts to their canonical reader domain.
+
+    NYT test infra (e.g. monorepo-sample1.nyt.net) serves real article content
+    but is not a reader-facing domain; the fetched page's canonical/og:url
+    points at www.nytimes.com with the identical path. Map any *.nyt.net host
+    so published URLs always use the canonical publisher domain.
+    """
+    raw = (url or "").strip()
+    if not raw or "://" not in raw:
+        return raw
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    host = (parts.hostname or "").lower()
+    if host != "nyt.net" and not host.endswith(".nyt.net"):
+        return raw
+    suffix = parts.path or "/"
+    if parts.query:
+        suffix = f"{suffix}?{parts.query}"
+    return f"https://www.nytimes.com{suffix}"
+
+
 def normalize_editorial_significance(item: dict[str, Any]) -> dict[str, Any]:
     """Migrate the old `importance` field and enforce the editorial label."""
     legacy = item.pop("importance", None)

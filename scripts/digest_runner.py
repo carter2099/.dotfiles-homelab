@@ -53,6 +53,7 @@ import requests
 from news_attention import (
     EDITORIAL_POINTS,
     SCHEMA_VERSION as ATTENTION_SCHEMA_VERSION,
+    canonicalize_publisher_url,
     normalize_editorial_significance,
     priority_sort_key,
     score_attention,
@@ -1558,6 +1559,8 @@ def _normalize_story_tracking(story: dict, today: date | None = None) -> dict:
     if today is None:
         today = datetime.now(timezone.utc).date()
     normalize_editorial_significance(story)
+    if story.get("url"):
+        story["url"] = canonicalize_publisher_url(story["url"])
     if not _parse_date(story.get("first_seen")):
         fallback = _parse_date(story.get("last_updated"))
         story["first_seen"] = (
@@ -1829,6 +1832,8 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     ongoing_cutoff_date = today - timedelta(days=5)
     for finding in findings:
         normalize_editorial_significance(finding)
+        if finding.get("url"):
+            finding["url"] = canonicalize_publisher_url(finding["url"])
 
     pre_tagged: list[dict] = []
     too_old_count = 0

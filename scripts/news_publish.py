@@ -23,6 +23,7 @@ from digest_runner import (
 )
 from news_attention import (
     EDITORIAL_POINTS,
+    canonicalize_publisher_url,
     normalize_editorial_significance,
     priority_sort_key,
 )
@@ -161,7 +162,7 @@ def _public_story(story: dict[str, Any], *, ongoing: bool = False) -> dict[str, 
     for key in ("significance_evidence", "significance_validation"):
         if isinstance(normalized.get(key), dict):
             result[key] = dict(normalized[key])
-    url = _safe_url(normalized.get("url"))
+    url = _safe_url(canonicalize_publisher_url(normalized.get("url")))
     if url:
         result["url"] = url
     try:
