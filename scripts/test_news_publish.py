@@ -67,6 +67,9 @@ def test_external_link_arrow_uses_neutral_ink() -> None:
     block = css.split(".external {", 1)[1].split("}", 1)[0]
     check("color: var(--ink);" in block, block)
     check("color: var(--accent);" not in block, block)
+    for forbidden in ("#7a3030", "#5f2020", "#7b2f2f", "122, 48, 48"):
+        check(forbidden not in css.casefold(), forbidden)
+    check("--accent: #59616b;" in css, css[:300])
 
 
 def test_legacy_html_migration() -> None:
@@ -200,6 +203,8 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check(result["dates"] == 2, result)
         check(result["email_sent"], result)
         check(len(sent) == 1, sent)
+        check("#7b2f2f" not in sent[0][1].casefold(), sent[0][1])
+        check("#374151" in sent[0][1].casefold(), sent[0][1])
         for key in news.TOPIC_ORDER:
             topic = news.TOPICS[key]
             check(topic["web_title"].replace("&", "&amp;") in sent[0][1], sent[0][1])
@@ -214,7 +219,7 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check("<h1>Front Page</h1>" in front_page, front_page)
         check("Priority combines editorial consequence" not in front_page, front_page)
         check("<span>Updated daily.</span>" in front_page, front_page)
-        check("/assets/news.css?v=3" in front_page, front_page)
+        check("/assets/news.css?v=4" in front_page, front_page)
         for key in news.TOPIC_ORDER:
             marker = news.TOPICS[key]["web_title"]
             expected = (
