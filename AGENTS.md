@@ -131,7 +131,7 @@ Five category pipelines run at 08:00 UTC via `digests-daily.timer`, publish a pr
 
 ## Homelab Steward
 
-Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and roll back deterministically when their post-update checks fail. **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
+Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and attempt rollback when post-update checks fail; a failed rollback validation is reported as `ROLLBACK_FAILED` and requires manual recovery. **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
 
 ## Agent CLI: omp
 
@@ -227,6 +227,7 @@ post-deploy smokes all emitted reasoning and exceeded 30 decode tokens/s.
 The proxy reports explicit Linux/Windows/offline state and keeps cloud fallback; the
 loopback dashboard at `127.0.0.1:30143` behaviorally passed Linux→Windows and
 sleeping-Windows→Linux transitions. Both OSes re-arm Ubuntu one-shot boot selection.
+Request summaries under `~/rig-requests/` are pruned daily at 00:00 UTC by `cleanup-rig-requests.timer`; files older than 14 days are removed.
 Windows retains only seven verified GGUF backups; 21 retired models and the obsolete
 Windows inference stack were removed. Linux now mirrors the ThinkPad's agent privilege
 model: `carte` has unrestricted passwordless sudo through a root-owned policy. The
@@ -250,7 +251,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`deployment.md`](notes/docs/homelab/deployment.md) — deploy flow, port-in-use, exit 255, aa-remove-unknown
 - [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules; also covers FreshRSS as a third-party k3s deployment
 - [`email-digests.md`](notes/docs/homelab/email-digests.md) — Daily News significance/attention/priority scoring, front page, standfirsts, R2 backup, delivery, audit/debug
-- [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, work queue, executor, budget guard, debugging
+- [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, session memory, audit/fix loop, work queue, and debugging
 - [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 23-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 - [`blog.md`](notes/docs/homelab/blog.md) — Rails 8 blog app
 - [`beatz.md`](notes/docs/homelab/beatz.md) — public beat archive player, starter/artwork pools, media library, deploy/runbook

@@ -19,7 +19,7 @@ import (
 //   - extracts every *.db / *.sqlite3 / *.sqlite and runs PRAGMA integrity_check
 //
 // Exit 0 if the archive is readable and every embedded DB passes; 1 otherwise.
-// Used by restore-drill.sh to prove backups are restorable without nuking prod.
+// Used by restore-drill.sh to detect archive or SQLite corruption without touching prod.
 func cmdVerify(archivePath string) error {
 	f, err := os.Open(archivePath)
 	if err != nil {

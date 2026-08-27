@@ -3,11 +3,10 @@
 # integrity (readable tar.gz + PRAGMA integrity_check on every embedded DB),
 # and email Carter a PASS/FAIL report. It never touches prod data.
 #
-# Wired to homelab-backup-restore-drill.{service,timer}. Also runnable by hand:
+# Wired to homelab-backup-restore-drill.{service,timer}. Also runnable by hand.
+# The binary uses process credentials when supplied and otherwise auto-loads
+# the `.env` beside the executable.
 #   bash ~/homelab-backup/restore-drill.sh
-#
-# Requires R2 creds in the env (systemd EnvironmentFile=~/homelab-backup/.env
-# provides R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY under the timer).
 set -uo pipefail
 
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
@@ -62,7 +61,7 @@ run "$HB" verify "$ARCHIVE" || VERIFY_RC=$?
 if [ "$VERIFY_RC" -eq 0 ]; then
   SUBJECT="homelab restore drill PASS ${TS}"
   {
-    echo "PASS — newest R2 backup downloaded and verified intact."
+    echo "PASS — newest R2 backup is readable and every embedded SQLite database passed integrity_check."
     echo
     cat "$REPORT"
   } | bash "$EMAIL_TMPL" pass /tmp/restore-drill-body.html

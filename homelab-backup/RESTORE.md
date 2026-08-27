@@ -14,14 +14,16 @@ tar tzf homelab-backup-*.tar.gz | awk -F/ '{print $1}' | sort -u
 
 | Group | Targets |
 |---|---|
-| App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `agent-state`, `daily-news-data` |
+| App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `agent-state`, `omp-agent-state`, `daily-news-data` |
 | FreshRSS | `freshrss-db`, `freshrss-config` |
 | Open WebUI | `open-webui-db` |
 | Config/code | `homelab-backup-config`, `k3s-manifests`, `omp-web-app`, `host-etc`, `pkg-manifest` |
 | Secrets (unencrypted) | `secrets-blog-master`, `secrets-open-webui-env`, `secrets-cloudflare`, `secrets-dependabot`, `secrets-llm-proxy`, `secrets-opencode-go-proxy`, `secrets-searxng`, `secrets-smtp-and-staged` |
 
-DBs were captured with `sqlite3 .backup` + passed `PRAGMA integrity_check` at
-backup time, and the restore drill re-checks integrity after download.
+Database targets were captured with `sqlite3 .backup` and passed
+`PRAGMA integrity_check` at backup time. `verify` rechecks every embedded SQLite file,
+but does not compare the archive against the configured 23-target list or prove
+non-database target completeness.
 
 ## 0. Get the archive locally
 
@@ -48,8 +50,9 @@ archive (chicken-and-egg), so bootstrap from the Cloudflare dashboard:
 ```bash
 ~/homelab-backup/homelab-backup verify /tmp/homelab-backup-*.tar.gz
 ```
-Reads the archive, lists the target manifest, and runs `PRAGMA integrity_check`
-on every `*.db`/`*.sqlite3` inside. Exit 0 = all DBs intact.
+Reads the archive, lists the top-level directories present, and runs
+`PRAGMA integrity_check` on every embedded SQLite file. Exit 0 means the tar is readable
+and those databases pass; even an archive with missing targets or no databases can pass.
 
 ## 2. Extract
 
@@ -65,7 +68,7 @@ then app data, then DBs.
 ### 3a. Host networking (from `host-etc/`)
 ```bash
 sudo cp /tmp/restore/host-etc/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml
-sudo netplan apply          # brings up enp3s0f0 with .100/.92/.102
+sudo netplan apply          # DHCP address plus static 192.168.4.92
 ```
 Without the static `.92` IP, k3s node-IP and blog ingress break.
 
@@ -93,11 +96,11 @@ cp /tmp/restore/secrets-open-webui-env/.env          ~/open-webui/.env
 cp -r /tmp/restore/secrets-cloudflare/*              ~/.config/cloudflare/
 cp /tmp/restore/secrets-dependabot/env                ~/.config/dependabot-webhook/env
 cp /tmp/restore/secrets-llm-proxy/env                 ~/.config/llm-proxy/env
-cp /tmp/restore/secrets-opencode-go-proxy/env         ~/.config/opencode-go-proxy/env
+cp /tmp/restore/secrets-opencode-go-proxy/config.json ~/.config/opencode-go-proxy/config.json
 cp /tmp/restore/secrets-searxng/settings.yml          ~/searxng/core-config/settings.yml
 cp /tmp/restore/secrets-smtp-and-staged/smtp_config  ~/scripts/.smtp_config
 chmod 600 ~/.config/cloudflare/* ~/.config/dependabot-webhook/env \
-           ~/.config/llm-proxy/env ~/.config/opencode-go-proxy/env \
+           ~/.config/llm-proxy/env ~/.config/opencode-go-proxy/config.json \
            ~/open-webui/.env ~/scripts/.smtp_config \
            ~/blog/blog/config/master.key
 ```
@@ -106,6 +109,9 @@ Also restore `~/homelab-backup/.env` (R2 creds) from `homelab-backup-config/`
 
 ### 3e. App content + DBs (from data targets)
 ```bash
+# Stop database writers before replacing their files
+docker stop blog-web-1 open-webui || true
+
 # Blog content
 rsync -a /tmp/restore/blog-posts/  ~/blog/blog/app/posts/
 rsync -a /tmp/restore/blog-reviews/ ~/blog/blog/app/reviews/
@@ -120,48 +126,73 @@ sudo cp /tmp/restore/open-webui-db/webui.db /var/lib/docker/volumes/open-webui_o
 # agent-state
 rsync -a /tmp/restore/agent-state/ ~/agent-state/
 
+# OMP config/runtime state; interactive and automated transcript trees were excluded
+mkdir -p ~/.omp/agent
+rsync -a /tmp/restore/omp-agent-state/ ~/.omp/agent/
+
 # Daily News publications, attention observations, and mail markers
 mkdir -p ~/digests/news
 rsync -a /tmp/restore/daily-news-data/ ~/digests/news/
-python3 ~/scripts/news_publish.py --date "$(date -u +%Y-%m-%d)" --skip-email
+NEWS_DATE="$(python3 -c 'import json; from pathlib import Path; p=json.loads((Path.home() / "digests/news/publications/manifest.json").read_text()); print(max(x["date"] for x in p["dates"]))')"
+python3 ~/scripts/news_publish.py --date "$NEWS_DATE" --skip-email
+# Per-category stories-in-flight.json trackers are not in daily-news-data.
 ```
 
-### 3f. FreshRSS (k3s) — paths are in the freshrss PVC
-The `freshrss-db` and `freshrss-config` targets restore into the k3s
-local-path PVC. Locate the live PVC path (`k get pvc -n freshrss`) and copy back:
+### 3f. FreshRSS (k3s) — paths are in the FreshRSS PVC
+Restore the raw PVC tree first and the consistent database snapshot last, while the pod
+is stopped. Locate the live PVC path (`kubectl get pvc -n freshrss`) and substitute it
+for `<pvc>`:
 ```bash
-sudo cp /tmp/restore/freshrss-db/db.sqlite <pvc>/users/carter2099/db.sqlite
+kubectl -n freshrss scale deployment/freshrss --replicas=0
 sudo rsync -a --delete /tmp/restore/freshrss-config/ <pvc>/
+sudo rm -f <pvc>/users/carter2099/db.sqlite-wal <pvc>/users/carter2099/db.sqlite-shm
+sudo install -o 33 -g 33 -m 664 /tmp/restore/freshrss-db/db.sqlite <pvc>/users/carter2099/db.sqlite
+kubectl -n freshrss scale deployment/freshrss --replicas=1
 ```
 
-### 3g. Rebuild the homelab-backup binary (from `homelab-backup-config/`)
-The archive contains your Go source + config. After restoring deps:
+### 3g. Restore and rebuild homelab-backup
+The archive contains the deployed Go source and config:
 ```bash
+mkdir -p ~/homelab-backup
+rsync -a /tmp/restore/homelab-backup-config/ ~/homelab-backup/
 cd ~/homelab-backup && go build -o homelab-backup .
 ```
+
+### 3h. Restore OMP Web source
+`omp-web-app` is the intentionally uncommitted OMP port source:
+```bash
+mkdir -p ~/dev/omp-web-worktrees/phase0
+rsync -a /tmp/restore/omp-web-app/ ~/dev/omp-web-worktrees/phase0/
+```
+Build, validate, and install its private artifact using
+`~/notes/docs/homelab/omp-web.md`; do not substitute the retired Pi Web service.
 
 ## 4. Restart services & verify
 ```bash
 # k3s pods
 k get pods -A
 # host apps
-docker compose -f ~/blog/docker-compose.yml up -d
-# timers
-systemctl --user start homelab-backup.timer llm-proxy.service pi-web.service
+bash ~/blog/up.sh
+bash ~/open-webui/up.sh
+# timers and user services
+systemctl --user start homelab-backup.timer llm-proxy.service \
+  omp-web-sessiond.service omp-web.service
 ```
 
 ## 5. Prove the restore
-Run the restore drill against the archive you just used (or the next daily):
-```bash
-bash ~/homelab-backup/restore-drill.sh
-```
+
+The `verify` command in step 1 checked the selected archive. Run application health and
+behavioral checks against the restored services. `restore-drill.sh` is a separate monthly
+check that always downloads and verifies the **newest** R2 object; it does not select or
+prove an older archive used above.
 
 ## Notes
 - Secrets are stored **unencrypted** in R2. Bucket access = full compromise by
   design; protecting the bucket is the trust boundary.
-- Retention baseline: 14 scheduled dailies + 1 monthly + 1 yearly (about 1.0 GB at 62.3 MB each). Manual runs remain as additional daily objects until the 14-day window expires.
+- Retention baseline: 14 scheduled dailies + 1 monthly + 1 yearly (about 1.0 GB at roughly 55–63 MB each). Manual runs remain as additional daily objects until the 14-day window expires.
 - The Open WebUI `cache/` (1.1 GB of regenerable embeddings) is intentionally
   **not** backed up — only `webui.db` is. Re-open the UI to regenerate it.
 - The `pkg-manifest/` target lists `dpkg --get-selections`, `apt-mark showmanual`,
   gem/pip/npm/rbenv/fnm versions, and enabled services — use it to reproduce the
   installed package set on a bare rebuild.
+- `verify` validates archive readability and embedded databases, not the configured target count or every non-database file. Confirm the expected 23 top-level targets before a destructive restore.

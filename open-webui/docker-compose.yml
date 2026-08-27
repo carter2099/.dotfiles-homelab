@@ -8,12 +8,12 @@ services:
     # Loopback-only: reachable solely via the CF tunnel (cloudflared hits localhost), never the LAN.
     ports:
       - "127.0.0.1:48100:8080"
-    # Resolve host.docker.internal → host gateway so the container can reach
-    # loopback-bound services (e.g. SearXNG at 127.0.0.1:8080).
+    # Resolve host.docker.internal → host gateway for host-published services such
+    # as opencode-go-proxy on :8082. SearXNG uses the shared Docker network below.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env            # OPENAI_API_KEY (the OpenCode Go key) + WEBUI_SECRET_KEY — gitignored
+      - .env            # WEBUI_SECRET_KEY only; model connections live in webui.db
     environment:
       # Second credential layer behind CF Access (first signup = admin)
       - WEBUI_AUTH=True
