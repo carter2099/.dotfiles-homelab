@@ -41,9 +41,10 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urljoin
 
 try:
     import yaml
@@ -335,9 +336,35 @@ PRUNE_AFTER_DAYS = 7    # remove cooled stories after 7 days without movement
 # same measure the tracker uses (digest-quality audit 2026-08-22).
 RESURFACE_CAP_DAYS = COOL_AFTER_DAYS - 1
 
-# ── Cross-day dedup constants ──────────────────────────────────────────────
-CROSS_DAY_DEDUP_DAYS = 5  # block URLs covered in the last N days' digests;
-                          # matches the ongoing research window (5 days)
+# ── Cross-topic same-event dedup (referenced-source links) ────────────────
+# A topic's selected story may be press coverage that links to the canonical
+# source of an event (e.g. a TechCrunch writeup linking to the OpenAI
+# announcement page). Those referenced URLs are recorded per run and block the
+# same event from other topics (digest-quality audit 2026-08-26: the OpenAI
+# Jalapeño announcement ran in both ai-tech and ai-hardware under different
+# URLs, significance, and priority because dedup keyed only on normalized URL).
+REFERENCED_URLS_SCHEMA_VERSION = 1
+REFERENCED_URL_TIMEOUT = 25          # per-page bound for link collection
+_HTML_FETCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (homelab Daily News; link collector)",
+}
+
+# Conservative filters for the referenced-source collector. Recording every
+# outbound link on a selected story's page would block genuinely distinct
+# stories in later topics, so same-host navigation/related links, social and
+# utility hosts, and obvious non-article paths never enter the dedup record.
+_REFERENCED_URL_SKIP_HOSTS = {
+    "twitter.com", "x.com", "facebook.com", "instagram.com", "linkedin.com",
+    "reddit.com", "threads.net", "youtube.com", "youtu.be", "tiktok.com",
+    "mstdn.social", "bsky.app",
+}
+_REFERENCED_URL_SKIP_SEGMENTS = {
+    "about", "contact", "privacy", "terms", "terms-of-service", "terms-of-use",
+    "login", "log-in", "signup", "sign-up", "subscribe", "newsletter",
+    "feed", "rss", "sitemap", "search", "press", "advertise", "careers",
+    "jobs", "team", "legal", "cookies", "cookie-policy", "help", "faq",
+    "shop", "store", "account", "settings",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1316,7 +1343,140 @@ def _load_cross_topic_urls(
             normalized = _normalize_url(story.get("url", ""))
             if normalized:
                 blocked.add(normalized)
+        # Same-event dedup: later topics also block the canonical/related links
+        # recorded from earlier topics' selected stories, so the same event
+        # under a different URL is not curated twice (digest-quality audit
+        # 2026-08-26). Only schema-version-matched records merge.
+        referenced_path = (
+            root / config["category"] / run_dir.name / "referenced-urls.json"
+        )
+        try:
+            ref_data = json.loads(referenced_path.read_text())
+            if ref_data.get("schema_version") == REFERENCED_URLS_SCHEMA_VERSION:
+                for entry in ref_data.get("stories", []):
+                    for url in entry.get("referenced_urls", []):
+                        if url:
+                            blocked.add(url)
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+            pass
     return blocked
+
+
+class _HrefCollector(HTMLParser):
+    """Collect the hrefs of <a> tags from one article page (dedup record)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        for key, value in attrs:
+            if key == "href" and value:
+                self.hrefs.append(value)
+
+
+def _collect_referenced_urls(page_url: str) -> list[str]:
+    """Best-effort fetch of one article page; return normalized outbound links.
+
+    Feeds the cross-topic same-event dedup record. Conservative filters keep
+    only plausible article/canonical-source links: same-host navigation and
+    related-story links, social/utility hosts, and obvious non-article paths
+    never enter the record. Never raises — link collection is auxiliary to
+    curation and must not fail a topic run.
+    """
+    try:
+        resp = requests.get(
+            page_url, headers=_HTML_FETCH_HEADERS, timeout=REFERENCED_URL_TIMEOUT
+        )
+        resp.raise_for_status()
+    except requests.RequestException:
+        return []
+    if len(resp.content) > 2_000_000 or not resp.text:
+        return []
+    parser = _HrefCollector()
+    try:
+        parser.feed(resp.text)
+    except Exception:
+        return []
+    page_host = (urlsplit(page_url).hostname or "").lower()
+    if page_host.startswith("www."):
+        page_host = page_host[4:]
+    seen: set[str] = set()
+    out: list[str] = []
+    for href in parser.hrefs:
+        try:
+            absolute = urljoin(page_url, href.strip())
+        except ValueError:
+            continue
+        parts = urlsplit(absolute)
+        if parts.scheme not in ("http", "https"):
+            continue
+        host = (parts.hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host or host == page_host:
+            continue
+        if host in _REFERENCED_URL_SKIP_HOSTS:
+            continue
+        if _is_listing_url(absolute) or _is_asset_cdn_url(absolute):
+            continue
+        segments = [s for s in parts.path.strip("/").split("/") if s]
+        if not segments or not any(re.search(r"[a-zA-Z]", s) for s in segments):
+            continue
+        if any(s.lower() in _REFERENCED_URL_SKIP_SEGMENTS for s in segments):
+            continue
+        normalized = _normalize_url(absolute)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+        if len(out) >= 20:
+            break
+    return out
+
+
+def _record_referenced_urls(
+    topic: dict,
+    fresh: list[dict],
+    ongoing: list[dict],
+    run_dir: Path,
+) -> None:
+    """Record canonical/related links from each selected story for later topics.
+
+    Written to <run_dir>/referenced-urls.json (REFERENCED_URLS_SCHEMA_VERSION);
+    _load_cross_topic_urls merges these into later topics' blocked set so the
+    same event under a different URL is not curated twice (digest-quality audit
+    2026-08-26: the OpenAI Jalapeño announcement ran in ai-tech via TechCrunch
+    and in ai-hardware via the OpenAI page). Best-effort: a failed fetch simply
+    contributes no links and never fails the run.
+    """
+    output_path = run_dir / "referenced-urls.json"
+    stories = fresh + ongoing
+    if not stories:
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        return
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        records = list(pool.map(
+            lambda s: {
+                "url": s.get("url", ""),
+                "referenced_urls": _collect_referenced_urls(s.get("url", "")),
+            },
+            stories,
+        ))
+    data = {
+        "schema_version": REFERENCED_URLS_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stories": records,
+    }
+    output_path.write_text(json.dumps(data, indent=2))
+    total = sum(len(r["referenced_urls"]) for r in records)
+    print(f"  [dedup] recorded {total} referenced link(s) across {len(stories)} "
+          "selected story(s) for cross-topic same-event blocking")
 
 
 def _load_recent_covered_urls(digest_dir: Path, today: date, days: int) -> set[str]:
@@ -3690,6 +3850,9 @@ def phase_6_curate(
     elapsed = time.time() - started
     print(f"  [done] curate — {len(fresh)} fresh, {len(ongoing)} ongoing, "
           f"review={review_status} ({elapsed:.0f}s)")
+    # Record canonical/related links from the selected stories so later topics
+    # block the same event under a different URL (digest-quality audit 2026-08-26).
+    _record_referenced_urls(topic, fresh, ongoing, run_dir)
     return fresh, updated_sif, ongoing
 
 
