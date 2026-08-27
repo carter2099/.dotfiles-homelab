@@ -110,6 +110,93 @@ def test_cross_topic_dedup_precedes_fetch_queue() -> None:
         check(len(artifact["cross_topic_rejected"]) == 1, "skip was not audited")
 
 
+def test_cross_topic_same_event_referenced_url_dedup() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "ai-tech" / "2026-08-26"
+        run_dir.mkdir(parents=True)
+        other = root / digest.TOPICS["gaming"]["category"] / "2026-08-26"
+        other.mkdir(parents=True)
+        (other / "06-curated.json").write_text(json.dumps({
+            "fresh": [{
+                "url": "https://techcrunch.com/2026/08/25/openai-jalapeno-chip",
+            }],
+            "ongoing": [],
+        }))
+        (other / "referenced-urls.json").write_text(json.dumps({
+            "schema_version": digest.REFERENCED_URLS_SCHEMA_VERSION,
+            "generated_at": "2026-08-27T00:00:00+00:00",
+            "stories": [{
+                "url": "https://techcrunch.com/2026/08/25/openai-jalapeno-chip",
+                "referenced_urls": [
+                    "https://openai.com/index/jalapeno-inference-chip/",
+                ],
+            }],
+        }))
+        fresh = [
+            {
+                "title": "Same event via source page",
+                "url": "https://openai.com/index/jalapeno-inference-chip/",
+                "editorial_significance": "high",
+                "date_published": "2026-08-25",
+            },
+            {
+                "title": "Unique story",
+                "url": "https://example.com/unique",
+                "editorial_significance": "medium",
+                "date_published": "2026-08-25",
+            },
+        ]
+        with patch.object(digest, "DIGESTS_DIR", root):
+            queue, _ = digest.phase_3_rank(
+                digest.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
+            )
+        check(
+            [item["title"] for item in queue] == ["Unique story"],
+            f"queue={queue!r}",
+        )
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        check(
+            len(artifact["cross_topic_rejected"]) == 1,
+            "same-event source-page URL not blocked",
+        )
+
+
+def test_phase_two_cross_day_dedup_window_contract() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        today = datetime.now(timezone.utc).date().isoformat()
+        run_dir = root / "ai-tech" / today
+        run_dir.mkdir(parents=True)
+        finding = {
+            "title": "Fresh verified event",
+            "url": "https://example.com/fresh-event",
+            "source_domain": "example.com",
+            "date_published": today,
+            "summary": "A source-grounded event occurred today.",
+            "category": "Research",
+            "editorial_significance": "medium",
+            "event": "Fresh verified event occurs",
+            "event_terms": ["Fresh verified", "event occurs"],
+        }
+        judged = {
+            "approved": [finding],
+            "rejected": [],
+        }
+        with patch(
+            "digest_runner._call_llm_proxy",
+            return_value=json.dumps(judged),
+        ):
+            fresh, ongoing = digest.phase_2_judge_research(
+                digest.TOPICS["ai-tech"],
+                [finding],
+                run_dir,
+                {"stories": []},
+            )
+        check(digest.CROSS_DAY_DEDUP_DAYS == 5, digest.CROSS_DAY_DEDUP_DAYS)
+        check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
+
+
 def test_attention_phase_persists_durable_observations() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -1833,6 +1920,8 @@ def main() -> None:
         test_url_normalization,
         test_article_cache_contract,
         test_cross_topic_dedup_precedes_fetch_queue,
+        test_cross_topic_same_event_referenced_url_dedup,
+        test_phase_two_cross_day_dedup_window_contract,
         test_attention_phase_persists_durable_observations,
         test_phase_three_uses_product_priority,
         test_phase_four_concurrency_and_shared_cache,

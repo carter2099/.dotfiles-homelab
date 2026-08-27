@@ -336,6 +336,10 @@ PRUNE_AFTER_DAYS = 7    # remove cooled stories after 7 days without movement
 # same measure the tracker uses (digest-quality audit 2026-08-22).
 RESURFACE_CAP_DAYS = COOL_AFTER_DAYS - 1
 
+# Block exact URLs already covered by this section during the rolling ongoing window.
+# This is independent from the referenced-link same-event dedup below.
+CROSS_DAY_DEDUP_DAYS = 5
+
 # ── Cross-topic same-event dedup (referenced-source links) ────────────────
 # A topic's selected story may be press coverage that links to the canonical
 # source of an event (e.g. a TechCrunch writeup linking to the OpenAI
@@ -1355,8 +1359,9 @@ def _load_cross_topic_urls(
             if ref_data.get("schema_version") == REFERENCED_URLS_SCHEMA_VERSION:
                 for entry in ref_data.get("stories", []):
                     for url in entry.get("referenced_urls", []):
-                        if url:
-                            blocked.add(url)
+                        normalized = _normalize_url(url)
+                        if normalized:
+                            blocked.add(normalized)
         except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
             pass
     return blocked
