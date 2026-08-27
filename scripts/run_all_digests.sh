@@ -26,6 +26,13 @@ _cleanup() {
 }
 trap _cleanup TERM INT HUP
 
+# Fail before expensive research when an automated code change removes a
+# load-bearing runtime symbol or topic contract.
+if ! python3 "$HOME/scripts/digest_runner.py" --preflight; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) PREFLIGHT FAIL — curation not started" | tee -a "$LOGFILE" || true
+    exit 1
+fi
+
 # ── Incomplete-run detection ──
 # A run is incomplete only if it never wrote ALL DONE. Post-completion lines
 # (WARN-ALERT and friends) may legitimately follow ALL DONE, so checking only

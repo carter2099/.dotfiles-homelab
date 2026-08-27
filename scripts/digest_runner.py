@@ -4459,6 +4459,39 @@ def _cleanup_stub_attempts(run_dir: Path) -> None:
             print(f"  [cleanup] Removed archived stub attempt: {child.name}")
 
 
+def validate_runtime_contract() -> None:
+    """Fail before research when a load-bearing pipeline symbol is missing."""
+    errors: list[str] = []
+    for name, minimum in (
+        ("CROSS_DAY_DEDUP_DAYS", 1),
+        ("REFERENCED_URLS_SCHEMA_VERSION", 1),
+        ("RANKING_SCHEMA_VERSION", 1),
+        ("ATTENTION_SCHEMA_VERSION", 1),
+    ):
+        value = globals().get(name)
+        if not isinstance(value, int) or value < minimum:
+            errors.append(f"{name} must be an integer >= {minimum} (got {value!r})")
+    if len(TOPICS) != 5:
+        errors.append(f"TOPICS must contain five sections (got {len(TOPICS)})")
+    for key, config in TOPICS.items():
+        missing = {
+            field for field in ("category", "web_slug", "web_title", "research_angles")
+            if field not in config
+        }
+        if missing:
+            errors.append(f"{key} missing fields: {', '.join(sorted(missing))}")
+    for name in (
+        "_load_recent_covered_urls",
+        "_load_cross_topic_urls",
+        "phase_2_judge_research",
+        "phase_2b_attention",
+    ):
+        if not callable(globals().get(name)):
+            errors.append(f"{name} is missing or not callable")
+    if errors:
+        raise RuntimeError("Daily News preflight failed: " + "; ".join(errors))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Main orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4471,6 +4504,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     email; the all-topic publisher owns the single daily summary message.
     """
     global MODEL_OVERRIDE
+    validate_runtime_contract()
     if category not in TOPICS:
         print(f"Unknown topic: {category}")
         print(f"Available: {', '.join(TOPICS)}")
@@ -4844,10 +4878,12 @@ def _write_test_report(run_dir: Path, topic: dict, category: str,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Deterministic multi-phase digest runner")
-    parser.add_argument("topic", choices=list(TOPICS) + ["all"],
+    parser.add_argument("topic", nargs="?", choices=list(TOPICS) + ["all"],
                         help="Topic to run (or 'all' for every topic)")
+    parser.add_argument("--preflight", action="store_true",
+                        help="Validate load-bearing runtime contracts and exit")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Run pipeline but skip email send (Phase 8)")
+                        help="Run without updating the top-level daily HTML archive")
     parser.add_argument("--test", action="store_true",
                         help="Test mode: isolate output in ~/digests/test/, copy prod SIF, write report")
     parser.add_argument("--model", type=str, default=None,
@@ -4855,6 +4891,13 @@ if __name__ == "__main__":
     parser.add_argument("--test-label", type=str, default=None,
                         help="Label for test run directory (default: model name or 'test')")
     args = parser.parse_args()
+
+    if args.preflight:
+        validate_runtime_contract()
+        print("Daily News preflight passed")
+        raise SystemExit(0)
+    if args.topic is None:
+        parser.error("topic is required unless --preflight is used")
 
     # Set module-level globals for test mode
     if args.test:
@@ -4868,9 +4911,6 @@ if __name__ == "__main__":
 
     if args.topic == "all":
         for cat in TOPICS:
-            if cat == "agentic-platform":
-                print(f"Skipping {cat} (has CC'd recipient — run manually)")
-                continue
             run_digest(cat, dry_run=args.dry_run)
     else:
         run_digest(args.topic, dry_run=args.dry_run)

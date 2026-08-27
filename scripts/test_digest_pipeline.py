@@ -197,6 +197,17 @@ def test_phase_two_cross_day_dedup_window_contract() -> None:
         check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
 
 
+def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
+    digest.validate_runtime_contract()
+    with patch.object(digest, "CROSS_DAY_DEDUP_DAYS", None):
+        raised = False
+        try:
+            digest.validate_runtime_contract()
+        except RuntimeError as error:
+            raised = "CROSS_DAY_DEDUP_DAYS" in str(error)
+        check(raised, "preflight accepted a missing cross-day dedup contract")
+
+
 def test_attention_phase_persists_durable_observations() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -1922,6 +1933,7 @@ def main() -> None:
         test_cross_topic_dedup_precedes_fetch_queue,
         test_cross_topic_same_event_referenced_url_dedup,
         test_phase_two_cross_day_dedup_window_contract,
+        test_runtime_preflight_fails_closed_on_missing_symbol,
         test_attention_phase_persists_durable_observations,
         test_phase_three_uses_product_priority,
         test_phase_four_concurrency_and_shared_cache,
