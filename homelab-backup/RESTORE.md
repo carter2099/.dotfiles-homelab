@@ -32,9 +32,10 @@ failed-target directory, or prove non-database target completeness.
 
 ## 0. Select one archive
 
-Protect the credential-bearing local archive and extracted tree:
-
+Protect the credential-bearing local archive and extracted tree. Run every recovery block
+in the same Bash shell and stop on the first error:
 ```bash
+set -euo pipefail
 umask 077
 export R2_ACCESS_KEY_ID=...
 export R2_SECRET_ACCESS_KEY=...
@@ -87,14 +88,15 @@ sudo mkdir -p /etc/rancher/k3s
 sudo cp /tmp/restore/host-etc/config.yaml /etc/rancher/k3s/config.yaml
 # flannel-iface must be enp3s0f0. Install/restart k3s before applying resources.
 sudo systemctl restart k3s
-kubectl wait --for=condition=Ready node --all --timeout=180s
+sudo k3s kubectl wait --for=condition=Ready node --all --timeout=180s
 
 mkdir -p ~/k3s
 rsync -a /tmp/restore/k3s-manifests/ ~/k3s/
-kubectl apply -f ~/k3s/traefik/traefik-helmchartconfig.yaml
-kubectl apply -f ~/k3s/blog/deploy.yaml
-kubectl create namespace freshrss --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f ~/k3s/freshrss/
+sudo k3s kubectl apply -f ~/k3s/traefik/traefik-helmchartconfig.yaml
+sudo k3s kubectl apply -f ~/k3s/blog/deploy.yaml
+sudo k3s kubectl create namespace freshrss --dry-run=client -o yaml | \
+  sudo k3s kubectl apply -f -
+sudo k3s kubectl apply -f ~/k3s/freshrss/
 ```
 
 ### 3c. ufw rules (from `host-etc/`)
@@ -128,15 +130,28 @@ tunnel token from Cloudflare, install it as `root:root` mode 0600, and restart t
 `cloudflared.service`. Restore `~/homelab-backup/.env` later from
 `homelab-backup-config/`, or retain the fresh R2 credentials from step 0.
 
-### 3e. App content and databases
-The Git-backed deployment directories must already exist. Stop database writers first:
+The Git-backed deployment directories must already exist. Run this from a plain SSH shell,
+not an OMP session. Confirm Docker is reachable and stop existing database writers:
 ```bash
-docker stop blog-web-1 open-webui 2>/dev/null || true
+set -euo pipefail
+docker info >/dev/null
+for container in blog-web-1 open-webui; do
+  if docker container inspect "$container" >/dev/null 2>&1; then
+    docker stop "$container"
+  fi
+done
+systemctl --user stop omp-web.service omp-web-sessiond.service
+if pgrep -af '[o]mp( |$)' >/dev/null; then
+  echo "stop ordinary OMP CLI writers before restoring ~/.omp/agent" >&2
+  exit 1
+fi
 
 # Blog content and primary DB (storage is a host bind mount)
 rsync -a /tmp/restore/blog-posts/   ~/blog/blog/app/posts/
 rsync -a /tmp/restore/blog-reviews/ ~/blog/blog/app/reviews/
 rsync -a /tmp/restore/blog-images/  ~/blog/blog/app/assets/images/
+rm -f ~/blog/blog/storage/production.sqlite3-wal \
+  ~/blog/blog/storage/production.sqlite3-shm
 install -o carter -g carter -m 644 /tmp/restore/blog-db/production.sqlite3 \
   ~/blog/blog/storage/production.sqlite3
 
@@ -144,6 +159,8 @@ install -o carter -g carter -m 644 /tmp/restore/blog-db/production.sqlite3 \
 docker network inspect homelab-chat-search >/dev/null 2>&1 || \
   docker network create homelab-chat-search
 docker volume create open-webui_open-webui >/dev/null
+sudo rm -f /var/lib/docker/volumes/open-webui_open-webui/_data/webui.db-wal \
+  /var/lib/docker/volumes/open-webui_open-webui/_data/webui.db-shm
 sudo install -o root -g root -m 644 /tmp/restore/open-webui-db/webui.db \
   /var/lib/docker/volumes/open-webui_open-webui/_data/webui.db
 
@@ -153,11 +170,11 @@ mkdir -p ~/.omp/agent
 find ~/.omp/agent -type f \( -name '*.db-wal' -o -name '*.db-shm' \) -delete
 rsync -a /tmp/restore/omp-agent-state/ ~/.omp/agent/
 
-# Daily News publications, attention observations, and mail markers
+# Daily News publications, attention observations, and mail markers. The normal
+# publisher imports topic dirs, which are not backed up; build directly from the archive.
 mkdir -p ~/digests/news
 rsync -a /tmp/restore/daily-news-data/ ~/digests/news/
-NEWS_DATE="$(python3 -c 'import json; from pathlib import Path; p=json.loads((Path.home() / "digests/news/publications/manifest.json").read_text()); print(max(x["date"] for x in p["dates"]))')"
-python3 ~/scripts/news_publish.py --date "$NEWS_DATE" --skip-email
+python3 -c 'from pathlib import Path; import sys; sys.path.insert(0, str(Path.home() / "scripts")); import news_publish as n; editions=n.load_publications(); assert editions; print(n.build_site(editions, n.NEWS_DIR, n.ASSET_DIR))'
 ```
 
 Not restored here: Blog cache/queue/cable DBs, Beatz `plays.jsonl`, Daily News
@@ -167,19 +184,26 @@ Not restored here: Blog cache/queue/cable DBs, Beatz `plays.jsonl`, Daily News
 Restore the raw tree first and the consistent database snapshot last. Resolve the
 local-path PV host directory explicitly and wait for the writer pod to exit:
 ```bash
-kubectl -n freshrss scale deployment/freshrss --replicas=0
-kubectl -n freshrss wait --for=delete pod -l app=freshrss --timeout=120s || true
-PV="$(kubectl -n freshrss get pvc freshrss-data -o jsonpath='{.spec.volumeName}')"
-PVC_PATH="$(kubectl get pv "$PV" -o jsonpath='{.spec.hostPath.path}')"
-test -n "$PVC_PATH"
+set -euo pipefail
+sudo k3s kubectl -n freshrss scale deployment/freshrss --replicas=0
+PODS="$(sudo k3s kubectl -n freshrss get pod -l app=freshrss -o name)"
+if [ -n "$PODS" ]; then
+  sudo k3s kubectl -n freshrss wait --for=delete pod -l app=freshrss --timeout=120s
+fi
+PV="$(sudo k3s kubectl -n freshrss get pvc freshrss-data -o jsonpath='{.spec.volumeName}')"
+PVC_PATH="$(sudo k3s kubectl get pv "$PV" -o jsonpath='{.spec.local.path}')"
+case "$PVC_PATH" in
+  /var/lib/rancher/k3s/storage/*) ;;
+  *) echo "unsafe FreshRSS PV path: $PVC_PATH" >&2; exit 1 ;;
+esac
 sudo rsync -a --delete /tmp/restore/freshrss-config/ "$PVC_PATH/"
 sudo chown -R 33:33 "$PVC_PATH"
 sudo rm -f "$PVC_PATH/users/carter2099/db.sqlite-wal" \
   "$PVC_PATH/users/carter2099/db.sqlite-shm"
 sudo install -o 33 -g 33 -m 664 /tmp/restore/freshrss-db/db.sqlite \
   "$PVC_PATH/users/carter2099/db.sqlite"
-kubectl -n freshrss scale deployment/freshrss --replicas=1
-kubectl -n freshrss rollout status deployment/freshrss --timeout=180s
+sudo k3s kubectl -n freshrss scale deployment/freshrss --replicas=1
+sudo k3s kubectl -n freshrss rollout status deployment/freshrss --timeout=180s
 ```
 
 ### 3g. Restore and rebuild homelab-backup
@@ -189,8 +213,17 @@ bits explicitly:
 mkdir -p ~/homelab-backup
 rsync -a /tmp/restore/homelab-backup-config/ ~/homelab-backup/
 chmod 600 ~/homelab-backup/.env
-chmod +x ~/homelab-backup/{pre-collect.sh,restore-drill.sh,email-template.sh}
+chmod +x ~/homelab-backup/{pre-collect.sh,restore-drill.sh,email-template.sh,notify-failure.sh}
 cd ~/homelab-backup && go build -o homelab-backup .
+```
+
+The backup service also depends on Carter's root-owned privilege policy, which is not in
+the archive. Recreate and validate it before enabling the timer:
+```bash
+printf '%s\n' 'Defaults:carter !requiretty' \
+  'carter ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/carter-agent >/dev/null
+sudo chmod 0440 /etc/sudoers.d/carter-agent
+sudo visudo -cf /etc/sudoers.d/carter-agent
 ```
 
 ### 3h. OMP Web limitation
@@ -204,24 +237,27 @@ Git-dependent validator directly inside the extracted snapshot.
 ## 4. Reinstall, enable, and verify services
 
 Rebuild/install each custom binary from its `~/dev/<repo>/` checkout using the subsystem
-runbook. Then start container apps from their required working directories:
+runbook. Restore `~/beatz-selected/{audio,artwork}/` from its independent source before
+starting Beatz; otherwise leave it stopped. Then start the recovered container apps:
 ```bash
 (cd ~/blog && bash up.sh)
-(cd ~/beatz && bash up.sh)
 (cd ~/searxng && bash up.sh)
 (cd ~/open-webui && bash up.sh)
 (cd ~/news && bash up.sh)
-kubectl get pods -A
+sudo k3s kubectl get pods -A
 ```
 
-After the dotfiles unit files and custom binaries are restored:
+After the dotfiles unit files and custom binaries are restored, preserve the user manager
+across logout/reboot and enable the recovered units:
 ```bash
+sudo loginctl enable-linger carter
 systemctl --user daemon-reload
 systemctl --user enable --now \
   dependabot-webhook.service llm-proxy.service opencode-go-proxy.service \
-  prompt-guard.service rig-dashboard.service \
-  cleanup-rig-requests.timer digests-daily.timer homelab-backup.timer \
-  homelab-backup-restore-drill.timer homelab-steward.timer hyperliquid-sdk.timer
+  rig-dashboard.service cleanup-rig-requests.timer digests-daily.timer \
+  homelab-backup.timer homelab-backup-restore-drill.timer \
+  homelab-steward.timer hyperliquid-sdk.timer
+# Recreate ~/dev/prompt-guard/.env (HF_TOKEN and service settings) before enabling prompt-guard.
 # Enable omp-web-sessiond.service and omp-web.service only after completing 3h.
 ```
 
@@ -243,8 +279,9 @@ prove an older archive used above.
 - Retention baseline: 14 scheduled dailies + 1 monthly + 1 yearly (about 1.0 GB at
   roughly 55–63 MB each). Manual runs remain additional daily objects until expiry.
 - The Open WebUI cache is intentionally excluded. OMP Web `/srv` state/artifacts, Beatz
-  play history, Blog's secondary SQLite DBs, Daily News trackers, and the cloudflared
-  tunnel token are also outside the current target set.
+  play history and the entire `~/beatz-selected/` media/artwork library, Blog's secondary
+  SQLite DBs, Daily News trackers, Prompt-Guard's `.env`, the backup sudoers policy, and
+  the cloudflared tunnel token are also outside the current target set.
 - `pkg-manifest/` inventories packages and records service command output, but Git-backed
   unit definitions/enablement links remain authoritative for reconstruction.
 - `verify` validates archive readability and embedded databases, not the configured target

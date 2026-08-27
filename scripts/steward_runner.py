@@ -759,8 +759,8 @@ def _reboot_if_needed(run_dir, phase_label, dry_run=False):
 **Run dir:** {run_dir}
 **Completed phases:** through {phase_label}
 **Context:** The homelab steward was mid-run when a kernel update (or other
-/var/run/reboot-required trigger) was detected. On resume, the steward will
-pick up from the next phase in {run_dir}.
+/var/run/reboot-required trigger) was detected. On resume, phase-specific artifact
+gates skip eligible completed phases; P0, P3, P8, P9, and P9b always execute.
 """
     PENDING_PATH.write_text(pending_content)
     print(f"  [reboot] wrote {PENDING_PATH}")

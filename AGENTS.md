@@ -94,8 +94,8 @@ dotfiles add .omp/agent/prompts/hyperliquid-run.md      # scheduled command prom
 Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/homelab/deployment.md).
 
 **Critical rules (every deploy):**
-- **Commit before deploy.** Deployed state must match `origin/main`. Check `git status` first.
-  **OMP Web is the sole explicit exception:** its private port worktree remains intentionally uncommitted; deploy only its fully validated, SHA-256-verified artifact and retain the rollback archive described in `omp-web.md`.
+- **Commit before deploy.** Deployed state normally matches `origin/main`; check `git status` first.
+  **Explicit exceptions:** OMP Web's private port worktree remains intentionally uncommitted and deploys only a fully validated, SHA-256-verified artifact with a rollback archive. Steward P1 may mutate and deploy tracked managed-version pins before P9b attempts to commit/push them; even failed or dirty pins can persist if later gates fail, so reconcile against live health and Git immediately. No other dirty-tree deploy is allowed.
 - **Orphaned docker-proxy.** Container exit 255 can leave `docker-proxy` holding the port. Fix: `sudo kill <proxy-pid>`, `docker rm <container>`, `bash up.sh`.
 - **"Missing feature" = check cache first.** Cloudflare serves stale HTML if origin is down. `curl` the origin before debugging code.
 - **Exit 255 is intermittent.** Restart with existing image; don't rebuild.
