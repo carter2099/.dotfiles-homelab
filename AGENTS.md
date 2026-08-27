@@ -22,7 +22,7 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Single-node homelab: Ubuntu Server on a ThinkPad L14 Gen 3 (16GB RAM, 512GB NVMe), k3s routing via Traefik to apps in Docker Compose.
+Single-node homelab: Ubuntu Server on a ThinkPad L14 Gen 3 (16GB RAM, 512GB NVMe), with k3s/Traefik for FreshRSS and public ingress plus Docker Compose and systemd user services for host applications.
 
 ## Key Practice
 
@@ -95,6 +95,7 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 
 **Critical rules (every deploy):**
 - **Commit before deploy.** Deployed state must match `origin/main`. Check `git status` first.
+  **OMP Web is the sole explicit exception:** its private port worktree remains intentionally uncommitted; deploy only its fully validated, SHA-256-verified artifact and retain the rollback archive described in `omp-web.md`.
 - **Orphaned docker-proxy.** Container exit 255 can leave `docker-proxy` holding the port. Fix: `sudo kill <proxy-pid>`, `docker rm <container>`, `bash up.sh`.
 - **"Missing feature" = check cache first.** Cloudflare serves stale HTML if origin is down. `curl` the origin before debugging code.
 - **Exit 255 is intermittent.** Restart with existing image; don't rebuild.
@@ -126,12 +127,13 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 ## Daily News Digests
 
 Five category pipelines run at 08:00 UTC via `digests-daily.timer`, publish a priority-ranked front page plus separate sections at `news.carter2099.com`, and send one summary email. Editorial significance measures consequence only: `high` requires structured, source-grounded impact evidence, and routine maintenance/deprecations without demonstrated broad impact are downgraded. GDELT supplies observed attention; valid no-match queries score zero attention, while provider/query failure uses confidence 0 and editorial-only priority. Deterministic ties use prominence, attention, confidence, scope, significance, date, title, and URL—never discovery order. The front page guarantees one curated lead per section, then fills remaining slots globally at priority ≥65 (max 10). Standfirsts use complete newspaper prose. Published story URLs are normalized to canonical reader-facing publisher domains (e.g. NYT sample hosts such as `monorepo-sample1.nyt.net` map to `www.nytimes.com`). Durable state under `~/digests/news/` is backed up as `daily-news-data`; the public origin is loopback-only `carter-news` on 30144. **Developing and Ongoing** requires high validated significance plus developments on at least two dates. Full architecture: [`email-digests.md`](notes/docs/homelab/email-digests.md).
+DeepSeek Flash handles primary synthesis and a separate critic pass; Mimo v2.5 is the API fallback.
 
-`run_all_digests.sh` runs `digest_runner.py --preflight` before any research; missing load-bearing constants/contracts must fail immediately. If an edition is absent, inspect `systemctl --user status digests-daily.service`, then `journalctl --user -u digests-daily.service` and `~/digests/.digests.log`. The 2026-08-27 missed edition was a code regression (`CROSS_DAY_DEDUP_DAYS` removed by an automated audit fix), not an OpenCode subscription failure; free-tier 429s increased latency but research still completed.
+`run_all_digests.sh` runs `digest_runner.py --preflight` before any research; missing load-bearing constants/contracts must fail immediately. If an edition is absent, inspect `systemctl --user status digests-daily.service`, then `journalctl --user -u digests-daily.service` and `~/digests/.digests.log`. The 2026-08-27 missed edition was a code regression (`CROSS_DAY_DEDUP_DAYS` removed by an automated audit fix), not an OpenCode subscription failure; 429s on the optional Zen free-model endpoint caused extra fallthrough attempts but did not indicate exhausted Go quota.
 
 ## Homelab Steward
 
-Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and attempt rollback when post-update checks fail; a failed rollback validation is reported as `ROLLBACK_FAILED` and requires manual recovery. **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
+Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and attempt rollback when post-update checks fail. The llama helper reports `ROLLBACK_FAILED` when its own recovery validation fails; any failed recovery requires manual inspection. **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
 
 ## Agent CLI: omp
 
