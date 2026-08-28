@@ -1,5 +1,24 @@
 # Interactive zsh configuration for gamingrig-linux.
 
+# Herdr opens an interactive, non-login zsh, so it does not read .zprofile.
+# Establish the full development PATH here as well as in login shells.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+export FNM_PATH="${FNM_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/fnm}"
+export RBENV_ROOT="${RBENV_ROOT:-$HOME/.rbenv}"
+export GOPATH="${GOPATH:-$HOME/go}"
+typeset -U path
+path=(
+    "$HOME/.local/bin"
+    "$BUN_INSTALL/bin"
+    "$FNM_PATH"
+    "$RBENV_ROOT/bin"
+    /usr/local/go/bin
+    "$GOPATH/bin"
+    $path
+)
+export PATH
+
 # History is local to this host; never point it at ThinkPad state.
 HISTFILE="$HOME/.histfile"
 HISTSIZE=10000
