@@ -13,6 +13,7 @@ import html
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -78,6 +79,31 @@ LLAMA_CPP_RELEASES_API = (
     "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=100"
 )
 LLAMA_CPP_UPDATE_SCRIPT = HOME / "scripts" / "update_llama_cpp_remote.sh"
+ 
+# Remote gaming-rig maintenance is deliberately isolated from local P1
+# mutations.  The SSH config owns the host/IP and known-hosts pin; never
+# replace this alias with an address or disable host-key verification.
+RIG_SSH_ALIAS = "gamingrig-linux"
+RIG_SSH_CONNECT_TIMEOUT = 10
+RIG_SSH_COMMAND_TIMEOUT = 120
+RIG_REBOOT_WAIT_TIMEOUT = 180
+RIG_BOOT_ENTRY = "0001"
+RIG_DISK_MAX_PERCENT = 95
+RIG_APT_TIMEOUT = 900
+RIG_UPDATE_TIMEOUT = 600
+RIG_MODEL_ENDPOINT = "http://192.168.4.103:8080/v1/models"
+RIG_REQUIRED_MODEL_IDS = (
+    "qwen-3.8-27b-iq2",
+    "ornith-1.0-35b-q8",
+    "ornith-1.0-9b-q6",
+    "gemma-4-12b-q6",
+    "gemma-4-26b-q8",
+)
+RIG_REMOTE_PATH = (
+    "/home/carte/.rbenv/shims:/home/carte/.bun/bin:/home/carte/.local/bin:"
+    "/home/carte/.local/share/fnm:/home/carte/go/bin:"
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
 
 # Session memory (P0b) — interactive omp sessions documented into the notes vault
 SESSION_INTERACTIVE_DIR = HOME / ".omp" / "agent" / "sessions"   # interactive: project-scoped subdirs
@@ -1538,6 +1564,8 @@ def _p1_herdr_update():
 
 def _p1_deploy_step_ok(step):
     """True when a P1 step actually mutated state."""
+    if step.get("local_mutation") is False:
+        return False
     name = step.get("step", "")
     status = step.get("status", "")
     if name.startswith("auto_") and status == "ok":
@@ -1545,7 +1573,7 @@ def _p1_deploy_step_ok(step):
     if name in ("openwebui", "freshrss") and status == "bumped":
         return True
     if name in (
-        "herdr_update", "omp_update", "searxng", "llama_cpp",
+        "herdr_update", "omp_update", "searxng",
     ) and status == "ok":
         return True
     return False
@@ -1714,15 +1742,21 @@ def _p1_searxng_update(tags=None, now=None):
                 "reverted_to": old_ref, "error": str(exc),
                 "rollback_error": rollback_error}
 
-
 def _p1_llama_cpp_update(releases=None, now=None):
     """Build a seven-day-old llama.cpp release on Linux and atomically deploy it."""
     print("  [1i] llama.cpp mature-release update")
-    current_path = run_capture(
-        ["ssh", "-o", "BatchMode=yes", "gamingrig",
-         "readlink -f /usr/local/bin/llama-server"],
-        timeout=20,
-    )
+    try:
+        current_path = run_capture(
+            _rig_ssh_command(["readlink", "-f", "/usr/local/bin/llama-server"]),
+            timeout=20,
+        )
+    except Exception as exc:
+        return {
+            "step": "llama_cpp",
+            "status": "skipped",
+            "reason": "gaming rig Linux unavailable or SSH probe failed",
+            "error": str(exc)[:300],
+        }
     current_match = re.search(r"/opt/llama\.cpp/(b\d+)/bin/llama-server$", current_path)
     if not current_match:
         return {"step": "llama_cpp", "status": "skipped",
@@ -1754,8 +1788,7 @@ def _p1_llama_cpp_update(releases=None, now=None):
                 "reason": f"update helper missing: {LLAMA_CPP_UPDATE_SCRIPT}"}
 
     stdout, stderr, code = run_capture_ok(
-        ["ssh", "-o", "BatchMode=yes", "gamingrig",
-         "bash", "-s", "--", target_tag],
+        _rig_ssh_command(["bash", "-s", "--", target_tag]),
         input=LLAMA_CPP_UPDATE_SCRIPT.read_text(),
         timeout=1800,
     )
@@ -1839,16 +1872,911 @@ def _p1_omp_update():
             "revert_detail": r_out[-500:]}
 
 
+def _rig_ssh_command(remote_args):
+    """Build an injection-safe SSH argv for the pinned Linux rig alias.
+
+    The host key is intentionally checked by the user's SSH configuration.
+    ``BatchMode`` makes unknown/mismatched keys fail closed instead of asking
+    the unattended timer to accept one.  Every command also has both an SSH
+    connection bound and a subprocess timeout.
+    """
+    if isinstance(remote_args, (str, bytes)):
+        raise TypeError("remote_args must be a sequence, not a command string")
+    return [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={max(1, int(RIG_SSH_CONNECT_TIMEOUT))}",
+        "-o", "ConnectionAttempts=1",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=2",
+        "-o", "StrictHostKeyChecking=yes",
+        RIG_SSH_ALIAS,
+        "env", f"PATH={RIG_REMOTE_PATH}",
+        *[shlex.quote(str(arg)) for arg in remote_args],
+    ]
+
+
+def _rig_ssh(remote_args, timeout=RIG_SSH_COMMAND_TIMEOUT, input_data=None):
+    """Run one bounded command through the pinned rig SSH alias."""
+    kwargs = {"timeout": max(1, int(timeout))}
+    if input_data is not None:
+        kwargs["input"] = input_data
+    return run_capture_ok(_rig_ssh_command(remote_args), **kwargs)
+
+
+def _rig_tail(stdout="", stderr="", limit=700):
+    """Keep remote command evidence bounded in JSON/email artifacts."""
+    detail = "\n".join(part for part in (stdout or "", stderr or "") if part)
+    return detail[-limit:]
+
+
+def _rig_command_result(step, remote_args, timeout=RIG_SSH_COMMAND_TIMEOUT,
+                        input_data=None, capture_full=False):
+    """Return the normal P1 result shape for one remote command.
+
+    ``capture_full`` is an internal escape hatch for parsers that must inspect
+    the complete command response (for example JSON or apt's final count).
+    The full fields are transient; callers must consume and remove them before
+    storing the result in an artifact.
+    """
+    stdout, stderr, code = _rig_ssh(
+        remote_args, timeout=timeout, input_data=input_data)
+    result = {
+        "step": step,
+        "status": "ok" if code == 0 else "failed",
+        "exit_code": code,
+    }
+    if stdout:
+        result["stdout_tail"] = stdout[-700:]
+    if stderr:
+        result["stderr_tail"] = stderr[-700:]
+    if capture_full:
+        result["_full_stdout"] = stdout or ""
+        result["_full_stderr"] = stderr or ""
+    if code != 0:
+        result["error"] = _rig_tail(stdout, stderr) or f"exit {code}"
+    return result
+
+
+_RIG_HOST_KEY_PATTERNS = (
+    "host key verification failed",
+    "remote host identification has changed",
+    "offending ed25519 key",
+    "offending ecdsa key",
+    "no ed25519 host key is known",
+    "no ecdsa host key is known",
+    "host key is not known",
+    "man-in-the-middle",
+)
+_RIG_WINDOWS_PATTERNS = (
+    "windows",
+    "windows_nt",
+    "microsoft",
+    "mingw",
+    "msys",
+    "cygwin",
+    "not recognized as an internal or external command",
+    "operable program or batch file",
+    "the term 'uname' is not recognized",
+    "uname : the term",
+)
+_RIG_TIMEOUT_PATTERNS = (
+    "connection timed out",
+    "operation timed out",
+    "connect_timeout",
+    "timed out",
+    "no route to host",
+    "connection refused",
+    "network is unreachable",
+)
+
+
+def _rig_probe_reason(stdout, stderr, code):
+    """Classify a failed Linux probe without attempting wake/OS switching."""
+    detail = _rig_tail(stdout, stderr, limit=280).replace("\n", " ").strip()
+    lower = detail.lower()
+    stdout_lower = (stdout or "").lower()
+    stderr_lower = (stderr or "").lower()
+    if any(pattern in lower for pattern in _RIG_HOST_KEY_PATTERNS):
+        return "host key mismatch: SSH refused the pinned gamingrig-linux key"
+    if any(pattern in stdout_lower for pattern in _RIG_WINDOWS_PATTERNS):
+        return "Windows host: Linux SSH probe command is unavailable"
+    if any(
+        pattern in stderr_lower
+        for pattern in _RIG_WINDOWS_PATTERNS
+        if pattern != "windows"
+    ):
+        return "Windows host: Linux SSH probe command is unavailable"
+    if any(pattern in lower for pattern in _RIG_TIMEOUT_PATTERNS):
+        if "refused" in lower:
+            return "offline or sleeping: SSH connection refused"
+        if "no route" in lower or "unreachable" in lower:
+            return "offline or sleeping: no route to gamingrig-linux"
+        return "offline or sleeping: SSH connection timed out"
+    if detail:
+        return f"remote platform unavailable: {detail[:220]}"
+    return f"remote platform probe failed (exit {code})"
+
+
+def _rig_windows_health_corroboration():
+    """Confirm a Windows probe through the trusted local llm-proxy health API."""
+    endpoint = ENDPOINTS["llm-proxy"]
+    try:
+        request = urllib.request.Request(endpoint)
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode())
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "endpoint": endpoint,
+            "error": f"trusted llm-proxy health unavailable: {exc}",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "status": "failed",
+            "endpoint": endpoint,
+            "error": "trusted llm-proxy health returned a non-object JSON value",
+        }
+    rig_os = str(payload.get("rig_os") or "").strip().lower()
+    if rig_os != "windows":
+        return {
+            "status": "failed",
+            "endpoint": endpoint,
+            "rig_os": rig_os or "missing",
+            "error": "trusted llm-proxy health did not report rig_os=windows",
+        }
+    return {
+        "status": "ok",
+        "endpoint": endpoint,
+        "rig_os": "windows",
+    }
+
+
+def _rig_platform_probe():
+    """Probe only; no wake-on-LAN, firmware, or Windows switching is allowed."""
+    stdout, stderr, code = _rig_ssh(
+        ["uname", "-s"], timeout=RIG_SSH_CONNECT_TIMEOUT)
+    platform = (stdout or "").strip()
+    if code == 0 and platform.lower() == "linux":
+        return {
+            "step": "platform_probe",
+            "status": "ok",
+            "os": "Linux",
+            "host": RIG_SSH_ALIAS,
+        }, True
+
+    reason = _rig_probe_reason(stdout, stderr, code)
+    base = {
+        "step": "platform_probe",
+        "host": RIG_SSH_ALIAS,
+        "reason": reason,
+        "exit_code": code,
+        "output_tail": _rig_tail(stdout, stderr, limit=500),
+    }
+    if reason.startswith("offline or sleeping:"):
+        base["status"] = "skipped"
+        return base, False
+    if (
+        reason.startswith("Windows host:")
+        or reason.startswith("host key mismatch:")
+    ):
+        corroboration = _rig_windows_health_corroboration()
+        base["windows_corroboration"] = corroboration
+        if corroboration["status"] == "ok":
+            base["status"] = "skipped"
+            base["os"] = "Windows"
+            base["reason"] = (
+                "Windows host: trusted llm-proxy health corroborated "
+                "rig_os=windows"
+            )
+        else:
+            base["status"] = "failed"
+            if reason.startswith("Windows host:"):
+                base["error"] = (
+                    "Windows probe was not corroborated by trusted llm-proxy "
+                    f"health: {corroboration.get('error', 'unknown error')}"
+                )
+            else:
+                base["error"] = (
+                    f"{reason}; trusted llm-proxy did not corroborate Windows: "
+                    f"{corroboration.get('error', 'unknown error')}"
+                )
+        return base, False
+    base["status"] = "failed"
+    base["error"] = reason
+    return base, False
+
+
+def _rig_apt_upgrade():
+    """Run unattended apt update/upgrade and report planned and applied counts."""
+    update = _rig_command_result(
+        "apt_update",
+        [
+            "sudo", "-n", "env", "DEBIAN_FRONTEND=noninteractive",
+            "apt-get", "update",
+        ],
+        timeout=RIG_APT_TIMEOUT,
+    )
+    if update["status"] != "ok":
+        return {
+            "step": "apt_upgrade",
+            "status": "failed",
+            "planned_count": 0,
+            "upgraded_count": 0,
+            "substeps": [update],
+            "output_tail": _rig_tail(
+                update.get("stdout_tail", ""), update.get("stderr_tail"),
+                limit=1400,
+            ),
+            "error": update.get("error", "apt update failed"),
+        }
+
+    plan = _rig_command_result(
+        "apt_upgrade_plan", ["apt-get", "--simulate", "upgrade"],
+        timeout=RIG_APT_TIMEOUT,
+    )
+    plan_output = _rig_tail(
+        plan.get("stdout_tail", ""), plan.get("stderr_tail"), limit=1400)
+    match = re.search(r"(?im)(\d+)\s+upgraded\b", plan_output)
+    planned = int(match.group(1)) if match else 0
+    if plan["status"] != "ok" or match is None:
+        plan["status"] = "failed"
+        plan["error"] = plan.get("error") or (
+            "apt simulation did not report an upgrade count")
+        return {
+            "step": "apt_upgrade",
+            "status": "failed",
+            "planned_count": planned,
+            "upgraded_count": 0,
+            "substeps": [update, plan],
+            "output_tail": plan_output,
+            "error": plan["error"],
+        }
+
+    upgrade = _rig_command_result(
+        "apt_upgrade_apply",
+        [
+            "sudo", "-n", "env", "DEBIAN_FRONTEND=noninteractive",
+            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "upgrade",
+        ],
+        timeout=RIG_APT_TIMEOUT,
+        capture_full=True,
+    )
+    # Parse the complete apply response before discarding the private capture.
+    # Only bounded tails remain in the artifact/substep.
+    apply_stdout = upgrade.pop("_full_stdout", "")
+    apply_stderr = upgrade.pop("_full_stderr", "")
+    if not apply_stdout and not apply_stderr:
+        apply_stdout = upgrade.get("stdout_tail", "")
+        apply_stderr = upgrade.get("stderr_tail", "")
+    apply_output = _rig_tail(apply_stdout, apply_stderr, limit=1400)
+    applied_match = re.search(r"(?im)(\d+)\s+upgraded\b", apply_stdout + "\n" + apply_stderr)
+    applied = int(applied_match.group(1)) if applied_match else 0
+
+    output = _rig_tail(
+        update.get("stdout_tail", ""), update.get("stderr_tail", ""),
+        limit=1400,
+    ) + "\n" + apply_output
+    status = "ok" if upgrade["status"] == "ok" else "failed"
+    result = {
+        "step": "apt_upgrade",
+        "status": status,
+        "planned_count": planned,
+        "upgraded_count": applied if status == "ok" else 0,
+        "substeps": [update, plan, upgrade],
+        "output_tail": output[-1800:],
+    }
+    if status == "ok" and applied_match is None:
+        result["status"] = "failed"
+        result["upgraded_count"] = 0
+        result["error"] = "apt upgrade did not report an applied upgrade count"
+    elif status == "failed":
+        result["error"] = upgrade.get("error", "apt upgrade failed")
+    return result
+
+
+def _rig_herdr_update():
+    """Update Herdr as the rig user; refuse to block on an interactive session."""
+    pre_out, pre_err, pre_code = _rig_ssh(
+        ["herdr", "--version"], timeout=30)
+    pre_ver = pre_out.strip()
+    if pre_code != 0 or not pre_ver:
+        return {
+            "step": "herdr_update",
+            "status": "failed",
+            "pre_version": pre_ver,
+            "error": _rig_tail(pre_out, pre_err) or f"version probe exit {pre_code}",
+        }
+
+    stdout, stderr, code = _rig_ssh(
+        ["herdr", "update"], timeout=RIG_UPDATE_TIMEOUT)
+    detail = _rig_tail(stdout, stderr)
+    if (
+        "outside herdr" in detail.lower()
+        or "inside a herdr session" in detail.lower()
+        or "already in a herdr session" in detail.lower()
+    ):
+        return {
+            "step": "herdr_update",
+            "status": "skipped",
+            "pre_version": pre_ver,
+            "reason": "refused inside a Herdr session",
+            "output_tail": detail,
+        }
+
+    post_out, post_err, post_code = _rig_ssh(
+        ["herdr", "--version"], timeout=30)
+    post_ver = post_out.strip()
+    if code == 0 and post_code == 0 and post_ver and post_ver != pre_ver:
+        return {
+            "step": "herdr_update",
+            "status": "ok",
+            "pre_version": pre_ver,
+            "post_version": post_ver,
+            "output_tail": detail,
+        }
+    if code == 0 and post_code == 0 and post_ver == pre_ver:
+        return {
+            "step": "herdr_update",
+            "status": "skipped",
+            "pre_version": pre_ver,
+            "post_version": post_ver,
+            "reason": "already current",
+            "output_tail": detail,
+        }
+    return {
+        "step": "herdr_update",
+        "status": "failed",
+        "pre_version": pre_ver,
+        "post_version": post_ver,
+        "error": detail or _rig_tail(post_out, post_err) or f"update exit {code}",
+    }
+
+
+def _rig_omp_tag(version):
+    """Extract a safe package version from ``omp --version`` output."""
+    value = (version or "").strip()
+    match = re.search(
+        r"\bomp[/\s]+([vV]?[0-9][A-Za-z0-9._+-]*)",
+        value,
+        re.I,
+    )
+    if match:
+        return match.group(1).lstrip("vV")
+    match = re.fullmatch(r"[vV]?([0-9][A-Za-z0-9._+-]*)", value)
+    return match.group(1) if match else ""
+
+
+def _rig_omp_update():
+    """Update the rig's OMP CLI, smoke it, and Bun-rollback a broken install."""
+    pre_out, pre_err, pre_code = _rig_ssh(
+        ["omp", "--version"], timeout=30)
+    pre_ver = pre_out.strip()
+    pre_tag = _rig_omp_tag(pre_ver)
+    if pre_code != 0 or not pre_ver or not pre_tag:
+        return {
+            "step": "omp_update",
+            "status": "failed",
+            "pre_version": pre_ver,
+            "error": _rig_tail(pre_out, pre_err)
+                     or f"could not snapshot pre-update version (exit {pre_code})",
+        }
+
+    stdout, stderr, code = _rig_ssh(
+        ["omp", "update"], timeout=RIG_UPDATE_TIMEOUT)
+    detail = _rig_tail(stdout, stderr)
+    post_out, post_err, post_code = _rig_ssh(
+        ["omp", "--version"], timeout=30)
+    post_ver = post_out.strip()
+    smoke_out, smoke_err, smoke_code = _rig_ssh(
+        ["omp", "-p"], timeout=60, input_data="")
+    smoke_ok = smoke_code == 0
+
+    common = {
+        "step": "omp_update",
+        "pre_version": pre_ver,
+        "post_version": post_ver,
+        "smoke_ok": smoke_ok,
+        "smoke_output_tail": _rig_tail(smoke_out, smoke_err, limit=500),
+        "output_tail": detail,
+    }
+    if code == 0 and post_code == 0 and smoke_ok and post_ver and post_ver != pre_ver:
+        return {**common, "status": "ok"}
+    if code == 0 and post_code == 0 and smoke_ok and post_ver == pre_ver:
+        return {**common, "status": "skipped", "reason": "already current"}
+
+    # The only dynamic argument is a strictly validated package version.
+    rollback_args = [
+        "bun", "add", "-g", f"{_OMP_PKG}@{pre_tag}",
+    ]
+    r_stdout, r_stderr, r_code = _rig_ssh(
+        rollback_args, timeout=RIG_UPDATE_TIMEOUT)
+    rev_out, rev_err, rev_code = _rig_ssh(
+        ["omp", "--version"], timeout=30)
+    rev_ver = rev_out.strip()
+    rev_smoke_out, rev_smoke_err, rev_smoke_code = _rig_ssh(
+        ["omp", "-p"], timeout=60, input_data="")
+    reverted = (
+        r_code == 0 and rev_code == 0 and rev_ver == pre_ver
+        and rev_smoke_code == 0
+    )
+    return {
+        **common,
+        "status": "reverted" if reverted else "failed",
+        "reverted_to": rev_ver,
+        "rollback_ok": reverted,
+        "rollback_exit_code": r_code,
+        "rollback_output_tail": _rig_tail(
+            r_stdout, r_stderr, limit=700),
+        "rollback_smoke_output_tail": _rig_tail(
+            rev_smoke_out, rev_smoke_err, limit=500),
+        "error": (
+            f"post-update check failed; reverted to {pre_tag}"
+            if not smoke_ok else detail or f"update exit {code}"
+        ),
+    }
+
+
+def _rig_disk_health():
+    result = _rig_command_result("disk", ["df", "-P", "/"], timeout=30)
+    if result["status"] != "ok":
+        return result
+    lines = [line.split() for line in
+             (result.get("stdout_tail") or "").splitlines()
+             if line.strip()]
+    row = lines[-1] if lines else []
+    percent = next((part for part in row if part.endswith("%")), "")
+    if not percent:
+        return {
+            **result,
+            "status": "failed",
+            "error": "df output did not contain a root filesystem percentage",
+        }
+    try:
+        used = int(percent.rstrip("%"))
+    except ValueError:
+        return {**result, "status": "failed",
+                "error": f"invalid root filesystem percentage: {percent}"}
+    result["used_percent"] = used
+    if used > RIG_DISK_MAX_PERCENT:
+        result["status"] = "failed"
+        result["error"] = (
+            f"root filesystem {used}% used (limit {RIG_DISK_MAX_PERCENT}%)")
+    elif used >= 90:
+        result["status"] = "warning"
+        result["reason"] = f"root filesystem {used}% used"
+    return result
+
+
+def _rig_failed_units_health():
+    result = _rig_command_result(
+        "failed_units",
+        ["systemctl", "--failed", "--no-legend", "--no-pager", "--plain"],
+        timeout=30,
+    )
+    output = result.get("stdout_tail", "")
+    units = []
+    for line in output.splitlines():
+        clean = line.strip()
+        if not clean or re.match(r"^\d+\s+loaded units? listed", clean, re.I):
+            continue
+        if clean.lower().startswith("unit "):
+            continue
+        units.append(clean)
+    if units:
+        result["status"] = "failed"
+        result["error"] = "failed systemd units: " + "; ".join(units[:8])
+    elif (
+        result["exit_code"] not in (0, 1)
+        or (result["exit_code"] == 1 and result.get("stderr_tail"))
+    ):
+        result["status"] = "failed"
+        result["error"] = result.get("error", "systemctl failed-unit query failed")
+    else:
+        result["status"] = "ok"
+    if result["status"] == "ok" and result["exit_code"] == 1:
+        result.pop("error", None)
+    return result
+
+
+def _rig_model_ids_from_response(raw):
+    """Validate a complete OpenAI-compatible ``/v1/models`` response."""
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"malformed model endpoint JSON: {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ValueError("model endpoint response is missing a data list")
+
+    model_ids = []
+    for index, model in enumerate(payload["data"]):
+        if not isinstance(model, dict):
+            raise ValueError(f"model endpoint entry {index} is not an object")
+        model_id = model.get("id")
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ValueError(f"model endpoint entry {index} is missing a non-empty id")
+        model_ids.append(model_id)
+
+    expected = set(RIG_REQUIRED_MODEL_IDS)
+    actual = set(model_ids)
+    if (
+        len(model_ids) != len(RIG_REQUIRED_MODEL_IDS)
+        or len(actual) != len(model_ids)
+        or actual != expected
+    ):
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        raise ValueError(
+            "model endpoint IDs do not match retained registry"
+            f" (missing={missing}, unexpected={unexpected}, count={len(model_ids)})"
+        )
+    return model_ids
+
+
+def _rig_health_checks():
+    """Collect non-mutating rig health checks in a stable order."""
+    checks = [
+        _rig_disk_health(),
+        _rig_failed_units_health(),
+        _rig_command_result(
+            "nvidia_smi",
+            [
+                "nvidia-smi", "--query-gpu=name,memory.used,memory.total,"
+                "utilization.gpu,temperature.gpu", "--format=csv,noheader",
+            ],
+            timeout=30,
+        ),
+        _rig_command_result(
+            "llama_swap",
+            ["systemctl", "is-active", "--quiet", "llama-swap.service"],
+            timeout=30,
+        ),
+    ]
+    model_check = _rig_command_result(
+        "model_endpoint",
+        [
+            "curl", "-fsS", "--connect-timeout", "3", "--max-time", "8",
+            RIG_MODEL_ENDPOINT,
+        ],
+        timeout=20,
+        capture_full=True,
+    )
+    model_output = model_check.pop("_full_stdout", "")
+    model_check.pop("_full_stderr", None)
+    if model_check["status"] == "ok":
+        try:
+            model_check["model_ids"] = _rig_model_ids_from_response(
+                model_output or model_check.get("stdout_tail", "")
+            )
+        except ValueError as exc:
+            model_check["status"] = "failed"
+            model_check["error"] = str(exc)
+    checks.append(model_check)
+
+    # ``nvidia-smi`` and curl are successful only when they return evidence.
+    for check in checks:
+        if check["step"] == "nvidia_smi":
+            if check["status"] == "ok" and not check.get("stdout_tail"):
+                check["status"] = "failed"
+                check["error"] = "command returned no health evidence"
+    statuses = [check["status"] for check in checks]
+    if any(status == "failed" for status in statuses):
+        status = "failed"
+    elif any(status == "warning" for status in statuses):
+        status = "warning"
+    else:
+        status = "ok"
+    result = {
+        "step": "health",
+        "status": status,
+        "checks": checks,
+    }
+    if status in ("failed", "warning"):
+        result["error"] = "; ".join(
+            f"{check['step']}: {check.get('error') or check.get('reason') or check['status']}"
+            for check in checks if check.get("status") in ("failed", "error", "warning")
+        )
+    return result
+
+
+def _rig_reboot_required():
+    """Detect reboot-required without treating the normal false result as fail."""
+    result = _rig_command_result(
+        "reboot_required",
+        ["test", "-f", "/var/run/reboot-required"],
+        timeout=20,
+    )
+    code = result.get("exit_code")
+    if code == 1:
+        result["status"] = "skipped"
+        result["required"] = False
+        result["reason"] = "reboot not required"
+        result.pop("error", None)
+    elif code == 0:
+        result["status"] = "ok"
+        result["required"] = True
+    else:
+        result["status"] = "failed"
+        result["required"] = False
+        result["error"] = result.get("error", "could not inspect reboot-required flag")
+    return result
+
+def _rig_boot_id(step="boot_id"):
+    """Read and validate the current Linux boot identifier."""
+    result = _rig_command_result(
+        step, ["cat", "/proc/sys/kernel/random/boot_id"], timeout=20)
+    boot_id = (result.get("stdout_tail") or "").strip()
+    if (
+        result["status"] != "ok"
+        or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            boot_id,
+            re.I,
+        )
+    ):
+        result["status"] = "failed"
+        result["error"] = result.get("error") or "invalid Linux boot ID"
+        return result
+    result["boot_id"] = boot_id
+    return result
+
+
+def _rig_arm_bootnext():
+    """Re-arm Ubuntu's established firmware entry before a rig reboot."""
+    arm = _rig_command_result(
+        "bootnext_arm",
+        ["sudo", "-n", "efibootmgr", "--bootnext", RIG_BOOT_ENTRY],
+        timeout=30,
+    )
+    verify = _rig_command_result(
+        "bootnext_verify", ["sudo", "-n", "efibootmgr"], timeout=30)
+    verified = (
+        verify["status"] == "ok"
+        and bool(re.search(
+            rf"(?im)^\s*BootNext:\s*{re.escape(RIG_BOOT_ENTRY)}\b",
+            verify.get("stdout_tail", ""),
+        ))
+    )
+    result = {
+        "step": "bootnext",
+        "status": "ok" if arm["status"] == "ok" and verified else "failed",
+        "entry": RIG_BOOT_ENTRY,
+        "substeps": [arm, verify],
+    }
+    if not verified:
+        result["error"] = (
+            verify.get("error")
+            or f"efibootmgr did not report BootNext: {RIG_BOOT_ENTRY}"
+        )
+    return result
+
+
+def _rig_reboot():
+    """Request reboot; a connection close/reset is expected on success."""
+    stdout, stderr, code = _rig_ssh(
+        ["sudo", "-n", "systemctl", "reboot"], timeout=20)
+    detail = _rig_tail(stdout, stderr)
+    lower = detail.lower()
+    disconnected = (
+        "connection reset" in lower
+        or "broken pipe" in lower
+        or bool(re.search(r"connection(?: to .+)? closed", lower))
+    )
+    if code == 0 or disconnected:
+        return {
+            "step": "reboot",
+            "status": "ok",
+            "requested": True,
+            "connection_lost": bool(code != 0),
+            "output_tail": detail,
+        }
+    return {
+        "step": "reboot",
+        "status": "failed",
+        "requested": False,
+        "error": detail or f"reboot command exit {code}",
+    }
+
+
+def _rig_wait_for_linux(previous_boot_id, timeout_s=RIG_REBOOT_WAIT_TIMEOUT):
+    """Wait for pinned Linux SSH to return on a demonstrably new boot."""
+    deadline = time.monotonic() + max(0, int(timeout_s))
+    attempts = 0
+    last = {}
+    while True:
+        attempts += 1
+        stdout, stderr, code = _rig_ssh(
+            ["cat", "/proc/sys/kernel/random/boot_id"],
+            timeout=RIG_SSH_CONNECT_TIMEOUT,
+        )
+        boot_id = (stdout or "").strip()
+        last = {
+            "stdout": stdout[-180:] if stdout else "",
+            "stderr": stderr[-280:] if stderr else "",
+            "exit_code": code,
+            "boot_id": boot_id,
+        }
+        if code == 0 and boot_id and boot_id != previous_boot_id:
+            return {
+                "step": "ssh_return",
+                "status": "ok",
+                "attempts": attempts,
+                "os": "Linux",
+                "boot_id": boot_id,
+            }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(2, remaining))
+    reason = (
+        "Linux SSH returned but the boot ID did not change"
+        if last.get("exit_code") == 0 and last.get("boot_id") == previous_boot_id
+        else _rig_probe_reason(
+            last.get("stdout", ""),
+            last.get("stderr", ""),
+            last.get("exit_code", -1),
+        )
+    )
+    return {
+        "step": "ssh_return",
+        "status": "failed",
+        "attempts": attempts,
+        "error": (
+            f"new Linux boot did not appear within {int(timeout_s)}s: {reason}"
+        ),
+        "last_probe": last,
+    }
+
+
+def _rig_wait_for_health(timeout_s=RIG_REBOOT_WAIT_TIMEOUT):
+    """Poll all rig health/readiness checks until the new boot is healthy."""
+    deadline = time.monotonic() + max(0, int(timeout_s))
+    attempts = 0
+    last = {
+        "step": "health",
+        "status": "failed",
+        "checks": [],
+        "error": "no post-reboot health result",
+    }
+    while True:
+        attempts += 1
+        last = _rig_health_checks()
+        if last.get("status") == "ok":
+            gate = dict(last)
+            gate["step"] = "post_reboot_health"
+            gate["attempts"] = attempts
+            return gate
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(2, remaining))
+
+    gate = dict(last)
+    gate["step"] = "post_reboot_health"
+    gate["status"] = "failed"
+    gate["attempts"] = attempts
+    detail = str(last.get("error") or last.get("status") or "unhealthy")
+    gate["error"] = (
+        f"post-reboot health did not pass within {int(timeout_s)}s: {detail[:300]}"
+    )
+    return gate
+
+
+def _rig_has_failure(value):
+    """Recursively detect a failed command/health result."""
+    if isinstance(value, dict):
+        if value.get("status") in ("failed", "error"):
+            return True
+        return any(_rig_has_failure(item) for item in value.get("substeps", []))
+    if isinstance(value, list):
+        return any(_rig_has_failure(item) for item in value)
+    return False
+
+
+def _p1_gamingrig_maintenance(dry_run=False):
+    """Maintain gamingrig-linux without waking it or switching its operating system."""
+    result = {
+        "step": "gamingrig_maintenance",
+        "host": RIG_SSH_ALIAS,
+        "local_mutation": False,
+        "substeps": [],
+        "reboot_requested": False,
+        "new_boot_observed": False,
+        "rebooted": False,
+        "post_reboot_health_passed": False,
+    }
+    if dry_run:
+        result.update({
+            "status": "skipped",
+            "reason": "dry-run: remote maintenance not attempted",
+        })
+        return result
+
+    try:
+        probe, linux = _rig_platform_probe()
+        result["substeps"].append(probe)
+        if not linux:
+            result.update({
+                "status": "skipped" if probe.get("status") == "skipped" else "failed",
+                "reason": probe.get("reason", "Linux platform unavailable"),
+            })
+            if probe.get("status") != "skipped":
+                result["error"] = probe.get("error") or probe.get("reason")
+            return result
+        result["os"] = "Linux"
+
+        # Keep independent maintenance steps running so one remote failure is
+        # evidence in the artifact, not an exception that skips later checks.
+        result["substeps"].append(_rig_apt_upgrade())
+        result["substeps"].append(_rig_herdr_update())
+        result["substeps"].append(_rig_omp_update())
+
+        health = _rig_health_checks()
+        result["substeps"].append(health)
+        result["health"] = health
+
+        reboot = _rig_reboot_required()
+        result["substeps"].append(reboot)
+        if reboot.get("required"):
+            boot_id = _rig_boot_id("pre_reboot_boot_id")
+            result["substeps"].append(boot_id)
+            if boot_id["status"] == "ok":
+                bootnext = _rig_arm_bootnext()
+                result["substeps"].append(bootnext)
+                if bootnext["status"] == "ok":
+                    reboot_result = _rig_reboot()
+                    result["substeps"].append(reboot_result)
+                    if (
+                        reboot_result["status"] == "ok"
+                        and reboot_result.get("requested", True)
+                    ):
+                        result["reboot_requested"] = True
+                        returned = _rig_wait_for_linux(boot_id["boot_id"])
+                        result["substeps"].append(returned)
+                        if returned["status"] == "ok":
+                            result["new_boot_observed"] = True
+                            result["rebooted"] = True
+                            post_health = _rig_wait_for_health()
+                            result["substeps"].append(post_health)
+                            result["post_reboot_health"] = post_health
+                            result["post_reboot_health_passed"] = (
+                                post_health.get("status") == "ok"
+                            )
+
+        result["rebooted"] = (
+            result["reboot_requested"] and result["new_boot_observed"]
+        )
+        result["status"] = (
+            "failed" if _rig_has_failure(result["substeps"]) else "ok"
+        )
+        if result["status"] == "failed":
+            failures = [
+                sub.get("error", sub.get("reason", sub.get("step", "failure")))
+                for sub in result["substeps"]
+                if _rig_has_failure(sub)
+            ]
+            result["error"] = "; ".join(str(item) for item in failures)
+        return result
+    except Exception as exc:
+        # A malformed local invocation must still leave the rest of P1 alive.
+        result.update({
+            "status": "failed",
+            "error": f"remote maintenance exception: {exc}",
+        })
+        return result
+
+
 def phase_1_apply(run_dir, dry_run=False):
     """Phase 1: apply safe updates. Skip if --dry-run."""
+    # Remote maintenance is first so local P1 failures cannot skip it.
+    steps = [_p1_gamingrig_maintenance(dry_run=dry_run)]
     if dry_run:
         print("[P1] DRY RUN — skipping all mutations")
-        data = {"dry_run": True, "steps": []}
+        data = {"dry_run": True, "steps": steps}
         write_json(run_dir / "01-applied.json", data)
         return data
 
     print("[P1] applying safe updates")
-    steps = []
 
     # 1a: apt upgrade
     result = _p1_apt_upgrade()
@@ -1916,8 +2844,9 @@ def phase_1_apply(run_dir, dry_run=False):
     # 1i: llama.cpp — build seven-day-old Linux releases with atomic rollback
     steps.append(_p1_llama_cpp_update())
 
-    # 1j: omp self-update (last — swaps the binary the steward's own agents use)
+    # 1j: omp self-update (last local mutation; swaps the steward's own agents)
     steps.append(_p1_omp_update())
+
 
     data = {"steps": steps}
     write_json(run_dir / "01-applied.json", data)
@@ -3419,7 +4348,7 @@ def _audit_collector_2_versions():
         "npm_global": run_capture(["npm", "ls", "-g", "omp"]),
         "docker_images": run_capture(
             ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}"]),
-        "llama_cpp": "not-collected — worker verifies read-only via `ssh gamingrig`",
+        "llama_cpp": "not-collected — worker verifies read-only via `ssh gamingrig-linux`",
     }
 
 
@@ -5049,6 +5978,122 @@ def phase_7b_fix(run_dir, dry_run=False):
           f"{judge_oks} judge-pass, {multi} multi-iter)")
     return master
 
+def _html_gamingrig_update(step):
+    """Render only actionable gaming-rig changes and failures."""
+    lines = []
+    host = html.escape(str(step.get("host") or RIG_SSH_ALIAS))
+    status = step.get("status", "")
+    if status == "skipped":
+        reason = html.escape(str(step.get("reason") or "not attempted"))
+        return (
+            f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
+            f'{host}: SKIPPED — {reason}</p>'
+        )
+
+    def row(text, color="#2a2a36"):
+        lines.append(
+            f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
+            f'{text}</p>'
+        )
+
+    for sub in step.get("substeps", []) or []:
+        name = sub.get("step", "")
+        sub_status = sub.get("status", "")
+        if name == "apt_upgrade":
+            count = sub.get("upgraded_count", 0)
+            if count:
+                row(f'{host} apt: {html.escape(str(count))} packages upgraded')
+            if sub_status in ("failed", "error"):
+                row(
+                    f'{host} apt: FAILED — '
+                    f'{html.escape(str(sub.get("error") or ""))}',
+                    "#c62828",
+                )
+        elif name == "herdr_update":
+            if sub_status == "ok":
+                row(
+                    f'{host} herdr: '
+                    f'{html.escape(str(sub.get("pre_version", "?")))} -> '
+                    f'{html.escape(str(sub.get("post_version", "?")))}'
+                )
+            elif sub_status in ("failed", "error"):
+                row(
+                    f'{host} herdr: FAILED — '
+                    f'{html.escape(str(sub.get("error") or sub.get("reason") or ""))}',
+                    "#c62828",
+                )
+        elif name == "omp_update":
+            if sub_status == "ok":
+                row(
+                    f'{host} omp: '
+                    f'{html.escape(str(sub.get("pre_version", "?")))} -> '
+                    f'{html.escape(str(sub.get("post_version", "?")))}'
+                )
+            elif sub_status == "reverted":
+                row(
+                    f'{host} omp: update rolled back to '
+                    f'{html.escape(str(sub.get("reverted_to", "?")))} '
+                    '(post-update check failed)',
+                    "#e65100",
+                )
+            elif sub_status in ("failed", "error"):
+                row(
+                    f'{host} omp: FAILED — '
+                    f'{html.escape(str(sub.get("error") or ""))}',
+                    "#c62828",
+                )
+        elif name in ("health", "post_reboot_health"):
+            check_failures = []
+            for check in sub.get("checks", []) or []:
+                check_status = check.get("status", "")
+                if check_status in ("failed", "error", "warning"):
+                    detail = check.get("error") or check.get("reason") or check_status
+                    check_failures.append(
+                        f'{check.get("step", "check")}: {detail}'
+                    )
+            if name == "post_reboot_health" and sub_status in ("failed", "error"):
+                row(
+                    f'{host} post_reboot_health: FAILED — '
+                    f'{html.escape(str(sub.get("error") or "health gate failed"))}',
+                    "#c62828",
+                )
+            for failure in check_failures:
+                color = "#e65100" if "warning" in failure else "#c62828"
+                row(
+                    f'{host} {html.escape(failure.split(":", 1)[0])}: '
+                    f'{html.escape(failure.split(":", 1)[1].strip() if ":" in failure else failure)}',
+                    color,
+                )
+            if sub_status in ("failed", "error") and not check_failures:
+                row(
+                    f'{host} health: FAILED — '
+                    f'{html.escape(str(sub.get("error") or sub.get("reason") or sub_status))}',
+                    "#c62828",
+                )
+        elif name == "reboot" and sub_status == "ok":
+            if step.get("rebooted") and step.get("post_reboot_health_passed"):
+                row(f'{host}: rebooted; Linux SSH return and post-reboot health were validated')
+            elif step.get("rebooted"):
+                row(f'{host}: rebooted; post-reboot health gate did not pass', "#e65100")
+            elif step.get("reboot_requested"):
+                row(f'{host}: reboot requested; Linux SSH return was not validated', "#e65100")
+        elif name in (
+            "reboot_required", "pre_reboot_boot_id", "bootnext",
+            "reboot", "ssh_return",
+        ) and sub_status in ("failed", "error"):
+            row(
+                f'{host} {html.escape(name)}: FAILED — '
+                f'{html.escape(str(sub.get("error") or sub.get("reason") or sub_status))}',
+                "#c62828",
+            )
+
+    if status in ("failed", "error") and not lines:
+        row(
+            f'{host}: FAILED — {html.escape(str(step.get("error") or ""))}',
+            "#c62828",
+        )
+    return "\n".join(lines)
+
 def _html_updates(applied_data):
     """Render update steps — signal only, no no-op greys."""
     steps = applied_data.get("steps", [])
@@ -5061,9 +6106,38 @@ def _html_updates(applied_data):
     for s in steps:
         name = s.get("step", "")
         status = s.get("status", "")
+        # gamingrig_maintenance owns its own nested signal rendering; do not
+        # collapse a no-op remote health pass into a generic "ok" row.
+        if name in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
+            rendered = _html_gamingrig_update(s)
+            if rendered:
+                lines.append(rendered)
+
+        elif name == "llama_cpp":
+            pre = s.get("pre_version")
+            post = s.get("post_version")
+            if status == "ok" and pre != post:
+                lines.append(
+                    f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
+                    f'llama.cpp: {html.escape(str(pre or "?"))} -> '
+                    f'{html.escape(str(post or "?"))}</p>'
+                )
+            elif status == "reverted":
+                lines.append(
+                    f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
+                    f'llama.cpp: update rolled back to '
+                    f'{html.escape(str(s.get("reverted_to") or "?"))}</p>'
+                )
+            elif status in ("failed", "error"):
+                lines.append(
+                    f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+                    f'llama.cpp: FAILED — '
+                    f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>'
+                )
 
         # apt_upgrade: show only if upgrades happened or failed
-        if name == "apt_upgrade":
+        elif name == "apt_upgrade":
+
             n = s.get("upgraded_count", 0)
             if n > 0:
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
@@ -5705,13 +6779,193 @@ def _html_usage(usage_data):
     return "".join(out)
 
 
+def _tldr_collect_gamingrig_updates(step):
+    """Flatten nested gaming-rig changes/failures for the TLDR."""
+    updates = []
+    n_failed = 0
+    host = step.get("host") or RIG_SSH_ALIAS
+    emitted_failure = False
+    if step.get("status") == "skipped":
+        updates.append(
+            f"{host} skipped: {str(step.get('reason') or 'not attempted')[:140]}"
+        )
+        return updates, n_failed
+
+    for sub in step.get("substeps", []) or []:
+        name = sub.get("step", "")
+        status = sub.get("status", "")
+        if name == "apt_upgrade":
+            count = sub.get("upgraded_count", 0)
+            if count:
+                updates.append(f"{host} apt: {count} packages upgraded")
+            if status in ("failed", "error"):
+                n_failed += 1
+                emitted_failure = True
+                updates.append(
+                    f"{host} apt failed: {str(sub.get('error') or '')[:120]}"
+                )
+        elif name == "herdr_update":
+            if status == "ok":
+                pre = str(sub.get("pre_version") or "")
+                post = str(sub.get("post_version") or "")
+                if pre and post and pre != post:
+                    updates.append(f"{host} herdr: {pre} -> {post}")
+            elif status in ("failed", "error"):
+                n_failed += 1
+                emitted_failure = True
+                updates.append(
+                    f"{host} herdr failed: {str(sub.get('error') or '')[:120]}"
+                )
+        elif name == "omp_update":
+            if status == "ok":
+                pre = str(sub.get("pre_version") or "")
+                post = str(sub.get("post_version") or "")
+                if pre and post and pre != post:
+                    updates.append(f"{host} omp: {pre} -> {post}")
+            elif status == "reverted":
+                n_failed += 1
+                emitted_failure = True
+                updates.append(
+                    f"{host} omp update rolled back to "
+                    f"{sub.get('reverted_to') or '?'} (post-update check failed)"
+                )
+            elif status in ("failed", "error"):
+                n_failed += 1
+                emitted_failure = True
+                updates.append(
+                    f"{host} omp failed: {str(sub.get('error') or '')[:120]}"
+                )
+        elif name in ("health", "post_reboot_health"):
+            check_failures = []
+            for check in sub.get("checks", []) or []:
+                check_status = check.get("status", "")
+                if check_status in ("failed", "error", "warning"):
+                    if check_status in ("failed", "error"):
+                        n_failed += 1
+                        emitted_failure = True
+                    detail = check.get("error") or check.get("reason") or check_status
+                    check_failures.append(
+                        f"{host} {check.get('step') or 'health'} "
+                        f"{check_status}: {str(detail)[:120]}"
+                    )
+            if name == "post_reboot_health" and status in ("failed", "error"):
+                if check_failures:
+                    updates.append(
+                        f"{host} post_reboot_health failed: "
+                        f"{str(sub.get('error') or 'health gate failed')[:120]}"
+                    )
+                else:
+                    n_failed += 1
+                    emitted_failure = True
+                    updates.append(
+                        f"{host} post_reboot_health failed: "
+                        f"{str(sub.get('error') or '')[:120]}"
+                    )
+            updates.extend(check_failures)
+            if (
+                status in ("failed", "error")
+                and not (sub.get("checks") or [])
+                and name != "post_reboot_health"
+            ):
+                n_failed += 1
+                emitted_failure = True
+                updates.append(
+                    f"{host} health failed: {str(sub.get('error') or '')[:120]}"
+                )
+        elif name in (
+            "reboot_required", "pre_reboot_boot_id", "bootnext",
+            "reboot", "ssh_return",
+        ) and status in ("failed", "error"):
+            n_failed += 1
+            updates.append(
+                f"{host} {name} failed: "
+                f"{str(sub.get('error') or sub.get('reason') or status)[:120]}"
+            )
+        elif name == "reboot" and status == "ok":
+            if step.get("rebooted") and step.get("post_reboot_health_passed"):
+                updates.append(f"{host} rebooted and Linux health was rechecked")
+            elif step.get("rebooted"):
+                updates.append(f"{host} rebooted; post-reboot health gate did not pass")
+            elif step.get("reboot_requested"):
+                updates.append(
+                    f"{host} reboot requested; Linux SSH return was not validated"
+                )
+
+    if step.get("status") in ("failed", "error") and not emitted_failure:
+        n_failed += 1
+        updates.append(
+            f"{host} maintenance failed: {str(step.get('error') or '')[:120]}"
+        )
+    return updates, n_failed
+
+
+def _tldr_collect_gamingrig_failures(step):
+    """Return remote apply failures for TLDR health and Carter's action list."""
+    host = step.get("host") or RIG_SSH_ALIAS
+    failures = []
+    for sub in step.get("substeps", []) or []:
+        name = sub.get("step") or "maintenance"
+        status = sub.get("status", "")
+        if name in ("health", "post_reboot_health"):
+            checks = sub.get("checks") or []
+            check_failures = [
+                check for check in checks
+                if check.get("status") in ("failed", "error")
+            ]
+            for check in check_failures:
+                detail = check.get("error") or check.get("reason") or check.get("status")
+                failures.append(
+                    f"{host} {name}/{check.get('step') or 'check'}: {str(detail)[:180]}"
+                )
+            if status in ("failed", "error") and not check_failures:
+                failures.append(
+                    f"{host} {name}: "
+                    f"{str(sub.get('error') or 'health gate failed')[:180]}"
+                )
+        elif status in ("failed", "error", "reverted"):
+            failures.append(
+                f"{host} {name}: "
+                f"{str(sub.get('error') or sub.get('reason') or status)[:180]}"
+            )
+    if step.get("status") in ("failed", "error") and not failures:
+        failures.append(
+            f"{host} maintenance: "
+            f"{str(step.get('error') or step.get('reason') or 'failed')[:180]}"
+        )
+    return failures
+
+
 def _tldr_collect_updates(applied):
-    """Real package/image changes only (not already-current skips)."""
+    """Real local changes plus actionable remote-maintenance signals."""
     updates = []
     n_failed = 0
     for s in applied.get("steps", []) or []:
         step = s.get("step", "")
+        if step in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
+            rig_updates, rig_failed = _tldr_collect_gamingrig_updates(s)
+            updates.extend(rig_updates)
+            n_failed += rig_failed
+            continue
+
         status = s.get("status", "")
+        if step == "llama_cpp":
+            pre = s.get("pre_version")
+            post = s.get("post_version")
+            if status == "ok" and pre != post:
+                updates.append(f"llama.cpp: {pre or '?'} -> {post or '?'}")
+            elif status == "reverted":
+                n_failed += 1
+                updates.append(
+                    f"llama.cpp update rolled back to "
+                    f"{s.get('reverted_to') or '?'}"
+                )
+            elif status in ("failed", "error"):
+                n_failed += 1
+                updates.append(
+                    f"llama.cpp failed: {str(s.get('error') or s.get('reason') or '')[:120]}"
+                )
+            continue
+
         if status == "failed":
             n_failed += 1
             updates.append(f"{step} failed: {str(s.get('error', ''))[:80]}")
@@ -5865,9 +7119,15 @@ def _tldr_audit_end_state(audit, fixes):
 
 
 def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
-    """End-state facts for TL;DR (LLM + deterministic)."""
+    """End-state facts for TLDR (LLM + deterministic)."""
     updates, n_failed_apply = _tldr_collect_updates(applied)
-    health_issues = _tldr_collect_health(heartbeat, validation)
+    rig_apply_failures = []
+    for step in applied.get("steps", []) or []:
+        if step.get("step") in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
+            rig_apply_failures.extend(_tldr_collect_gamingrig_failures(step))
+    health_issues = (
+        rig_apply_failures + _tldr_collect_health(heartbeat, validation)
+    )
     audit_state = _tldr_audit_end_state(audit, fixes)
 
     n_real_fixes = 0
@@ -5878,7 +7138,10 @@ def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
         )
 
     plans = (queue or {}).get("plans", {}) or {}
-    needs_carter = []
+    needs_carter = [
+        f"gaming-rig apply failure — {failure}"
+        for failure in rig_apply_failures
+    ]
     for item in plans.get("approved", []) or []:
         needs_carter.append(
             f"approved plan: {item.get('heading') or item.get('file') or '?'}"
@@ -5899,6 +7162,7 @@ def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
     return {
         "health_ok": not health_issues,
         "health_issues": health_issues,
+        "rig_apply_failures": rig_apply_failures,
         "updates": updates,
         "n_failed_apply": n_failed_apply,
         "audit_open": audit_state["open"],
@@ -5996,7 +7260,10 @@ def _tldr_deterministic(facts):
     parts = []
 
     if facts.get("health_issues"):
-        parts.append("Health issues: " + "; ".join(facts["health_issues"][:3]) + ".")
+        rig_failures = facts.get("rig_apply_failures") or []
+        other_issues = facts["health_issues"][len(rig_failures):]
+        issue_text = rig_failures + other_issues[:3]
+        parts.append("Health issues: " + "; ".join(issue_text) + ".")
     else:
         parts.append("Host healthy.")
 
@@ -6185,6 +7452,16 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
             break
         name = s.get("step", "")
         status = s.get("status", "")
+        if name in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
+            for update in _tldr_collect_gamingrig_updates(s)[0]:
+                lines.append(f"- {update}")
+            continue
+
+        if name == "llama_cpp":
+            for update in _tldr_collect_updates({"steps": [s]})[0]:
+                lines.append(f"- {update}")
+            continue
+
         if name.startswith("auto_"):
             pkg = name.replace("auto_", "")
             if status == "ok":

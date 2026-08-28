@@ -1,0 +1,20 @@
+# Dedicated rig-to-ThinkPad maintenance and development connection.
+Host thinkpad
+    HostName 192.168.4.92
+    HostKeyAlias thinkpad
+    User carter
+    IdentityFile ~/.ssh/id_ed25519_thinkpad
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile ~/.ssh/known_hosts
+    HostKeyAlgorithms ssh-ed25519
+
+# Dedicated GitHub key; API authentication remains separate.
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519_github
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile ~/.ssh/known_hosts
+    HostKeyAlgorithms ssh-ed25519

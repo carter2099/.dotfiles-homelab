@@ -2,11 +2,12 @@
 """Behavioral tests for steward delayed-update selection and rollback."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 
 import steward_runner as steward
 
@@ -309,6 +310,596 @@ class DelayedUpdateTests(unittest.TestCase):
                 "security-posture", resolved, "PASS", []
             )
             self.assertEqual((verdict, confirmed), ("PASS", []))
+
+
+class GamingRigMaintenanceTests(unittest.TestCase):
+    def _linux_probe(self):
+        return (
+            {
+                "step": "platform_probe",
+                "status": "ok",
+                "os": "Linux",
+                "host": steward.RIG_SSH_ALIAS,
+            },
+            True,
+        )
+
+    def _healthy(self, step="health"):
+        return {
+            "step": step,
+            "status": "ok",
+            "checks": [
+                {"step": "disk", "status": "ok"},
+                {"step": "failed_units", "status": "ok"},
+                {"step": "nvidia_smi", "status": "ok"},
+                {"step": "llama_swap", "status": "ok"},
+                {"step": "model_endpoint", "status": "ok"},
+            ],
+        }
+
+    @staticmethod
+    def _json_response(payload):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = None
+        response.read.return_value = json.dumps(payload).encode()
+        return response
+
+    def test_ssh_argv_is_pinned_bounded_and_quoted(self):
+        argv = steward._rig_ssh_command(
+            ["bun", "add", "-g", "pkg@1.2.3;touch /tmp/should-not-run"]
+        )
+        self.assertIn("BatchMode=yes", argv)
+        self.assertIn("ConnectTimeout=10", argv)
+        self.assertIn("gamingrig-linux", argv)
+        self.assertNotIn("StrictHostKeyChecking=no", argv)
+        self.assertIn(
+            "'pkg@1.2.3;touch /tmp/should-not-run'",
+            argv,
+        )
+        self.assertIn("env", argv)
+        self.assertIn(f"PATH={steward.RIG_REMOTE_PATH}", argv)
+        self.assertEqual(
+            steward.RIG_MODEL_ENDPOINT,
+            "http://192.168.4.103:8080/v1/models",
+        )
+
+    def test_offline_rig_is_skipped_without_follow_up_commands(self):
+        with patch.object(
+            steward, "_rig_ssh",
+            return_value=("", "Connection timed out", 255),
+        ) as ssh:
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("offline or sleeping", result["reason"])
+        ssh.assert_called_once()
+
+    def test_refusal_and_no_route_are_the_other_offline_signatures(self):
+        for message in ("Connection refused", "No route to host"):
+            with self.subTest(message=message), patch.object(
+                steward, "_rig_ssh", return_value=("", message, 255)
+            ):
+                result = steward._p1_gamingrig_maintenance()
+            self.assertEqual(result["status"], "skipped")
+            self.assertIn("offline or sleeping", result["reason"])
+
+
+    def test_windows_rig_is_skipped_only_with_trusted_proxy_corroboration(self):
+        with (
+            patch.object(
+                steward, "_rig_ssh",
+                return_value=("MINGW64_NT-10.0", "", 0),
+            ) as ssh,
+            patch.object(
+                steward.urllib.request,
+                "urlopen",
+                return_value=self._json_response({"rig_os": "windows"}),
+            ) as urlopen,
+        ):
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("trusted llm-proxy", result["reason"])
+        self.assertEqual(urlopen.call_count, 1)
+        ssh.assert_called_once()
+
+    def test_uncorroborated_windows_probe_is_failure(self):
+        with (
+            patch.object(
+                steward, "_rig_ssh",
+                return_value=("MINGW64_NT-10.0", "", 0),
+            ) as ssh,
+            patch.object(
+                steward.urllib.request,
+                "urlopen",
+                return_value=self._json_response({"rig_os": "linux"}),
+            ),
+        ):
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("not corroborated", result["error"])
+        ssh.assert_called_once()
+
+    def test_auth_failure_is_not_classified_as_offline(self):
+        with patch.object(
+            steward, "_rig_ssh",
+            return_value=("", "Permission denied (publickey)", 255),
+        ) as ssh:
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "failed")
+        self.assertNotIn("offline or sleeping", result.get("reason", ""))
+        ssh.assert_called_once()
+
+    def test_host_key_mismatch_is_failure_without_windows_corroboration(self):
+        with (
+            patch.object(
+                steward, "_rig_ssh",
+                return_value=("", "Host key verification failed", 255),
+            ) as ssh,
+            patch.object(
+                steward, "_rig_windows_health_corroboration",
+                return_value={"status": "failed", "error": "rig_os=linux"},
+            ),
+        ):
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("host key mismatch", result["reason"])
+        self.assertIn("did not corroborate Windows", result["error"])
+        ssh.assert_called_once()
+
+    def test_linux_host_key_mismatch_is_skipped_when_windows_is_corroborated(self):
+        with (
+            patch.object(
+                steward, "_rig_ssh",
+                return_value=("", "Host key verification failed", 255),
+            ) as ssh,
+            patch.object(
+                steward, "_rig_windows_health_corroboration",
+                return_value={"status": "ok", "rig_os": "windows"},
+            ),
+        ):
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["substeps"][0]["os"], "Windows")
+        self.assertIn("trusted llm-proxy", result["reason"])
+        ssh.assert_called_once()
+
+
+    def test_linux_noop_maintenance_is_success(self):
+        with (
+            patch.object(steward, "_rig_platform_probe",
+                         return_value=self._linux_probe()),
+            patch.object(steward, "_rig_apt_upgrade",
+                         return_value={"step": "apt_upgrade", "status": "ok",
+                                       "upgraded_count": 0}),
+            patch.object(steward, "_rig_herdr_update",
+                         return_value={"step": "herdr_update", "status": "skipped",
+                                       "reason": "already current"}),
+
+            patch.object(steward, "_rig_omp_update",
+                         return_value={"step": "omp_update", "status": "skipped",
+                                       "reason": "already current"}),
+            patch.object(steward, "_rig_health_checks",
+                         return_value=self._healthy()),
+            patch.object(steward, "_rig_reboot_required",
+                         return_value={"step": "reboot_required", "status": "skipped",
+                                       "required": False}),
+        ):
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result.get("rebooted"))
+        self.assertEqual(len(result["substeps"]), 6)
+
+    def test_apt_upgrade_reports_planned_and_actual_change_counts(self):
+        responses = [
+            {"step": "apt_update", "status": "ok", "stdout_tail": "ok"},
+            {
+                "step": "apt_upgrade_plan",
+                "status": "ok",
+                "stdout_tail": "3 upgraded, 0 newly installed, 0 to remove.",
+            },
+            {
+                "step": "apt_upgrade_apply",
+                "status": "ok",
+                "stdout_tail": "1 upgraded, 0 newly installed, 0 to remove.",
+            },
+        ]
+        with patch.object(
+            steward, "_rig_command_result", side_effect=responses
+        ) as command:
+            result = steward._rig_apt_upgrade()
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["planned_count"], 3)
+        self.assertEqual(result["upgraded_count"], 1)
+        self.assertEqual(command.call_count, 3)
+
+    def test_apt_upgrade_parses_full_apply_output_before_tail(self):
+        full_apply = "2 upgraded, 0 newly installed, 0 to remove.\n" + ("x" * 2000)
+        responses = [
+            {"step": "apt_update", "status": "ok", "stdout_tail": "ok"},
+            {
+                "step": "apt_upgrade_plan",
+                "status": "ok",
+                "stdout_tail": "5 upgraded, 0 newly installed, 0 to remove.",
+            },
+            {
+                "step": "apt_upgrade_apply",
+                "status": "ok",
+                "stdout_tail": full_apply[-700:],
+                "_full_stdout": full_apply,
+                "_full_stderr": "",
+            },
+        ]
+        with patch.object(steward, "_rig_command_result", side_effect=responses):
+            result = steward._rig_apt_upgrade()
+        self.assertEqual(result["upgraded_count"], 2)
+        self.assertEqual(result["planned_count"], 5)
+        self.assertNotIn("_full_stdout", result["substeps"][-1])
+
+    def test_model_endpoint_requires_exact_retained_ids(self):
+        expected = list(steward.RIG_REQUIRED_MODEL_IDS)
+        payload = {
+            "object": "list",
+            "data": [{"id": model_id} for model_id in expected],
+        }
+        response = json.dumps(payload)
+        responses = [
+            {"step": "disk", "status": "ok", "stdout_tail": "/dev/root 50%"},
+            {"step": "failed_units", "status": "ok", "exit_code": 0},
+            {"step": "nvidia_smi", "status": "ok", "stdout_tail": "RTX 5070"},
+            {"step": "llama_swap", "status": "ok", "exit_code": 0},
+            {
+                "step": "model_endpoint",
+                "status": "ok",
+                "stdout_tail": response[-700:],
+                "_full_stdout": response,
+                "_full_stderr": "",
+            },
+        ]
+        with patch.object(steward, "_rig_command_result", side_effect=responses):
+            result = steward._rig_health_checks()
+        model_check = result["checks"][-1]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(model_check["model_ids"], expected)
+        self.assertNotIn("_full_stdout", model_check)
+
+    def test_model_endpoint_malformed_empty_and_missing_ids_fail_health(self):
+        expected = list(steward.RIG_REQUIRED_MODEL_IDS)
+        invalid_payloads = [
+            "",
+            json.dumps({"object": "list", "data": []}),
+            json.dumps({
+                "object": "list",
+                "data": [{"id": model_id} for model_id in expected[:-1]],
+            }),
+            json.dumps({
+                "object": "list",
+                "data": [{"id": model_id} for model_id in expected]
+                + [{"id": "unexpected-model"}],
+            }),
+            json.dumps({
+                "object": "list",
+                "data": [{"name": expected[0]}]
+                + [{"id": model_id} for model_id in expected[1:]],
+            }),
+            json.dumps({
+                "object": "list",
+                "data": [{"id": model_id} for model_id in expected[:-1]]
+                + [{"id": expected[0]}],
+            }),
+            "{not-json",
+        ]
+        for response in invalid_payloads:
+            with self.subTest(response=response[:30]):
+                responses = [
+                    {"step": "disk", "status": "ok", "stdout_tail": "/dev/root 50%"},
+                    {"step": "failed_units", "status": "ok", "exit_code": 0},
+                    {"step": "nvidia_smi", "status": "ok", "stdout_tail": "RTX 5070"},
+                    {"step": "llama_swap", "status": "ok", "exit_code": 0},
+                    {
+                        "step": "model_endpoint",
+                        "status": "ok",
+                        "stdout_tail": response[-700:],
+                        "_full_stdout": response,
+                        "_full_stderr": "",
+                    },
+                ]
+                with patch.object(
+                    steward, "_rig_command_result", side_effect=responses
+                ):
+                    result = steward._rig_health_checks()
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["checks"][-1]["status"], "failed")
+
+    def test_omp_update_rolls_back_with_bun_after_broken_smoke(self):
+        responses = [
+            ("omp/1.0.0", "", 0),       # pre-version
+            ("", "update failed", 1),   # update
+            ("omp/1.1.0", "", 0),       # post-version
+            ("", "broken binary", 1),   # post-update smoke
+            ("", "", 0),                # bun rollback
+            ("omp/1.0.0", "", 0),       # reverted version
+            ("", "", 0),                # reverted smoke
+        ]
+        with patch.object(steward, "_rig_ssh", side_effect=responses) as ssh:
+            result = steward._rig_omp_update()
+        self.assertEqual(result["status"], "reverted")
+        self.assertEqual(result["reverted_to"], "omp/1.0.0")
+        rollback_call = ssh.call_args_list[4].args[0]
+        self.assertEqual(rollback_call[-1],
+                         "@oh-my-pi/pi-coding-agent@1.0.0")
+        self.assertNotIn(";", " ".join(rollback_call))
+
+
+    def test_wait_for_linux_requires_a_changed_boot_id(self):
+        old_boot = "11111111-1111-1111-1111-111111111111"
+        new_boot = "22222222-2222-2222-2222-222222222222"
+        with (
+            patch.object(
+                steward,
+                "_rig_ssh",
+                side_effect=[
+                    (old_boot, "", 0),
+                    (new_boot, "", 0),
+                ],
+            ),
+            patch.object(steward.time, "monotonic", side_effect=[0, 1]),
+            patch.object(steward.time, "sleep"),
+
+        ):
+            result = steward._rig_wait_for_linux(old_boot, timeout_s=2)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["boot_id"], new_boot)
+        self.assertEqual(result["attempts"], 2)
+    def test_post_reboot_health_polls_until_every_check_is_healthy(self):
+        failed = self._healthy()
+        failed["status"] = "failed"
+        failed["error"] = "model_endpoint: HTTP 503"
+        with (
+            patch.object(
+                steward, "_rig_health_checks",
+                side_effect=[failed, self._healthy()],
+            ) as health,
+            patch.object(steward.time, "monotonic", side_effect=[0, 0]),
+            patch.object(steward.time, "sleep") as sleep,
+        ):
+            result = steward._rig_wait_for_health(timeout_s=2)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["step"], "post_reboot_health")
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(health.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_reboot_accepts_established_disconnect_but_not_timeout(self):
+        with patch.object(
+            steward, "_rig_ssh",
+            return_value=("", "Connection timed out", 255),
+        ):
+            timed_out = steward._rig_reboot()
+        self.assertEqual(timed_out["status"], "failed")
+        self.assertFalse(timed_out["requested"])
+
+        with patch.object(
+            steward, "_rig_ssh",
+            return_value=("", "Connection to gamingrig-linux closed", 255),
+        ):
+            closed = steward._rig_reboot()
+        self.assertEqual(closed["status"], "ok")
+        self.assertTrue(closed["requested"])
+
+    def test_reboot_rearms_bootnext_waits_for_linux_and_rechecks_health(self):
+        with (
+            patch.object(steward, "_rig_platform_probe",
+                         return_value=self._linux_probe()),
+            patch.object(steward, "_rig_apt_upgrade",
+                         return_value={"step": "apt_upgrade", "status": "ok",
+                                       "upgraded_count": 1}),
+            patch.object(steward, "_rig_herdr_update",
+                         return_value={"step": "herdr_update", "status": "skipped"}),
+            patch.object(steward, "_rig_omp_update",
+                         return_value={"step": "omp_update", "status": "skipped"}),
+            patch.object(steward, "_rig_health_checks",
+                         side_effect=[self._healthy(), self._healthy("post_reboot_health")]) as health,
+            patch.object(steward, "_rig_reboot_required",
+                         return_value={"step": "reboot_required", "status": "ok",
+                                       "required": True}),
+            patch.object(steward, "_rig_arm_bootnext",
+                         return_value={"step": "bootnext", "status": "ok",
+                                       "entry": "0001"}),
+            patch.object(steward, "_rig_boot_id",
+                         return_value={"step": "pre_reboot_boot_id", "status": "ok",
+                                       "boot_id": "11111111-1111-1111-1111-111111111111"}),
+            patch.object(steward, "_rig_reboot",
+                         return_value={"step": "reboot", "status": "ok"}),
+            patch.object(steward, "_rig_wait_for_linux",
+                         return_value={"step": "ssh_return", "status": "ok",
+                                       "os": "Linux"}) as wait,
+        ):
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["reboot_requested"])
+        self.assertTrue(result["new_boot_observed"])
+        self.assertTrue(result["rebooted"])
+
+        self.assertTrue(result["post_reboot_health_passed"])
+        self.assertEqual(health.call_count, 2)
+        self.assertEqual(result["post_reboot_health"]["status"], "ok")
+        wait.assert_called_once_with(
+            "11111111-1111-1111-1111-111111111111")
+    def test_failed_ssh_return_does_not_claim_rebooted_or_rechecked(self):
+        with (
+            patch.object(steward, "_rig_platform_probe",
+                         return_value=self._linux_probe()),
+            patch.object(steward, "_rig_apt_upgrade",
+                         return_value={"step": "apt_upgrade", "status": "ok",
+                                       "upgraded_count": 0}),
+            patch.object(steward, "_rig_herdr_update",
+                         return_value={"step": "herdr_update", "status": "skipped"}),
+            patch.object(steward, "_rig_omp_update",
+                         return_value={"step": "omp_update", "status": "skipped"}),
+            patch.object(steward, "_rig_health_checks",
+                         return_value=self._healthy()),
+            patch.object(steward, "_rig_reboot_required",
+                         return_value={"step": "reboot_required", "status": "ok",
+                                       "required": True}),
+            patch.object(steward, "_rig_arm_bootnext",
+                         return_value={"step": "bootnext", "status": "ok"}),
+            patch.object(steward, "_rig_boot_id",
+                         return_value={"step": "pre_reboot_boot_id", "status": "ok",
+                                       "boot_id": "11111111-1111-1111-1111-111111111111"}),
+            patch.object(steward, "_rig_reboot",
+                         return_value={"step": "reboot", "status": "ok",
+                                       "requested": True}),
+            patch.object(steward, "_rig_wait_for_linux",
+                         return_value={"step": "ssh_return", "status": "failed",
+                                       "error": "new boot not observed"}),
+        ):
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["reboot_requested"])
+        self.assertFalse(result["new_boot_observed"])
+        self.assertFalse(result["rebooted"])
+        self.assertFalse(result["post_reboot_health_passed"])
+        rendered = steward._html_gamingrig_update(result)
+        self.assertIn("ssh_return", rendered)
+        self.assertNotIn("rebooted;", rendered)
+
+
+    def test_post_update_health_failure_is_result_data(self):
+        failed = self._healthy()
+        failed["status"] = "failed"
+        failed["checks"][-1] = {
+            "step": "model_endpoint",
+            "status": "failed",
+            "error": "HTTP 503",
+        }
+        failed["error"] = "model_endpoint: HTTP 503"
+        with (
+            patch.object(steward, "_rig_platform_probe",
+                         return_value=self._linux_probe()),
+            patch.object(steward, "_rig_apt_upgrade",
+                         return_value={"step": "apt_upgrade", "status": "ok",
+                                       "upgraded_count": 0}),
+            patch.object(steward, "_rig_herdr_update",
+                         return_value={"step": "herdr_update", "status": "skipped"}),
+            patch.object(steward, "_rig_omp_update",
+                         return_value={"step": "omp_update", "status": "skipped"}),
+            patch.object(steward, "_rig_health_checks", return_value=failed),
+            patch.object(steward, "_rig_reboot_required",
+                         return_value={"step": "reboot_required", "status": "skipped",
+                                       "required": False}),
+        ):
+            result = steward._p1_gamingrig_maintenance()
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("model_endpoint", result["error"])
+
+    def test_gamingrig_updates_are_signal_only_and_reach_tldr(self):
+        applied = {
+            "steps": [{
+                "step": "gamingrig_maintenance",
+                "host": "gamingrig-linux",
+                "status": "failed",
+                "substeps": [
+                    {"step": "apt_upgrade", "status": "ok", "upgraded_count": 0},
+                    {"step": "omp_update", "status": "reverted",
+                     "reverted_to": "omp/1.0.0"},
+                    {"step": "health", "status": "failed", "checks": [{
+                        "step": "model_endpoint", "status": "failed",
+                        "error": "HTTP 503",
+                    }]},
+                ],
+            }],
+        }
+        html = steward._html_updates(applied)
+        updates, failures = steward._tldr_collect_updates(applied)
+
+        self.assertIn("rolled back", html)
+        self.assertIn("model_endpoint", html)
+        self.assertEqual(failures, 2)
+        self.assertTrue(any("rolled back" in item for item in updates))
+        self.assertTrue(any("HTTP 503" in item for item in updates))
+    def test_all_failed_reboot_gates_are_rendered(self):
+        names = (
+            "reboot_required", "pre_reboot_boot_id", "bootnext",
+            "reboot", "ssh_return", "post_reboot_health",
+        )
+        substeps = [
+            {"step": name, "status": "failed", "error": f"{name} failed"}
+            for name in names
+        ]
+        rendered = steward._html_gamingrig_update({
+            "step": "gamingrig_maintenance",
+            "host": "gamingrig-linux",
+            "status": "failed",
+            "substeps": substeps,
+        })
+        for name in names:
+            self.assertIn(name, rendered)
+
+    def test_rig_apply_failures_lead_tldr_health_and_needs_carter(self):
+        applied = {
+            "steps": [
+                {
+                    "step": "other_update",
+                    "status": "ok",
+                },
+                {
+                    "step": "gamingrig_maintenance",
+                    "host": "gamingrig-linux",
+                    "status": "failed",
+                    "substeps": [{
+                        "step": "apt_upgrade",
+                        "status": "failed",
+                        "error": "apt unavailable",
+                    }],
+                },
+            ],
+        }
+        facts = steward._build_tldr_facts(
+            applied,
+            {"sections": []},
+            {"plans": {}, "ideas": {}},
+            {"sections": []},
+            {},
+        )
+        self.assertFalse(facts["health_ok"])
+
+        self.assertIn("apt unavailable", facts["health_issues"][0])
+        self.assertIn("gaming-rig apply failure", facts["needs_carter"][0])
+        deterministic = steward._tldr_deterministic(facts)
+        self.assertTrue(deterministic.startswith("Health issues:"))
+        self.assertIn("apt unavailable", deterministic)
+    def test_gamingrig_runs_before_local_apt_failure(self):
+        calls = []
+        remote = {
+            "step": "gamingrig_maintenance",
+            "host": steward.RIG_SSH_ALIAS,
+            "status": "ok",
+            "local_mutation": False,
+            "substeps": [],
+        }
+        local_failure = {
+            "step": "apt_upgrade",
+            "status": "failed",
+            "error": "apt failed",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+
+            def run_remote(*, dry_run=False):
+                calls.append("rig")
+                return remote
+
+            def run_apt():
+                calls.append("apt")
+                return local_failure
+
+            with (
+                patch.object(steward, "_p1_gamingrig_maintenance", run_remote),
+                patch.object(steward, "_p1_apt_upgrade", run_apt),
+            ):
+                result = steward.phase_1_apply(run_dir)
+        self.assertEqual(calls, ["rig", "apt"])
+        self.assertEqual(result["steps"][0]["step"], "gamingrig_maintenance")
 
 
 if __name__ == "__main__":

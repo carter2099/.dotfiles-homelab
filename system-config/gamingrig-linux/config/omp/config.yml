@@ -1,0 +1,23 @@
+symbolPreset: nerd
+theme:
+  dark: dark-one
+setupVersion: 2
+modelRoles:
+  default: opencode-go/deepseek-v4-flash
+  plan: opencode-go/deepseek-v4-flash
+  designer: opencode-go/deepseek-v4-flash
+  advisor: opencode-go/deepseek-v4-flash
+  smol: opencode-go/deepseek-v4-flash
+  tiny: opencode-go/deepseek-v4-flash
+  slow: opencode-go/deepseek-v4-flash
+  task: opencode-go/deepseek-v4-flash
+advisor:
+  enabled: false
+  syncBacklog: 1
+dev:
+  autoqaConsent: denied
+task:
+  agentPrewalk: {}
+  agentModelOverrides: {}
+composer:
+  shape: box

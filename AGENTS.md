@@ -2,7 +2,7 @@
 
 This file provides guidance to omp agents when working on this homelab.
 
-**Maintenance:** Keep this file up to date. When deploying a new app, adding a service, changing ports/IPs, or making any structural changes to the homelab, update the relevant sections here as part of that work. Deep-dive architecture for subsystems lives in `~/notes/docs/homelab/` and `~/notes/journal/` (see "Where the deep dives live" at the bottom) — keep AGENTS.md as the always-loaded operational reference and update the relevant note when those subsystems change.
+**Maintenance:** Keep this file up to date. When deploying a new app, adding a service, changing ports/IPs, or making any structural changes to the homelab, update the relevant sections here as part of that work. Deep-dive architecture for subsystems lives in `~/notes/docs/homelab/` and `~/notes/journal/` (see "Where the deep dives live" at the bottom) — keep AGENTS.md as the always-loaded operational reference. The ThinkPad remains the sole notes, documentation, infrastructure, and production authority; the gaming rig's development boundary is documented in the linked homelab notes.
 
 ## Working principles (Endler tenets)
 
@@ -22,7 +22,7 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Two-host homelab: the ThinkPad L14 Gen 3 runs the primary Ubuntu services, k3s/Traefik ingress, Docker Compose apps, and systemd automation; the dual-boot gaming rig provides Linux AI inference and Windows gaming.
+Two-host homelab: the ThinkPad L14 Gen 3 runs the primary Ubuntu services, k3s/Traefik ingress, Docker Compose apps, and systemd automation; the dual-boot gaming rig provides Linux AI inference, a focused development center, and Windows gaming.
 
 ## Key Practice
 
@@ -36,7 +36,7 @@ Home directory managed as a bare git repo for dotfiles. Key dirs:
 - `beatz-selected/` — read-only audio, starter-selection, and artwork library mounted by the beatz service (not Git-tracked)
 - `homelab-backup/` — Go backup service
 - `k3s/` — Kubernetes manifests
-- `dev/` — Scratch space for cloned repos, tests, development
+- `dev/` — ThinkPad scratch space for cloned repos, tests, and development; gamingrig-linux uses `/home/carte/dev/<repo>` instead
 - `news/` — Daily News nginx deployment configuration and static assets
 - `scripts/` — Digest + steward orchestrators
 - `notes/` — Agent-maintained knowledge vault (`docs/` for maintained ref, `logs/sessions/` for session history, `journal/` for research/records)
@@ -45,9 +45,11 @@ Home directory managed as a bare git repo for dotfiles. Key dirs:
 - `.dotfiles-homelab/` — Bare git repo tracking dotfiles
 ## Dev Workflow (`dev/`)
 
-**Hard rule:** Always develop in `~/dev/<repo>/`. Never edit files in prod deploy folders such as `/home/carter/blog/` — those are deployment artifacts only. If a dev/ clone doesn't exist for a repo, pull a fresh one with `git clone git@github.com:carter2099/<repo>.git ~/dev/<repo>` before making changes.
+**Hard rule:** On the ThinkPad, always develop in `~/dev/<repo>/`. Never edit files in prod deploy folders such as `/home/carter/blog/` — those are deployment artifacts only. If a ThinkPad dev clone doesn't exist for a repo, pull a fresh one with `git clone git@github.com:carter2099/<repo>.git ~/dev/<repo>` before making changes.
 
-The `dev/` directory is for cloning GitHub repos (via SSH: `git@github.com:carter2099/<repo>.git`), running their test suites, making changes, and pushing back. It is **not** tracked by the dotfiles bare repo.
+The gaming rig is a separate development center: work only in `/home/carte/dev/<repo>`, use GitHub as the normal code-transfer boundary, and never deploy production from the rig. Do not place notes, production deploy trees, k3s manifests/kubeconfig, or homelab application state there. The only exception is the steward-managed `/home/carte/src/llama.cpp*` serving-build workspace; it is not a general development root and must remain outside normal project work. See [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md) and [`environment.md`](notes/docs/homelab/environment.md) for the boundary and installed conventions.
+
+The ThinkPad `dev/` directory is for cloning GitHub repos (via SSH: `git@github.com:carter2099/<repo>.git`), running their test suites, making changes, and pushing back. It is **not** tracked by the dotfiles bare repo.
 
 Typical flow:
 ```bash
@@ -135,11 +137,11 @@ DeepSeek Flash handles primary synthesis and a separate critic pass; Mimo v2.5 i
 
 ## Homelab Steward
 
-Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`). SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and attempt rollback when post-update checks fail. The llama helper reports `ROLLBACK_FAILED` when its own recovery validation fails; any failed recovery requires manual inspection. **Safety rules:** never `dist-upgrade`, never `aa-remove-unknown`, Docker engine via apt `--only-upgrade`, assert `DockerRootDir=/var/lib/docker` after upgrade, failures become email badges, never sys.exit mid-run. Full architecture: [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md).
+Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`) on the ThinkPad. Its deterministic remote branch connects only through pinned `gamingrig-linux`: Linux runs the approved apt, Herdr, and OMP maintenance with smoke/rollback and health gates; a Windows skip requires trusted local `llm-proxy` `/health` corroboration (`rig_os=windows`), while offline skip is limited to recognized timeout/refusal/no-route/unreachable transport failures; auth/config/unknown/host-key failures are failures. A required reboot re-arms Linux BootNext, requires a changed boot ID, and polls bounded full readiness/health before reporting reboot, return, or recheck. The steward is never installed on the rig. SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and attempt rollback when post-update checks fail. The llama helper reports `ROLLBACK_FAILED` when its own recovery validation fails; any failed recovery requires manual inspection. **Safety rules:** never `dist-upgrade`, never…
 
 ## Agent CLI: omp
 
-The sole agent CLI on this host is **omp** (`@oh-my-pi/pi-coding-agent`, via bun; binary at `~/.bun/bin/omp`, config in `~/.omp/agent/`). Headless runs (`omp -p`) pass `--config ~/.omp/agent/headless-override.yml`. What uses omp, auth/models, remote ops, reboot protocol: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
+The ThinkPad's sole agent CLI is **omp** (`@oh-my-pi/pi-coding-agent`, via bun; binary at `~/.bun/bin/omp`, config in `~/.omp/agent/`). The gaming rig also runs the package via Bun for rig-local development, with rig-local OMP state and the safe `omp --allow-home` wrapper; never copy ThinkPad OMP state or credentials. Headless ThinkPad runs (`omp -p`) pass `--config ~/.omp/agent/headless-override.yml`. What uses omp, auth/models, remote ops, reboot protocol: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
 
 ## Remote Agent Operations
 
@@ -213,21 +215,34 @@ They're quick context dumps for cross-session continuity. Formal reference notes
 - `~/notes/journal/` — research notes and project records (not maintained)
 - The vault is a standalone git repo (not the dotfiles bare repo) — `/note-save` handles commits
 
-## Gaming Rig (Linux AI / Windows gaming)
+## Gaming Rig (Linux inference + focused development / Windows gaming)
 
-Dual-boot host at `192.168.4.103`: Ubuntu Server is the intended always-on AI OS and
-Windows 11 remains available for one-shot gaming boots. Use `ssh gamingrig-linux` (or
-`ssh gamingrig`) for Linux and `ssh gamingrig-windows` for Windows.
+Dual-boot host at `192.168.4.103`: Ubuntu Server is the intended always-on AI OS and focused
+development center; Windows 11 remains available for one-shot gaming boots. Use
+`ssh gamingrig-linux` (or `ssh gamingrig`) for Linux and `ssh gamingrig-windows` for Windows.
+The rig development root is `/home/carte/dev/<repo>`; use GitHub for normal code transfer and
+keep production deploys on the ThinkPad.
+The only serving-build exception is the steward-managed `/home/carte/src/llama.cpp*` tree;
+keep it outside normal project work. Detailed source-to-destination configuration mapping
+and the exception's paths are in [`environment.md`](notes/docs/homelab/environment.md).
+
+The ThinkPad remains the sole notes/docs/infrastructure/production source of truth. Never copy
+`/home/carter/notes`, production deploy trees, k3s manifests or kubeconfig, OMP databases/
+sessions/auth, Herdr sessions/logs, or Cloudflare credentials to the rig. The rig must never
+join k3s, receive kubeconfig, or host homelab applications.
 
 Linux serves five retained llama-swap model IDs through the ThinkPad's `llm-proxy`, with
 cloud fallback and the Access-protected dashboard at `rig.carter2099.com`. Model versions,
 serving profiles, boot switching, privilege policy, steward updates, request-log cleanup,
-and recovery procedures live in
+development conventions, and recovery procedures live in
 [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
 ## Environment
 
-Shell zsh (vim bindings), nvim, rbenv, fnm, tmux (Ctrl+Space), git carter2099, `gh` authed: [`environment.md`](notes/docs/homelab/environment.md). **Client topology:** Carter develops from a Mac — `/Users/carterbrown/...` paths are NOT reachable from this session (see doc for details).
+ThinkPad shell zsh (vim bindings), nvim, rbenv, fnm, tmux (Ctrl+Space), git carter2099, `gh`
+authed: [`environment.md`](notes/docs/homelab/environment.md). The rig's shell/tooling,
+OMP/Herdr, SSH, and state exclusions are documented there too. **Client topology:** Carter
+develops from a Mac — `/Users/carterbrown/...` paths are NOT reachable from this session.
 
 ## Where the deep dives live
 
