@@ -252,6 +252,52 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check(len(list((news_dir / "releases").iterdir())) == 2, "rollback release retention failed")
 
 
+def test_publications_frozen_after_mail_sent() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        digests = root / "digests"
+        news_dir = digests / "news"
+        current_date = "2026-08-25"
+
+        for key in news.TOPIC_ORDER:
+            topic = news.TOPICS[key]
+            run_dir = digests / topic["category"] / current_date
+            run_dir.mkdir(parents=True)
+            (run_dir / "publication.json").write_text(json.dumps(
+                sample_publication(topic, current_date, topic["web_title"])
+            ))
+
+        publications_dir = news_dir / "publications"
+        news.sync_publications(digests_dir=digests, publications_dir=publications_dir)
+        frozen_path = publications_dir / current_date / "ai-tech.json"
+        archived = json.loads(frozen_path.read_text())
+
+        mail_dir = news_dir / "mail"
+        mail_dir.mkdir(parents=True)
+        (mail_dir / f"{current_date}.sent.json").write_text(json.dumps({
+            "sent_at": "2026-08-25T15:42:49+00:00",
+            "date": current_date,
+        }))
+
+        topic = news.TOPICS["ai-tech"]
+        rerun = sample_publication(topic, current_date, "RERUN")
+        rerun["fresh"][0]["title"] = "Rerun replacement story"
+        (digests / topic["category"] / current_date / "publication.json").write_text(
+            json.dumps(rerun)
+        )
+
+        editions = news.sync_publications(
+            digests_dir=digests, publications_dir=publications_dir
+        )
+        after = json.loads(frozen_path.read_text())
+        check(after == archived, "archived publication changed after mail was sent")
+        check(
+            editions[current_date]["ai-tech"]["fresh"][0]["title"]
+            != "Rerun replacement story",
+            "mailed edition regenerated after shipping",
+        )
+
+
 
 
 def main() -> None:
@@ -261,6 +307,7 @@ def main() -> None:
         test_digest_meta_and_truncated_copy_are_rewritten,
         test_front_page_guarantees_sections_then_applies_global_floor,
         test_publish_builds_separate_history_and_one_email,
+        test_publications_frozen_after_mail_sent,
     ]
     for test in tests:
         test()

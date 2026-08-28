@@ -360,21 +360,44 @@ def sync_publications(
     digests_dir: Path = DIGESTS_DIR,
     publications_dir: Path = PUBLICATIONS_DIR,
 ) -> dict[str, dict[str, dict[str, Any]]]:
-    """Import every available topic/date into the durable publication archive."""
+    """Import every available topic/date into the durable publication archive.
+
+    An issue date's archives are frozen once that day's summary mail was sent:
+    the mailed edition is the shipped truth, and later re-syncs (manual
+    re-runs, --skip-email rebuilds) must not overwrite it (digest-quality
+    audit 2026-08-26: the 2026-08-25 publications were regenerated at
+    19:58-20:40Z after mail went out at 15:42Z, diverging the durable archive
+    from the emailed edition). Only a schema-version mismatch regenerates a
+    frozen archive (schema migration).
+    """
     publications_dir.mkdir(parents=True, exist_ok=True)
+    mail_dir = publications_dir.parent / "mail"
     all_dates: set[str] = set()
     for key in TOPIC_ORDER:
         all_dates.update(_source_dates(digests_dir / TOPICS[key]["category"]))
 
     editions: dict[str, dict[str, dict[str, Any]]] = {}
     for issue_date in sorted(all_dates):
+        frozen = (mail_dir / f"{issue_date}.sent.json").exists()
         date_editions: dict[str, dict[str, Any]] = {}
         for key in TOPIC_ORDER:
             topic = TOPICS[key]
+            destination = publications_dir / issue_date / f"{topic['web_slug']}.json"
+            if frozen and destination.exists():
+                try:
+                    raw = json.loads(destination.read_text())
+                except (OSError, json.JSONDecodeError):
+                    raw = None
+                if isinstance(raw, dict) and (
+                    raw.get("schema_version") == PUBLICATION_SCHEMA_VERSION
+                ):
+                    date_editions[topic["web_slug"]] = _normalize_publication(
+                        raw, topic, issue_date
+                    )
+                    continue
             publication = collect_source_publication(digests_dir, topic, issue_date)
             if publication is None:
                 continue
-            destination = publications_dir / issue_date / f"{topic['web_slug']}.json"
             _atomic_json(destination, publication)
             date_editions[topic["web_slug"]] = publication
         if date_editions:
