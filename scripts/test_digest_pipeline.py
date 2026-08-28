@@ -21,6 +21,20 @@ def check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
 
+def validated_high_fields() -> dict:
+    return {
+        "editorial_significance": "high",
+        "significance_evidence": {
+            "basis": "binding_policy_or_law",
+            "affected_scope": "sector",
+            "impact": "A binding decision materially affects the documented sector.",
+        },
+        "significance_validation": {
+            "status": "accepted",
+            "reason": "binding_policy_or_law with sector affected scope",
+        },
+    }
+
 
 def test_url_normalization() -> None:
     normalized = digest._normalize_url(
@@ -197,6 +211,42 @@ def test_phase_two_cross_day_dedup_window_contract() -> None:
         check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
 
 
+def test_phase_two_rejects_unvalidated_legacy_followup() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        today = datetime.now(timezone.utc).date().isoformat()
+        run_dir = root / "world-digest" / today
+        run_dir.mkdir(parents=True)
+        root_url = "https://example.com/legacy-root"
+        tracker = {
+            "stories": [{
+                "title": "Legacy high without evidence",
+                "url": root_url,
+                "editorial_significance": "high",
+                "status": "active",
+                "first_seen": "2026-08-20",
+                "developments": [
+                    {"date": "2026-08-20", "url": root_url},
+                    {"date": "2026-08-21", "url": "https://example.com/update"},
+                ],
+            }]
+        }
+        finding = {
+            "title": "Claimed legacy follow-up",
+            "url": "https://example.com/new-update",
+            "date_published": today,
+            "summary": "A claimed update.",
+            "editorial_significance": "high",
+            "research_angle_id": "developing-followups",
+            "develops_story_url": root_url,
+        }
+        with patch("digest_runner._call_llm_proxy") as call:
+            fresh, ongoing = digest.phase_2_judge_research(
+                digest.TOPICS["world"], [finding], run_dir, tracker
+            )
+        check(not fresh and not ongoing, (fresh, ongoing))
+        check(not call.called, "unvalidated legacy root reached the LLM judge")
+
 def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
     digest.validate_runtime_contract()
     with patch.object(digest, "CROSS_DAY_DEDUP_DAYS", None):
@@ -360,7 +410,7 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
             "source_domain": "example.com",
             "summary": "Primary verified summary.",
             "category": "Research",
-            "editorial_significance": "high",
+            **validated_high_fields(),
             "date_published": fresh_day,
             "source_verdict": "fresh",
             "judge_verdict": "keep",
@@ -383,7 +433,7 @@ def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
         "category": "Research",
         "latest_dev": "Previous development.",
         "status": "active",
-        "editorial_significance": "high",
+        **validated_high_fields(),
         "first_seen": "2026-08-08",
         "last_updated": "2026-08-09",
         "developments": [
@@ -1341,7 +1391,7 @@ def test_developing_section_requires_significance_and_multiple_dates() -> None:
         "category": "Policy",
         "latest_dev": "Officials issued a binding decision.",
         "status": "active",
-        "editorial_significance": "high",
+        **validated_high_fields(),
         "first_seen": "2026-08-20",
         "last_updated": "2026-08-22",
         "developments": [
@@ -1349,7 +1399,21 @@ def test_developing_section_requires_significance_and_multiple_dates() -> None:
             {"date": "2026-08-22", "url": "https://news.example/binding-decision"},
         ],
     }
-    tracker = {"stories": [one_off, medium_multiday, qualified]}
+    unsupported_high = {
+        "title": "High label without evidence",
+        "url": "https://tracker.example/unsupported-high",
+        "category": "Policy",
+        "latest_dev": "A second update occurred.",
+        "status": "active",
+        "editorial_significance": "high",
+        "first_seen": "2026-08-20",
+        "last_updated": "2026-08-22",
+        "developments": [
+            {"date": "2026-08-20", "url": "https://tracker.example/unsupported-high"},
+            {"date": "2026-08-22", "url": "https://news.example/unsupported-update"},
+        ],
+    }
+    tracker = {"stories": [one_off, medium_multiday, unsupported_high, qualified]}
     proposal = {
         "selected_fresh": [
             {"candidate_id": candidates[0]["candidate_id"]},
@@ -1371,7 +1435,7 @@ def test_developing_section_requires_significance_and_multiple_dates() -> None:
         validated["selected_ongoing"],
     )
     check(
-        sum("unqualified developing story" in warning for warning in warnings) == 2,
+        sum("unqualified developing story" in warning for warning in warnings) == 3,
         warnings,
     )
 
@@ -1383,7 +1447,7 @@ def test_followup_research_targets_prior_high_significance_stories() -> None:
             {
                 "title": "Prior high story",
                 "url": "https://tracker.example/high",
-                "editorial_significance": "high",
+                **validated_high_fields(),
                 "status": "active",
                 "first_seen": "2026-08-24",
                 "last_updated": "2026-08-24",
@@ -1399,7 +1463,7 @@ def test_followup_research_targets_prior_high_significance_stories() -> None:
             {
                 "title": "Same-day high story",
                 "url": "https://tracker.example/today",
-                "editorial_significance": "high",
+                **validated_high_fields(),
                 "status": "active",
                 "first_seen": "2026-08-25",
                 "last_updated": "2026-08-25",
@@ -1575,7 +1639,7 @@ def test_editorial_floor_and_publication_artifact() -> None:
         "category": "Policy",
         "latest_dev": "A binding second development.",
         "status": "active",
-        "editorial_significance": "high",
+        **validated_high_fields(),
         "first_seen": "2026-08-09",
         "last_updated": "2026-08-10",
         "developments": [
@@ -1933,6 +1997,7 @@ def main() -> None:
         test_cross_topic_dedup_precedes_fetch_queue,
         test_cross_topic_same_event_referenced_url_dedup,
         test_phase_two_cross_day_dedup_window_contract,
+        test_phase_two_rejects_unvalidated_legacy_followup,
         test_runtime_preflight_fails_closed_on_missing_symbol,
         test_attention_phase_persists_durable_observations,
         test_phase_three_uses_product_priority,

@@ -1718,6 +1718,14 @@ def _story_development_dates(story: dict) -> set[str]:
     initial = _parse_date(story.get("first_seen") or story.get("last_updated"))
     return {initial.date().isoformat()} if initial is not None else set()
 
+def _has_validated_high_significance(story: dict) -> bool:
+    """True only when a high label carries accepted structured evidence."""
+    return (
+        story.get("editorial_significance") == "high"
+        and isinstance(story.get("significance_evidence"), dict)
+        and story.get("significance_validation", {}).get("status") == "accepted"
+    )
+
 
 def _normalize_story_tracking(story: dict, today: date | None = None) -> dict:
     """Migrate one tracker entry to auditable evidence and significance fields."""
@@ -1761,9 +1769,9 @@ def _normalize_story_tracking(story: dict, today: date | None = None) -> dict:
 
 
 def _is_developing_story(story: dict) -> bool:
-    """True only for high-significance stories with evidence on multiple days."""
+    """True only for validated-high stories with evidence on multiple days."""
     return (
-        story.get("editorial_significance") == "high"
+        _has_validated_high_significance(story)
         and len(_story_development_dates(story)) >= MIN_DEVELOPMENT_DAYS
     )
 
@@ -1780,7 +1788,7 @@ def _build_developing_followup_angle(
     tracked = [
         story for story in stories_in_flight.get("stories", [])
         if story.get("status", "active") in ("active", "cooled")
-        and story.get("editorial_significance") == "high"
+        and _has_validated_high_significance(story)
         and story.get("first_seen") != today.isoformat()
         and not _is_listing_url(story.get("url", ""))
         and not _is_asset_cdn_url(story.get("url", ""))
@@ -2013,7 +2021,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         if f.get("research_angle_id") == "developing-followups":
             tracked_url = _normalize_url(f.get("develops_story_url", ""))
             tracked_story = tracker_by_url.get(tracked_url)
-            if tracked_story is None or tracked_story.get("editorial_significance") != "high":
+            if tracked_story is None or not _has_validated_high_significance(tracked_story):
                 invalid_followup_count += 1
                 continue
             f["develops_story_url"] = tracked_story.get("url", "")
@@ -2062,9 +2070,15 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             + "\n".join(f'  - "{u}"' for u in sorted(cross_day_blocked)) + "\n\n"
         )
 
-    # Build tracker context for cross-run dedup and explicit follow-up review.
+    # Build tracker context only from roots that still satisfy the full evidence
+    # contract. Legacy label-only highs must not suppress normal fresh research.
     sif_context = ""
-    if tracker_by_url:
+    eligible_tracker_by_url = {
+        url: story
+        for url, story in tracker_by_url.items()
+        if _has_validated_high_significance(story)
+    }
+    if eligible_tracker_by_url:
         tracked_context = [{
             "title": story.get("title", ""),
             "story_url": story.get("url", ""),
@@ -2072,7 +2086,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             "editorial_significance": story.get("editorial_significance", "medium"),
             "last_evidence_date": story.get("last_updated", ""),
             "status": story.get("status", "active"),
-        } for story in tracker_by_url.values()]
+        } for story in eligible_tracker_by_url.values()]
         sif_context = (
             "## Tracked stories\n"
             "A finding with `develops_story_url` came from the dedicated follow-up "
@@ -2169,7 +2183,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             f.get("research_angle_id") == "developing-followups"
             and (
                 tracked_url not in tracker_by_url
-                or tracker_by_url[tracked_url].get("editorial_significance") != "high"
+                or not _has_validated_high_significance(tracker_by_url[tracked_url])
             )
         ):
             dedup_rejected.append({"finding": f, "reason": "invalid_followup_link"})
@@ -2890,7 +2904,7 @@ def _validate_editorial_proposal(
         related = ""
         if declared_related:
             target = tracker_by_url.get(declared_related)
-            if target is None or target.get("editorial_significance") != "high":
+            if target is None or not _has_validated_high_significance(target):
                 warnings.append(
                     f"removed invalid developing-story link from {candidate_id}"
                 )
@@ -3007,9 +3021,9 @@ def _validate_editorial_proposal(
                     f"ignored tracker add for linked development {candidate_id}"
                 )
                 continue
-            if source.get("editorial_significance") != "high":
+            if not _has_validated_high_significance(source):
                 warnings.append(
-                    f"ignored non-high tracker add for {candidate_id}"
+                    f"ignored unvalidated-high tracker add for {candidate_id}"
                 )
                 continue
             if _normalize_url(source.get("url", "")) in tracker_by_url:
@@ -3034,7 +3048,7 @@ def _validate_editorial_proposal(
             source = tracker_by_url.get(normalized)
             if (
                 source is None
-                or source.get("editorial_significance") != "high"
+                or not _has_validated_high_significance(source)
                 or not evidence
                 or not latest_dev
                 or _is_listing_url(item.get("story_url", ""))
@@ -3413,7 +3427,7 @@ def _apply_story_state_proposals(
     for operation in proposal.get("story_state_proposals", []):
         if operation["operation"] == "add":
             source = candidate_by_id.get(operation["candidate_id"])
-            if source is None:
+            if source is None or not _has_validated_high_significance(source):
                 continue
             normalized = _normalize_url(source.get("url", ""))
             if normalized in story_by_url:
