@@ -22,7 +22,7 @@ Carter wants this agent framed as a **homelab assistant and general personal ass
 
 ## Overview
 
-Single-node homelab: Ubuntu Server on a ThinkPad L14 Gen 3 (16GB RAM, 512GB NVMe), with k3s/Traefik for FreshRSS and public ingress plus Docker Compose and systemd user services for host applications.
+Two-host homelab: the ThinkPad L14 Gen 3 runs the primary Ubuntu services, k3s/Traefik ingress, Docker Compose apps, and systemd automation; the dual-boot gaming rig provides Linux AI inference and Windows gaming.
 
 ## Key Practice
 
@@ -63,7 +63,9 @@ Note: `.ruby-version` in cloned repos may request a Ruby not installed locally. 
 
 ## Slash commands
 
-Always use the `/create-command` command when creating a new user-global slash command. User-global commands are file prompts in `~/.omp/agent/prompts/*.md`; the filename determines the slash-command name. The command handles the required VCS step so the prompt is tracked and survives a homelab storage wipe.
+User-global commands are file prompts in `~/.omp/agent/prompts/*.md`; the filename determines the slash-command name.
+
+Make sure to track in VCS when adding slash commands.
 
 ## Dotfiles Management
 
@@ -213,29 +215,14 @@ They're quick context dumps for cross-session continuity. Formal reference notes
 
 ## Gaming Rig (Linux AI / Windows gaming)
 
-Dual-boot rig at `192.168.4.103`: Ubuntu Server 24.04.4 LTS on the 250 GB SATA SSD is the
-intended always-on AI OS; Windows 11 remains on the 2 TB NVMe for one-shot gaming boots.
-Use `ssh gamingrig-linux` (or `ssh gamingrig`) for Ubuntu and `ssh gamingrig-windows` for
-Windows. Both aliases pin distinct host keys for the shared IP.
+Dual-boot host at `192.168.4.103`: Ubuntu Server is the intended always-on AI OS and
+Windows 11 remains available for one-shot gaming boots. Use `ssh gamingrig-linux` (or
+`ssh gamingrig`) for Linux and `ssh gamingrig-windows` for Windows.
 
-Linux-primary migration completed 2026-08-17: signed NVIDIA 595.71.05 + CUDA 13.2,
-a versioned llama.cpp CUDA build (initially b10453; steward-managed after a 7-day
-upstream soak), and llama-swap v250 serve five retained IDs continuously under systemd:
-Qwen 3.8 27B IQ2, Ornith 35B Q8, Ornith 9B Q6, Gemma 4 12B Q6, and Gemma 4 26B Q8.
-All five passed Linux behavioral serving checks. Post-migration autoresearch completed
-2026-08-18. Current reasoning budgets in the same order are 768/256/544/112/384; Qwen now
-uses an 81,920-token full-GPU profile and Gemma 26B uses physical batch 256. Direct
-post-deploy smokes all emitted reasoning and exceeded 30 decode tokens/s.
-The proxy reports explicit Linux/Windows/offline state and keeps cloud fallback; the
-loopback dashboard at `127.0.0.1:30143` behaviorally passed Linux→Windows and
-sleeping-Windows→Linux transitions. Both OSes re-arm Ubuntu one-shot boot selection.
-Request summaries under `~/rig-requests/` are pruned daily at 00:00 UTC by `cleanup-rig-requests.timer`; files older than 14 days are removed.
-Windows retains only seven verified GGUF backups; 21 retired models and the obsolete
-Windows inference stack were removed. Linux now mirrors the ThinkPad's agent privilege
-model: `carte` has unrestricted passwordless sudo through a root-owned policy. The
-dashboard is published at `rig.carter2099.com` through Cloudflare Access; unauthenticated
-GET and POST requests were verified to redirect to the Access login while the origin
-remains loopback-only. Full runbook:
+Linux serves five retained llama-swap model IDs through the ThinkPad's `llm-proxy`, with
+cloud fallback and the Access-protected dashboard at `rig.carter2099.com`. Model versions,
+serving profiles, boot switching, privilege policy, steward updates, request-log cleanup,
+and recovery procedures live in
 [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
 ## Environment

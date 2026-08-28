@@ -5,7 +5,7 @@ description: Release the Hyperliquid Ruby SDK — merges dev into main, bumps ve
 # hyperliquid-release
 
 Repo: `~/dev/hyperliquid`
-Ruby: always use `RBENV_VERSION=3.4.8`
+Ruby: always use `RBENV_VERSION=3.4.10`
 
 ## Operating principles (bake these in — do not ask Carter to repeat them)
 
@@ -45,7 +45,7 @@ Wait for Carter's confirmation (or override) before continuing.
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.8 bundle exec rake
+RBENV_VERSION=3.4.10 bundle exec rake
 ```
 
 All specs + RuboCop must pass. If anything fails, stop and surface to Carter — do not release with failing unit tests.
@@ -55,7 +55,7 @@ All specs + RuboCop must pass. If anything fails, stop and surface to Carter —
 ```bash
 cd ~/dev/hyperliquid
 source ~/.config/hyperliquid-agent/env
-RBENV_VERSION=3.4.8 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY ruby scripts/test_automated.rb
+RBENV_VERSION=3.4.10 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY ruby scripts/test_automated.rb
 ```
 
 If any integration test fails:
@@ -87,7 +87,7 @@ Edit `lib/hyperliquid/version.rb` to set the new version string.
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.8 bundle install
+RBENV_VERSION=3.4.10 bundle install
 ```
 
 Confirm the lockfile now shows `hyperliquid (X.Y.Z)` matching the new version.
@@ -130,7 +130,7 @@ git commit -m "version to X.Y.Z"
 ## Step 10: Run tests one final time on main
 
 ```bash
-RBENV_VERSION=3.4.8 bundle exec rake
+RBENV_VERSION=3.4.10 bundle exec rake
 ```
 
 Must pass. If anything broke in the merge, fix it now.
@@ -172,7 +172,7 @@ Do not proceed to Step 13 until both workflows are green.
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.8 bundle exec rake build
+RBENV_VERSION=3.4.10 bundle exec rake build
 ```
 
 Then tell Carter: "Gem built at `pkg/hyperliquid-X.Y.Z.gem`. Paste your RubyGems OTP and I'll push, or run `gem push` yourself."
@@ -181,7 +181,7 @@ If Carter provides the OTP, run:
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.8 gem push pkg/hyperliquid-X.Y.Z.gem --otp <OTP>
+RBENV_VERSION=3.4.10 gem push pkg/hyperliquid-X.Y.Z.gem --otp <OTP>
 ```
 
 If credentials are missing (`Invalid credentials / 401`), tell Carter: "No RubyGems credentials on this host. Either push from another machine or run `gem signin` here first, then give me a fresh OTP." OTPs expire in ~30s — always ask for a new one after a setup detour.
