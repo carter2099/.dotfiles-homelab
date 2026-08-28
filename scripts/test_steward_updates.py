@@ -118,6 +118,198 @@ class DelayedUpdateTests(unittest.TestCase):
             self.assertEqual(result["status"], "reverted")
             self.assertEqual(result["reverted_to"], "b10453")
 
+    def test_judge_verdict_overrides_worker_pass(self):
+        packet = {
+            "verdict": "ATTENTION",
+            "confirmed": [{"claim": "manual action remains"}],
+        }
+        self.assertEqual(steward._final_audit_verdict("PASS", packet), "ATTENTION")
+        self.assertEqual(steward._final_audit_verdict("DRIFT", {}), "UNVERIFIABLE")
+        self.assertEqual(
+            steward._final_audit_verdict(
+                "PASS", {"confirmed": [{"claim": "missing judge verdict"}]}
+            ),
+            "UNVERIFIABLE",
+        )
+        self.assertEqual(
+            steward._final_audit_verdict(
+                "DRIFT", {"judge_error": "timeout", "confirmed": []}
+            ),
+            "judge-failed",
+        )
+
+    def test_audit_judge_packet_schema_fails_closed(self):
+        worker = steward._prepare_audit_worker_packet({
+            "verdict": "DRIFT",
+            "findings": [{
+                "claim": "tracked config differs",
+                "evidence": "diff output",
+                "fix": "sync the tracked copy",
+            }],
+        })
+        invalid = [
+            [],
+            {"verdict": "PASS", "confirmed": {}, "rejected": []},
+            {"verdict": "PASS", "confirmed": [{"id": "", "claim": "x"}], "rejected": []},
+            {"verdict": "UNKNOWN", "confirmed": [], "rejected": []},
+            {"verdict": "PASS", "confirmed": [], "rejected": []},
+            {
+                "verdict": "PASS",
+                "confirmed": [{
+                    "id": "finding-1",
+                    "claim": "tracked config differs",
+                    "evidence": "reproduced diff",
+                    "fix": "sync the tracked copy",
+                }],
+                "rejected": [],
+            },
+            {
+                "verdict": "ATTENTION",
+                "confirmed": [{
+                    "id": "finding-1",
+                    "claim": "different claim",
+                    "evidence": "claimed reproduction",
+                    "fix": "sync the tracked copy",
+                }],
+                "rejected": [],
+            },
+        ]
+        for packet in invalid:
+            with self.assertRaises(ValueError):
+                steward._validate_audit_judge_packet(packet, worker)
+        valid = {
+            "verdict": "PASS",
+            "confirmed": [],
+            "rejected": [{
+                "id": "finding-1",
+                "claim": "tracked config differs",
+                "reason": "not reproduced",
+            }],
+        }
+        self.assertIs(steward._validate_audit_judge_packet(valid, worker), valid)
+        with self.assertRaises(ValueError):
+            steward._prepare_audit_worker_packet({
+                "verdict": "ATTENTION",
+                "findings": [{"claim": "", "evidence": "x", "fix": "y"}],
+            })
+        self.assertNotIn("judge-failed", steward._REAL_VERDICTS)
+
+    def test_audit_cache_requires_complete_judge_provenance(self):
+        worker = steward._prepare_audit_worker_packet({
+            "verdict": "ATTENTION",
+            "findings": [{
+                "claim": "tracked config differs",
+                "evidence": "diff output",
+                "fix": "sync tracked config",
+            }],
+        })
+        artifact = {
+            "verdict": "ATTENTION",
+            "worker_verdict": "ATTENTION",
+            "judge_verdict": "ATTENTION",
+            "worker_findings": worker["findings"],
+            "judge_confirmed": [{
+                "id": "finding-1",
+                "claim": "tracked config differs",
+                "evidence": "reproduced diff",
+                "fix": "sync tracked config",
+            }],
+            "judge_rejected": [],
+            "judge_error": "",
+        }
+        self.assertTrue(steward._audit_artifact_cacheable(artifact))
+        artifact["judge_confirmed"] = []
+        self.assertFalse(steward._audit_artifact_cacheable(artifact))
+        artifact["judge_error"] = "timeout"
+        self.assertFalse(steward._audit_artifact_cacheable(artifact))
+
+    def test_version_currency_is_report_only(self):
+        sections = [
+            {
+                "name": "version-currency",
+                "verdict": "DRIFT",
+                "judge_confirmed": [{"id": "finding-1", "claim": "Traefik newer"}],
+                "worker_findings": [{"id": "finding-1", "claim": "Traefik newer"}],
+            },
+            {
+                "name": "config-doc-drift",
+                "verdict": "ATTENTION",
+                "judge_confirmed": [{"id": "finding-1", "claim": "tracked config differs"}],
+                "worker_findings": [{"id": "finding-1", "claim": "tracked config differs"}],
+            },
+            {
+                "name": "digest-quality",
+                "verdict": "PASS",
+                "judge_confirmed": [],
+                "worker_findings": [],
+            },
+        ]
+        to_fix, report_only = steward._p7b_fix_candidates(sections)
+        self.assertEqual(to_fix, [(
+            "config-doc-drift",
+            [{"id": "finding-1", "claim": "tracked config differs"}],
+        )])
+        self.assertEqual(report_only, [{
+            "section": "version-currency",
+            "status": "report-only",
+            "findings_count": 1,
+        }])
+
+        invented = [{
+            "name": "security-posture",
+            "verdict": "ATTENTION",
+            "worker_findings": [],
+            "judge_confirmed": [{"claim": "historical credential unresolved"}],
+        }]
+        to_fix, report_only = steward._p7b_fix_candidates(invented)
+        self.assertEqual(to_fix, [])
+        self.assertEqual(report_only[0]["section"], "security-posture")
+
+    def test_security_collector_retains_unresolved_incident(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            doc = home / "notes" / "docs" / "homelab" / "opencode-go-proxy.md"
+            doc.parent.mkdir(parents=True)
+
+            def collect():
+                with (
+                    patch.object(steward, "HOME", home),
+                    patch.object(steward.urllib.request, "urlopen",
+                                 side_effect=OSError("offline")),
+                    patch.object(steward, "run_capture", return_value=""),
+                    patch.object(steward, "_gather_repo_secrets",
+                                 return_value={"findings_summary": "clean"}),
+                ):
+                    return steward._audit_collector_4_security()
+
+            doc.write_text("Known credential incident: unresolved.\n")
+            unresolved = collect()
+            self.assertEqual(
+                unresolved["known_credential_incident"]["status"], "unresolved"
+            )
+            verdict, confirmed = steward._apply_deterministic_audit_guards(
+                "security-posture", unresolved, "PASS", []
+            )
+            self.assertEqual(verdict, "ATTENTION")
+            self.assertEqual(len(confirmed), 1)
+
+            doc.unlink()
+            missing = collect()
+            self.assertEqual(
+                missing["known_credential_incident"]["status"], "unverifiable"
+            )
+            verdict, _ = steward._apply_deterministic_audit_guards(
+                "security-posture", missing, "PASS", []
+            )
+            self.assertEqual(verdict, "ATTENTION")
+
+            doc.write_text("Known credential incident: resolved.\n")
+            resolved = collect()
+            verdict, confirmed = steward._apply_deterministic_audit_guards(
+                "security-posture", resolved, "PASS", []
+            )
+            self.assertEqual((verdict, confirmed), ("PASS", []))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

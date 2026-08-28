@@ -62,6 +62,7 @@ PROXY_HEALTH = "http://localhost:8082/health"
 MAX_WORKERS = 3
 # P7b fix↔judge loop: re-fix judge-not-ok items up to N times (env override).
 FIX_MAX_ITERS = max(1, int(os.environ.get("STEWARD_FIX_MAX_ITERS", "3")))
+P7B_REPORT_ONLY_SECTIONS = {"version-currency", "security-posture"}
 
 # Timeout and model for headless omp JSON calls
 OMP_JSON_TIMEOUT = 2700
@@ -3522,7 +3523,10 @@ def _audit_collector_3_digest_quality():
                                         and story.get("significance_validation", {}).get("status")
                                         == "accepted"
                                     )
-                                    for story in publication.get("fresh", [])
+                                    for story in (
+                                        publication.get("fresh", [])
+                                        + publication.get("ongoing", [])
+                                    )
                                 )
                             ),
                             "priority_complete": all(
@@ -3818,6 +3822,28 @@ def _audit_collector_4_security():
                 cf_tunnel_ingress = resp.read().decode()[:3000]
         except Exception as e:
             cf_tunnel_ingress = f"error: {e}"
+    incident_doc = HOME / "notes" / "docs" / "homelab" / "opencode-go-proxy.md"
+    incident_read_error = ""
+    try:
+        incident_text = incident_doc.read_text()
+    except OSError as error:
+        incident_text = ""
+        incident_read_error = str(error)
+    if "Known credential incident: unresolved." in incident_text:
+        incident_status = "unresolved"
+    elif "Known credential incident: resolved." in incident_text:
+        incident_status = "resolved"
+    else:
+        incident_status = "unverifiable"
+    known_credential_incident = {
+        "status": incident_status,
+        "source": str(incident_doc),
+        "read_error": incident_read_error,
+        "detail": (
+            "A credential remains in public git history unless explicit provider "
+            "revocation/cancellation is recorded. Do not inspect or reproduce it."
+        ),
+    }
 
     return {
         "listeners": run_capture(["ss", "-tlnp"]),
@@ -3829,6 +3855,7 @@ def _audit_collector_4_security():
             ["bash", "-c",
              "journalctl -u ssh --since '24 hours ago' 2>/dev/null | grep -c 'Failed password' || echo 0"]),
         "repo_secrets": _gather_repo_secrets(),
+        "known_credential_incident": known_credential_incident,
     }
 
 
@@ -4133,6 +4160,124 @@ def _session_memory_context(days=SESSION_MEMORY_CONTEXT_DAYS,
     return "\n\n".join(parts) if parts else "(no session memory yet)"
 
 
+_AUDIT_VERDICTS = {"PASS", "DRIFT", "ATTENTION", "UNVERIFIABLE"}
+
+
+def _final_audit_verdict(worker_verdict, judge_packet):
+    """Use the judge's explicit verdict; never hide confirmed problems behind PASS."""
+    if judge_packet.get("judge_error"):
+        return "judge-failed"
+    candidate = str(judge_packet.get("verdict") or "").upper()
+    if candidate not in _AUDIT_VERDICTS:
+        return "UNVERIFIABLE"
+    return candidate
+
+def _validate_prepared_audit_worker_packet(packet):
+    """Validate steward-assigned finding IDs and mutation-relevant worker fields."""
+    if not isinstance(packet, dict) or packet.get("verdict") not in _AUDIT_VERDICTS:
+        raise ValueError("invalid prepared audit worker packet")
+    findings = packet.get("findings")
+    if not isinstance(findings, list):
+        raise ValueError("prepared audit worker findings must be a list")
+    for index, item in enumerate(findings, 1):
+        if not isinstance(item, dict) or item.get("id") != f"finding-{index}":
+            raise ValueError("prepared audit worker IDs must be unique and sequential")
+        for key in ("claim", "evidence", "fix"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                raise ValueError(f"prepared audit worker finding missing {key}")
+    return packet
+
+
+def _prepare_audit_worker_packet(packet):
+    """Validate worker JSON and assign stable per-packet finding IDs."""
+    if not isinstance(packet, dict):
+        raise ValueError("audit worker packet must be an object")
+    verdict = packet.get("verdict")
+    findings = packet.get("findings")
+    if verdict not in _AUDIT_VERDICTS or not isinstance(findings, list):
+        raise ValueError("audit worker packet has invalid verdict/findings")
+    prepared = dict(packet)
+    prepared_findings = []
+    for index, finding in enumerate(findings, 1):
+        if not isinstance(finding, dict):
+            raise ValueError("audit worker findings must be objects")
+        item = dict(finding)
+        for key in ("claim", "evidence", "fix"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                raise ValueError(f"audit worker finding missing {key}")
+        item["id"] = f"finding-{index}"
+        prepared_findings.append(item)
+    prepared["findings"] = prepared_findings
+    return _validate_prepared_audit_worker_packet(prepared)
+
+
+def _validate_audit_judge_packet(packet, worker_packet):
+    """Require a one-to-one judge disposition for worker-assigned finding IDs."""
+    if not isinstance(packet, dict):
+        raise ValueError("audit judge packet must be an object")
+    _validate_prepared_audit_worker_packet(worker_packet)
+    verdict = packet.get("verdict")
+    if verdict not in _AUDIT_VERDICTS:
+        raise ValueError(f"invalid audit judge verdict: {verdict!r}")
+    worker_by_id = {
+        item["id"]: item for item in worker_packet.get("findings", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    seen = set()
+    for key in ("confirmed", "rejected"):
+        value = packet.get(key)
+        if not isinstance(value, list):
+            raise ValueError(f"audit judge {key} must be a list")
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError(f"audit judge {key} items must be objects")
+            finding_id = item.get("id")
+            worker_finding = worker_by_id.get(finding_id)
+            if worker_finding is None or finding_id in seen:
+                raise ValueError(f"audit judge returned invalid/duplicate id: {finding_id!r}")
+            if item.get("claim") != worker_finding.get("claim"):
+                raise ValueError(f"audit judge claim mismatch for {finding_id}")
+            if key == "confirmed" and item.get("fix") != worker_finding.get("fix"):
+                raise ValueError(f"audit judge fix mismatch for {finding_id}")
+            detail_key = "evidence" if key == "confirmed" else "reason"
+            if not isinstance(item.get(detail_key), str) or not item[detail_key].strip():
+                raise ValueError(f"audit judge {key} item missing {detail_key}")
+            seen.add(finding_id)
+    if seen != set(worker_by_id):
+        raise ValueError("audit judge did not disposition every worker finding")
+    confirmed_count = len(packet["confirmed"])
+    if verdict in ("PASS", "UNVERIFIABLE") and confirmed_count:
+        raise ValueError(f"audit judge {verdict} cannot confirm problems")
+    if verdict in ("DRIFT", "ATTENTION") and not confirmed_count:
+        raise ValueError(f"audit judge {verdict} requires a confirmed problem")
+    return packet
+
+
+def _apply_deterministic_audit_guards(section_name, evidence, verdict, confirmed):
+    """Surface persistent manual incidents even when an LLM misses them."""
+    confirmed = list(confirmed or [])
+    if verdict.endswith("-failed"):
+        return verdict, confirmed
+    incident = evidence.get("known_credential_incident", {})
+    if (
+        section_name == "security-posture"
+        and incident.get("status") in ("unresolved", "unverifiable")
+    ):
+        claim = "Known public-history credential incident remains unresolved"
+        if not any(
+            item.get("claim") == claim for item in confirmed if isinstance(item, dict)
+        ):
+            confirmed.append({
+                "claim": claim,
+                "evidence": (
+                    f"Nonsecret status is unresolved in {incident.get('source', 'runbook')}; "
+                    "provider revocation/cancellation is not verified."
+                ),
+            })
+        return "ATTENTION", confirmed
+    return verdict, confirmed
+
+
 def _run_audit_agent_pair(section, evidence, current_hash, session_memory=""):
     """Worker + judge for one audit section. Returns the section result dict."""
     section_name = section["name"]
@@ -4163,7 +4308,9 @@ RECENT SESSION MEMORY (Carter's recent interactive omp sessions — context for 
 """
     try:
         worker_text = _call_omp_p(worker_prompt, model=SMALL_MODEL, timeout=section["timeout"], mode="json")
-        worker_packet = _extract_json(worker_text, f"worker-{section_name}")
+        worker_packet = _prepare_audit_worker_packet(
+            _extract_json(worker_text, f"worker-{section_name}")
+        )
     except Exception as e:
         return {
             "name": section_name,
@@ -4191,31 +4338,72 @@ RECENT SESSION MEMORY (context for interpreting the state the findings describe)
 {session_memory}
 
 Return a fenced ```json packet:
-{{"confirmed": [{{"claim": "...", "evidence": "..."}}],
- "rejected": [{{"claim": "...", "reason": "..."}}]}}
+{{"verdict": "PASS"|"DRIFT"|"ATTENTION"|"UNVERIFIABLE",
+ "confirmed": [{{"id": "finding-1", "claim": "...", "evidence": "...", "fix": "..."}}],
+ "rejected": [{{"id": "finding-2", "claim": "...", "reason": "..."}}]}}
+- Return every worker finding ID exactly once across `confirmed` and `rejected`.
+- A confirmed finding must copy the worker's `claim` and `fix` verbatim.
+- `confirmed` contains unresolved problem findings only, never healthy-state confirmations.
+- `PASS` requires an empty `confirmed` list. Use `ATTENTION` for unresolved manual/security
+  action and `DRIFT` for a concrete state/config mismatch.
 - CRITICAL: every yielding turn must include the fenced ```json block. If the advisor
   requests changes, emit a REVISED ```json packet — never a prose-only ack.
 """
     try:
         judge_text = _call_omp_p(judge_prompt, timeout=section["timeout"], mode="json")
-        judge_packet = _extract_json(judge_text, f"judge-{section_name}")
+        judge_packet = _validate_audit_judge_packet(
+            _extract_json(judge_text, f"judge-{section_name}"),
+            worker_packet,
+        )
     except Exception as e:
         judge_packet = {
-            "confirmed": worker_packet.get("findings", []),
+            "confirmed": [],
             "rejected": [],
             "judge_error": str(e),
         }
 
     confirmed = judge_packet.get("confirmed", [])
     rejected = judge_packet.get("rejected", [])
+    worker_verdict = worker_packet.get("verdict", "UNVERIFIABLE")
+    final_verdict = _final_audit_verdict(worker_verdict, judge_packet)
+    final_verdict, confirmed = _apply_deterministic_audit_guards(
+        section_name, evidence, final_verdict, confirmed
+    )
     return {
         "name": section_name,
-        "verdict": worker_packet.get("verdict", "UNVERIFIABLE"),
+        "verdict": final_verdict,
+        "worker_verdict": worker_verdict,
+        "judge_verdict": judge_packet.get("verdict", ""),
+        "judge_error": judge_packet.get("judge_error", ""),
         "evidence_hash": current_hash,
         "worker_findings": worker_packet.get("findings", []),
         "judge_confirmed": confirmed,
         "judge_rejected": rejected,
     }
+
+
+def _audit_artifact_cacheable(artifact):
+    """Cache only artifacts with a complete, provenance-valid judge disposition."""
+    if artifact.get("judge_error"):
+        return False
+    base_verdict = str(artifact.get("verdict", "")).removeprefix("cached-")
+    if base_verdict not in _REAL_VERDICTS:
+        return False
+    worker_packet = {
+        "verdict": artifact.get("worker_verdict"),
+        "findings": artifact.get("worker_findings", []),
+    }
+    judge_packet = {
+        "verdict": artifact.get("judge_verdict"),
+        "confirmed": artifact.get("judge_confirmed", []),
+        "rejected": artifact.get("judge_rejected", []),
+    }
+    try:
+        _validate_prepared_audit_worker_packet(worker_packet)
+        _validate_audit_judge_packet(judge_packet, worker_packet)
+    except ValueError:
+        return False
+    return _final_audit_verdict(worker_packet["verdict"], judge_packet) == base_verdict
 
 
 def phase_7_audit(run_dir, setup_data, dry_run=False):
@@ -4250,15 +4438,18 @@ def phase_7_audit(run_dir, setup_data, dry_run=False):
             prev_hash = prev_artifact.get("evidence_hash")
             prev_verdict = str(prev_artifact.get("verdict", ""))
             base_verdict = prev_verdict.removeprefix("cached-")
-            if prev_hash == current_hash and base_verdict in _REAL_VERDICTS:
+            if prev_hash == current_hash and _audit_artifact_cacheable(prev_artifact):
                 print(f"    delta-gate: unchanged -> cached-{base_verdict}")
                 result = {
                     "name": section_name,
                     "verdict": f"cached-{base_verdict}",
+                    "worker_verdict": prev_artifact.get("worker_verdict", ""),
+                    "judge_verdict": prev_artifact.get("judge_verdict", ""),
+                    "judge_error": "",
                     "evidence_hash": current_hash,
                     "worker_findings": prev_artifact.get("worker_findings", []),
                     "judge_confirmed": prev_artifact.get("judge_confirmed", []),
-                    "judge_rejected": [],
+                    "judge_rejected": prev_artifact.get("judge_rejected", []),
                 }
                 write_json(run_dir / artifact_name, result)
                 all_results.append(result)
@@ -4753,6 +4944,43 @@ def _fix_one_section(section_name, confirmed_findings, dry_run):
     }
 
 
+def _confirmed_worker_findings(section):
+    """Return worker findings whose stable IDs the judge confirmed."""
+    confirmed_ids = {
+        finding.get("id")
+        for finding in section.get("judge_confirmed", [])
+        if isinstance(finding, dict) and finding.get("id")
+    }
+    return [
+        finding
+        for finding in section.get("worker_findings", [])
+        if isinstance(finding, dict) and finding.get("id") in confirmed_ids
+    ]
+
+
+def _p7b_fix_candidates(sections):
+    """Split auto-fixable findings from sections that are report-only by policy."""
+    to_fix = []
+    report_only = []
+    for section in sections:
+        verdict = str(section.get("verdict", "")).removeprefix("cached-")
+        confirmed = section.get("judge_confirmed", [])
+        if verdict not in ("DRIFT", "ATTENTION") or not confirmed:
+            continue
+        name = section.get("name", "")
+        if name in P7B_REPORT_ONLY_SECTIONS:
+            report_only.append({
+                "section": name,
+                "status": "report-only",
+                "findings_count": len(confirmed),
+            })
+            continue
+        actionable = _confirmed_worker_findings(section)
+        if actionable:
+            to_fix.append((name, actionable))
+    return to_fix, report_only
+
+
 def phase_7b_fix(run_dir, dry_run=False):
     """Phase 7b: auto-fix confirmed findings with fix↔judge loop (capped)."""
     print("[P7b] auto-fix")
@@ -4764,22 +4992,17 @@ def phase_7b_fix(run_dir, dry_run=False):
 
     audit = read_json(audit_path)
     sections = audit.get("sections", [])
-
-    # Collect sections with confirmed findings (DRIFT/ATTENTION only)
-    to_fix = []
-    for s in sections:
-        verdict = s.get("verdict", "")
-        if verdict not in ("DRIFT", "ATTENTION"):
-            continue
-        confirmed = s.get("judge_confirmed", [])
-        if not confirmed:
-            continue
-        to_fix.append((s["name"], confirmed))
+    to_fix, report_only = _p7b_fix_candidates(sections)
 
     if not to_fix:
-        print("  skipped — no confirmed findings to fix")
-        write_json(run_dir / "07b-fixes.json", {"sections": [], "status": "nothing_to_fix"})
-        return
+        print("  skipped — no confirmed auto-fixable findings")
+        result = {
+            "sections": [],
+            "report_only": report_only,
+            "status": "nothing_to_fix",
+        }
+        write_json(run_dir / "07b-fixes.json", result)
+        return result
 
     print(f"  fixing {len(to_fix)} sections (max_workers={MAX_WORKERS}, "
           f"max_iters={FIX_MAX_ITERS})")
@@ -4815,7 +5038,7 @@ def phase_7b_fix(run_dir, dry_run=False):
     order = {s["name"]: i for i, s in enumerate(AUDIT_SECTIONS)}
     fix_results.sort(key=lambda r: order.get(r.get("section", ""), 99))
 
-    master = {"sections": fix_results, "status": "done"}
+    master = {"sections": fix_results, "report_only": report_only, "status": "done"}
     write_json(run_dir / "07b-fixes.json", master)
 
     total_fixes = sum(len(r.get("fixes_applied", [])) for r in fix_results)
