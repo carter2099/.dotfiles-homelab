@@ -10,7 +10,7 @@ Create a new review on the blog. This is a collaborative workflow — help the u
 
 - **title** (string): the title of the thing being reviewed
 - **review_type** (string): one of `Book`, `Movie`, `Show`, `Product`, `Video Game`
-- **rating** (float): 0 to 5 (decimals like 3.5 are fine)
+- **rating** (float): 0 to 10 (decimals like 7.5 are fine)
 
 ## Conditionally required
 
@@ -39,7 +39,7 @@ When ready, display the **exact content** that will be published:
 ```
 **Title:** <title>
 **Type:** <review_type>
-**Rating:** <rating>/5
+**Rating:** <rating>/10
 **Author:** <author, or omit line if not a book>
 **Main image:** <filename if provided, or "None">
 **Filename:** <Title-With-Hyphens>.md (or "No body text" if no content)
@@ -123,7 +123,7 @@ Always use `ReviewType.find_by!(name: '<type>')` — never hardcode IDs.
 - Reviews have no frontmatter — just plain markdown content.
 - `main_image` stores just the filename (e.g. `cover.jpg`), not a full path.
 - If `rails runner` fails, clean up any written files and report the error.
-- The `rating` field is a float — `4` and `4.0` both work, as does `3.5`.
+- The `rating` field is a float from 0 to 10 — `8` and `8.0` both work, as does `7.5`.
 
 ## Markdown formatting rules
 
