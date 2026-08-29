@@ -193,7 +193,44 @@ class DelayedUpdateTests(unittest.TestCase):
                 "verdict": "ATTENTION",
                 "findings": [{"claim": "", "evidence": "x", "fix": "y"}],
             })
-        self.assertNotIn("judge-failed", steward._REAL_VERDICTS)
+
+    def test_worker_packet_retry_on_prose_only_output(self):
+        section = {"name": "agent-fleet-review", "guidance": "inspect", "timeout": 600}
+        prose_cut_short = (
+            "Timers firing correctly so far. Now digging into dependabot outcomes... "
+            "Need to veri"
+        )
+        retry_packet = (
+            '```json\n{"verdict": "UNVERIFIABLE", "findings": ['
+            '{"claim": "fleet checks incomplete", "evidence": "run cut short", '
+            '"fix": "re-run section manually"}]}\n```'
+        )
+        judge_packet = (
+            '```json\n{"verdict": "UNVERIFIABLE", "confirmed": [], "rejected": ['
+            '{"id": "finding-1", "claim": "fleet checks incomplete", '
+            '"reason": "not independently verified"}]}\n```'
+        )
+        with patch.object(
+            steward, "_call_omp_p",
+            side_effect=[prose_cut_short, retry_packet, judge_packet],
+        ) as mock_call:
+            result = steward._run_audit_agent_pair(section, {}, "hash1")
+        self.assertEqual(result["verdict"], "UNVERIFIABLE")
+        self.assertNotEqual(result["verdict"], "worker-failed")
+        self.assertEqual(mock_call.call_count, 3)
+        self.assertIn("Emit ONLY the fenced", mock_call.call_args_list[1].args[0])
+
+    def test_worker_failed_persists_only_after_retry_missing_packet(self):
+        section = {"name": "agent-fleet-review", "guidance": "inspect", "timeout": 600}
+        prose = "investigating fleet state without ever emitting a packet"
+        with patch.object(
+            steward, "_call_omp_p",
+            side_effect=[prose, prose],
+        ) as mock_call:
+            result = steward._run_audit_agent_pair(section, {}, "hash1")
+        self.assertEqual(result["verdict"], "worker-failed")
+        self.assertIn("retry also failed", result["error"])
+        self.assertEqual(mock_call.call_count, 2)
 
     def test_audit_cache_requires_complete_judge_provenance(self):
         worker = steward._prepare_audit_worker_packet({

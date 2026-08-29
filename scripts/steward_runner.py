@@ -5226,6 +5226,9 @@ Rules:
 - CRITICAL: every assistant turn that yields must include that fenced ```json block.
   If the advisor requests changes, emit a REVISED ```json packet — never a prose-only
   ack like "you're right" / "updated above". The JSON is the only durable output.
+- If the investigation is incomplete or you must stop early, your FINAL turn must still
+  emit the fenced ```json packet — verdict "UNVERIFIABLE" with a finding describing what
+  could not be verified. Never end on prose.
 
 {_date_context()}
 
@@ -5235,20 +5238,42 @@ COLLECTED EVIDENCE:
 RECENT SESSION MEMORY (Carter's recent interactive omp sessions — context for interpreting homelab state):
 {session_memory}
 """
-    try:
-        worker_text = _call_omp_p(worker_prompt, model=SMALL_MODEL, timeout=section["timeout"], mode="json")
-        worker_packet = _prepare_audit_worker_packet(
-            _extract_json(worker_text, f"worker-{section_name}")
+
+    def _run_worker(prompt_text, label):
+        raw = _call_omp_p(
+            prompt_text, model=SMALL_MODEL, timeout=section["timeout"], mode="json"
         )
+        return _prepare_audit_worker_packet(_extract_json(raw, label))
+
+    try:
+        worker_packet = _run_worker(worker_prompt, f"worker-{section_name}")
     except Exception as e:
-        return {
-            "name": section_name,
-            "verdict": "worker-failed",
-            "error": str(e),
-            "evidence_hash": current_hash,
-            "judge_rejected": [],
-            "confirmed_findings": [],
-        }
+        # Worker ended without a JSON packet (truncated run / prose-only ack).
+        # Retry once with a packet-only continuation so an interrupted worker
+        # still yields a verdict — never persist worker-failed on the first miss.
+        retry_prompt = f"""
+Your audit run for section '{section_name}' ended without the required fenced
+```json packet. Emit ONLY the fenced ```json packet now, reflecting whatever you
+verified:
+
+{{"verdict": "PASS"|"DRIFT"|"ATTENTION"|"UNVERIFIABLE",
+ "findings": [{{"claim": "...", "evidence": "...", "fix": "..."}}]}}
+
+- If the investigation was incomplete, verdict "UNVERIFIABLE" with a finding noting
+  what could not be verified.
+- This turn contains the JSON packet and nothing else.
+"""
+        try:
+            worker_packet = _run_worker(retry_prompt, f"worker-{section_name}-retry")
+        except Exception as e2:
+            return {
+                "name": section_name,
+                "verdict": "worker-failed",
+                "error": f"{e}; retry also failed: {e2}",
+                "evidence_hash": current_hash,
+                "judge_rejected": [],
+                "confirmed_findings": [],
+            }
 
     judge_prompt = f"""
 You are a skeptical judge reviewing a homelab audit agent's findings. Independently
