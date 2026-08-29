@@ -12,6 +12,8 @@ Create a new review on the blog. This is a collaborative workflow — help the u
 - **review_type** (string): one of `Book`, `Movie`, `Show`, `Product`, `Video Game`
 - **rating** (float): 0 to 10 (decimals like 7.5 are fine)
 
+**Rating scale invariant:** The blog stores and displays every rating out of 10. Never normalize a `/10` rating to `/5`. Preserve its numeric value exactly (for example, `7.75/10` must be stored as `7.75` and previewed as `7.75/10`). If the user supplies a rating out of 5, convert it to the equivalent rating out of 10 before previewing.
+
 ## Conditionally required
 
 - **author** (string): required if review_type is `Book`
