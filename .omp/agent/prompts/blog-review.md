@@ -30,9 +30,12 @@ Create a new review on the blog. This is a collaborative workflow — help the u
 
 The user may provide anything from a finished review to rough notes, or just a title and rating with no body. Work with them:
 
-- If they provide rough content, help polish it while preserving their voice
-- If they want a text-free review (just rating), that's fine — content is optional
-- Go back and forth as many times as needed
+- By default, only correct unmistakable spelling, grammar, and punctuation errors. Preserve the user's wording, sentence structure, emphasis, numerals, punctuation style (including spaced hyphens), and voice.
+- Before making any stylistic rewrite or changing phrasing, explain the proposed changes and get the user's explicit agreement.
+- When presenting corrected content, list every correction made so the user can distinguish mechanical fixes from rewriting.
+- If the user explicitly asks for broader polishing, preserve their voice and identify any non-mechanical changes.
+- If they want a text-free review (just rating), that's fine — content is optional.
+- Go back and forth as many times as needed.
 
 ### 2. Preview — MANDATORY before publishing
 
