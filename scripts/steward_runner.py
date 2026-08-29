@@ -4991,11 +4991,11 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Judge the security posture from the evidence: listening sockets vs the documented set "
-            "(loopback-only: open-webui 48100, searxng 8080, prompt-guard 8090, news 30144; "
+            "(loopback-only: open-webui 48100, searxng 8080, prompt-guard 8090, news 30144, herdr-web 30145; "
             "ufw-gated: llm-proxy 8081, opencode-go-proxy 8082; LAN: blog 33099), ufw ruleset intact "
             "(cni0/flannel.1/docker bridges), unattended-upgrades active, carter2099.com RDAP expiry "
             "(>30d out = ok), CF tunnel ingress vs expected hostnames (chat, hooks, freshrss, blog, "
-            "omp, ssh, beatz, rig, news), SSH failed-password volume. Flag anything unexpected. "
+            "omp, ssh, beatz, rig, news, remote), SSH failed-password volume. Flag anything unexpected. "
             "For repo_secrets: working_tree_issues means secret-pattern files are uncommitted in a "
             "repo — flag each as ATTENTION; commit_issues means a secret-pattern string appeared in "
             "recent diffs — flag as ATTENTION with the commit SHA. No findings = PASS for this sub-check."

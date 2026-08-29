@@ -121,6 +121,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 - **Open WebUI** (chat frontend + native SearXNG + Weather v2, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)
 - **OMP Web** (agent web UI, localhost:8504) → [`omp-web.md`](notes/docs/homelab/omp-web.md)
+- **Herdr Web** (mobile-first browser attachment to the live Herdr server, loopback-only on 30145 at remote.carter2099.com; Cloudflare Access plus origin JWT validation; one browser attachment) → [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md)
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
 - **FreshRSS** (RSS reader, k3s Deployment, freshrss.carter2099.com) → [`k3s.md`](notes/docs/homelab/k3s.md) (covered as third-party k3s service)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)

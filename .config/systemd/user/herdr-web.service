@@ -1,0 +1,46 @@
+[Unit]
+Description=Herdr Web terminal attachment
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=%h/.local/bin/herdr-web
+EnvironmentFile=-%h/.config/herdr-web/env
+Environment=HERDR_WEB_LISTEN_ADDR=127.0.0.1:30145
+Environment=HERDR_WEB_PUBLIC_ORIGIN=https://remote.carter2099.com
+Environment=HERDR_WEB_ACCESS_ISSUER=https://carter2099.cloudflareaccess.com
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=15s
+TimeoutStopSec=20s
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+# The web app allocates a PTY for the Herdr client; keep /dev/ptmx and devpts visible.
+PrivateDevices=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/herdr
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+TasksMax=128
+MemoryMax=512M
+CPUQuota=200%
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target
