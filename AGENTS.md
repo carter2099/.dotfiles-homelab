@@ -232,6 +232,14 @@ The ThinkPad remains the sole notes/docs/infrastructure/production source of tru
 sessions/auth, Herdr sessions/logs, or Cloudflare credentials to the rig. The rig must never
 join k3s, receive kubeconfig, or host homelab applications.
 
+Windows gaming uses Apollo in headless mode with SudoVDA. With NVIDIA Windows driver 616.56,
+HAGS must remain disabled (`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\HwSchMode=1`);
+616.56 plus HAGS breaks virtual-display creation and produces Moonlight error 503. This
+Windows-only workaround does not affect the Linux inference driver. It disables DLSS Frame
+Generation; do not re-enable HAGS until the driver is rolled back or the Apollo/NVIDIA
+regression is verified fixed. Recovery evidence and the Windows-staying reboot command are in
+[`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
+
 Linux serves five retained llama-swap model IDs through the ThinkPad's `llm-proxy`, with
 cloud fallback and the Access-protected dashboard at `rig.carter2099.com`. Model versions,
 serving profiles, boot switching, privilege policy, steward updates, request-log cleanup,
