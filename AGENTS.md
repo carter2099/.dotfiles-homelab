@@ -220,34 +220,17 @@ They're quick context dumps for cross-session continuity. Formal reference notes
 
 ## Gaming Rig (Linux inference + focused development / Windows gaming)
 
-Dual-boot host at `192.168.4.103`: Ubuntu Server is the intended always-on AI OS and focused
-development center; Windows 11 remains available for one-shot gaming boots. Use
-`ssh gamingrig-linux` (or `ssh gamingrig`) for Linux and `ssh gamingrig-windows` for Windows.
-The rig development root is `/home/carte/dev/<repo>`; use GitHub for normal code transfer and
-keep production deploys on the ThinkPad.
-The only serving-build exception is the steward-managed `/home/carte/src/llama.cpp*` tree;
-keep it outside normal project work. Detailed source-to-destination configuration mapping
-and the exception's paths are in [`environment.md`](notes/docs/homelab/environment.md).
+The dual-boot rig is the Linux inference/development host and Windows gaming machine. The
+ThinkPad remains the sole notes, documentation, infrastructure, and production authority:
+develop under `/home/carte/dev/<repo>`, transfer code through GitHub, and never deploy
+production, copy authoritative state, or extend k3s to the rig.
 
-The ThinkPad remains the sole notes/docs/infrastructure/production source of truth. Never copy
-`/home/carter/notes`, production deploy trees, k3s manifests or kubeconfig, OMP databases/
-sessions/auth, Herdr sessions/logs, or Cloudflare credentials to the rig. The rig must never
-join k3s, receive kubeconfig, or host homelab applications.
-
-Windows gaming uses Apollo in headless mode with SudoVDA. Keep the Windows NVIDIA driver at
-Game Ready `610.88` (`32.0.16.1088`) with HAGS enabled
-(`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\HwSchMode=2`): Moonlight streaming
-and Black Myth: Wukong DLSS Frame Generation are verified. Do not install 616.56; its
-confirmed HAGS/SudoVDA regression breaks virtual-display creation and produces Moonlight
-error 503. This Windows-only driver pin does not affect Linux inference. Recovery evidence,
-the retained signed 610.88 installer, and the Windows-staying reboot command are in
-[`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
-
-Linux serves five retained llama-swap model IDs through the ThinkPad's `llm-proxy`, with
-cloud fallback and the Access-protected dashboard at `rig.carter2099.com`. Model versions,
-serving profiles, boot switching, privilege policy, steward updates, request-log cleanup,
-development conventions, and recovery procedures live in
-[`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
+- [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md) — host topology,
+  inference/models, proxy/dashboard, Windows/Apollo driver constraints, boot switching,
+  steward maintenance, and recovery.
+- [`environment.md`](notes/docs/homelab/environment.md) — development/tooling conventions,
+  canonical configuration map, SSH/trust boundary, serving-build exception, and state
+  exclusions.
 
 ## Environment
 
