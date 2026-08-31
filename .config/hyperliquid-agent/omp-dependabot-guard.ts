@@ -54,11 +54,11 @@ function canonicalJson(value: unknown): string {
     .join(",")}}`;
 }
 
-function loadManifest(): IntakeManifest {
+function loadManifest(source: string): IntakeManifest {
   if (!manifestPath) {
     throw new Error("HYPERLIQUID_DEPENDABOT_MANIFEST is not set");
   }
-  const parsed = JSON.parse(readFileSync(manifestPath, "utf8")) as IntakeManifest;
+  const parsed = JSON.parse(source) as IntakeManifest;
   const expectedManifestKeys = [
     "classification",
     "generated_at",
@@ -180,9 +180,12 @@ function loadManifest(): IntakeManifest {
 }
 
 let manifest: IntakeManifest | null = null;
+let validatedManifestFileSha256 = "";
 let initializationError = "";
 try {
-  manifest = loadManifest();
+  const source = readFileSync(manifestPath, "utf8");
+  manifest = loadManifest(source);
+  validatedManifestFileSha256 = createHash("sha256").update(source, "utf8").digest("hex");
 } catch (error) {
   initializationError = error instanceof Error ? error.message : String(error);
 }
@@ -241,6 +244,25 @@ export default function (pi: ExtensionAPI) {
       return {
         block: true,
         reason: `Blocked by Hyperliquid Dependabot guard: ${initializationError}.`,
+      };
+    }
+    try {
+      const currentSource = readFileSync(manifestPath, "utf8");
+      const currentSha256 = createHash("sha256")
+        .update(currentSource, "utf8")
+        .digest("hex");
+      if (currentSha256 !== validatedManifestFileSha256) {
+        return {
+          block: true,
+          reason:
+            "Blocked by Hyperliquid Dependabot guard: manifest changed after validation.",
+        };
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        block: true,
+        reason: `Blocked by Hyperliquid Dependabot guard: cannot re-read manifest: ${detail}.`,
       };
     }
     if (event.toolName === "bash") {

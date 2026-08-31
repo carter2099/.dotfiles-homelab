@@ -106,7 +106,8 @@ echo "ok: omp at $(command -v "$OMP_PATH"), bun at $(command -v bun)"
 
 # GitHub discovery and Prompt-Guard classification happen outside the model.
 # The manifest contains only validated branch metadata; PR titles and bodies
-# never enter the agent prompt or tool context.
+# never enter the agent prompt or tool context. The agent reconciles this intake
+# into its regular state queue before scanning upstream and selecting work.
 python3 "$HOME/scripts/hyperliquid_dependabot_intake.py" \
     --output "$DEPENDABOT_MANIFEST" \
     2>&1 | tee -a "$RUN_LOG"
@@ -118,7 +119,7 @@ PROMPT='/hyperliquid-run'
     --api-key proxy \
     --allow-home \
     --config "$HOME/.omp/agent/headless-override.yml" \
-    --tools bash,read,write,edit,grep \
+    --tools bash,read,write,edit,grep,glob,lsp,todo \
     -e "$HOME/.config/hyperliquid-agent/omp-dependabot-guard.ts" \
     --session-dir "$HOME/.omp/agent/sessions-automated" \
     "$PROMPT" 2>&1 | tee -a "$RUN_LOG"

@@ -127,6 +127,21 @@ try {
     }
   }
 
+  const tamperedManifest = structuredClone(manifest);
+  tamperedManifest.pull_requests[0].head_sha =
+    "ffffffffffffffffffffffffffffffffffffffff";
+  await Bun.write(manifestPath, `${JSON.stringify(tamperedManifest)}\n`);
+  const tamperedResult = await handler({
+    toolName: "read",
+    input: { path: "/home/carter/dev/hyperliquid/Gemfile" },
+  }) as { block?: boolean; reason?: string } | undefined;
+  if (
+    !tamperedResult?.block ||
+    !tamperedResult.reason?.includes("manifest changed after validation")
+  ) {
+    throw new Error(`tampered manifest was not rejected: ${JSON.stringify(tamperedResult)}`);
+  }
+
   console.log("ALL PASSED");
 } finally {
   rmSync(temporaryDirectory, { recursive: true, force: true });
