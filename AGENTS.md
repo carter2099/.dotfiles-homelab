@@ -99,7 +99,7 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 
 **Critical rules (every deploy):**
 - **Commit before deploy.** Deployed state normally matches `origin/main`; check `git status` first.
-  **Explicit exceptions:** OMP Web's private port worktree remains intentionally uncommitted and deploys only a fully validated, SHA-256-verified artifact with a rollback archive. Steward P1 may mutate and deploy tracked managed-version pins before P9b attempts to commit/push them; even failed or dirty pins can persist if later gates fail, so reconcile against live health and Git immediately. No other dirty-tree deploy is allowed.
+  **Explicit exception:** Steward P1 may mutate and deploy tracked managed-version pins before P9b attempts to commit/push them; even failed or dirty pins can persist if later gates fail, so reconcile against live health and Git immediately. No other dirty-tree deploy is allowed.
 - **Orphaned docker-proxy.** Container exit 255 can leave `docker-proxy` holding the port. Fix: `sudo kill <proxy-pid>`, `docker rm <container>`, `bash up.sh`.
 - **"Missing feature" = check cache first.** Cloudflare serves stale HTML if origin is down. `curl` the origin before debugging code.
 - **Exit 255 is intermittent.** Restart with existing image; don't rebuild.
@@ -120,7 +120,6 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 - **Open WebUI** (chat frontend + native SearXNG + Weather v2, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)
-- **OMP Web** (agent web UI, localhost:8504) → [`omp-web.md`](notes/docs/homelab/omp-web.md)
 - **Herdr Web** (mobile-first browser attachment to the live Herdr server, loopback-only on 30145 at remote.carter2099.com; Cloudflare Access plus origin JWT validation; one browser attachment; background completion toast/chime; Kitty Shift+Enter newline) → [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md)
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
 - **FreshRSS** (RSS reader, k3s Deployment, freshrss.carter2099.com) → [`k3s.md`](notes/docs/homelab/k3s.md) (covered as third-party k3s service)
@@ -148,7 +147,7 @@ The ThinkPad's sole agent CLI is **omp** (`@oh-my-pi/pi-coding-agent`, via bun; 
 
 ## Remote Agent Operations
 
-Carter's omp agent web UI is **OMP Web**, a private direct fork of `jmfederico/pi-web` ported to OMP and deployed from `~/dev/omp-web-worktrees/phase0`, at `omp.carter2099.com` → [`omp-web.md`](notes/docs/homelab/omp-web.md). SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
+Carter's browser attachment is **Herdr Web** at `remote.carter2099.com`; it connects to the live Herdr server instead of maintaining a separate web-owned OMP session store. OMP Web and `omp.carter2099.com` were retired on 2026-08-31. SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
 
 ## Persistent Memory (`~/notes/`)
 
@@ -251,13 +250,12 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules; also covers FreshRSS as a third-party k3s deployment
 - [`email-digests.md`](notes/docs/homelab/email-digests.md) — Daily News significance/attention/priority scoring, front page, standfirsts, R2 backup, delivery, audit/debug
 - [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, session memory, audit/fix loop, work queue, and debugging
-- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 23-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
+- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 22-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
 - [`blog.md`](notes/docs/homelab/blog.md) — Rails 8 blog app
 - [`beatz.md`](notes/docs/homelab/beatz.md) — public beat archive player, starter/artwork pools, media library, deploy/runbook
 - [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md) — automated Hyperliquid SDK maintenance
 - [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md) — Go webhook + Prompt-Guard classifier
 - [`open-webui.md`](notes/docs/homelab/open-webui.md) — chat frontend, native SearXNG, Weather v2
-- [`omp-web.md`](notes/docs/homelab/omp-web.md) — agent web UI, next.js build quirks
 - [`searxng.md`](notes/docs/homelab/searxng.md) — metasearch backend, config
 - [`cloudflare.md`](notes/docs/homelab/cloudflare.md) — API token, tunnel ingress, DNS
 - [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md) — multi-account usage API routing, ufw bridge rules

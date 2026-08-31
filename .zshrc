@@ -19,9 +19,6 @@ compinit
 # XDG RUNTIME DIR
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 
-# Keep OMP Web CLI commands pointed at the relocated managed state.
-export PI_WEB_DATA_DIR="/srv/omp-web/carter/pi-web"
-
 # prompt
 # using starship instead
 # not on homelab (yet)

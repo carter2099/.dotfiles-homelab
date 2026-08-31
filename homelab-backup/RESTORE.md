@@ -15,19 +15,19 @@ commands. After setting `$ARCHIVE` in step 0, inspect its target names with:
 tar tzf "$ARCHIVE" | awk -F/ '{print $1}' | sort -u
 ```
 
-## What an archive contains (23 targets)
+## What an archive contains (22 targets)
 
 | Group | Targets |
 |---|---|
 | App data | `blog-posts`, `blog-reviews`, `blog-images`, `blog-db`, `agent-state`, `omp-agent-state`, `daily-news-data` |
 | FreshRSS | `freshrss-db`, `freshrss-config` |
 | Open WebUI | `open-webui-db` |
-| Config/code | `homelab-backup-config`, `k3s-manifests`, `omp-web-app`, `host-etc`, `pkg-manifest` |
+| Config/code | `homelab-backup-config`, `k3s-manifests`, `host-etc`, `pkg-manifest` |
 | Secrets (unencrypted) | `secrets-blog-master`, `secrets-open-webui-env`, `secrets-cloudflare`, `secrets-dependabot`, `secrets-llm-proxy`, `secrets-opencode-go-proxy`, `secrets-searxng`, `secrets-smtp-and-staged` |
 
 For database targets **present and successfully collected**, dedicated snapshots passed
 `PRAGMA integrity_check` at backup time. `verify` rechecks every embedded SQLite file,
-but does not compare the archive against the configured 23-target list, detect an empty
+but does not compare the archive against the configured 22-target list, detect an empty
 failed-target directory, or prove non-database target completeness.
 
 ## 0. Select one archive
@@ -58,7 +58,7 @@ variable through every later step—never use a wildcard that can select multipl
 
 This proves the tar is readable and every embedded SQLite file passes. It can still pass
 with missing/empty targets or no databases. Compare the printed top-level manifest with
-the 23 expected names above and inspect critical non-database targets before a destructive
+the 22 expected names above and inspect critical non-database targets before a destructive
 restore.
 
 ## 2. Extract privately
@@ -140,7 +140,6 @@ for container in blog-web-1 open-webui; do
     docker stop "$container"
   fi
 done
-systemctl --user stop omp-web.service omp-web-sessiond.service
 if pgrep -af '[o]mp( |$)' >/dev/null; then
   echo "stop ordinary OMP CLI writers before restoring ~/.omp/agent" >&2
   exit 1
@@ -226,14 +225,6 @@ sudo chmod 0440 /etc/sudoers.d/carter-agent
 sudo visudo -cf /etc/sudoers.d/carter-agent
 ```
 
-### 3h. OMP Web limitation
-`omp-web-app` is a source snapshot without `.git`, `node_modules`, build output, or the
-private installed artifact. The archive also excludes `/srv/omp-web/carter/`, so Web
-catalog/transcripts, gateway state, and rollback artifacts are not recoverable here.
-Recreate a Git worktree at the documented base, overlay the snapshot, then run the full
-validation/install procedure in `~/notes/docs/homelab/omp-web.md`; do not run its
-Git-dependent validator directly inside the extracted snapshot.
-
 ## 4. Reinstall, enable, and verify services
 
 Rebuild/install each custom binary from its `~/dev/<repo>/` checkout using the subsystem
@@ -258,7 +249,6 @@ systemctl --user enable --now \
   homelab-backup.timer homelab-backup-restore-drill.timer \
   homelab-steward.timer hyperliquid-sdk.timer
 # Recreate ~/dev/prompt-guard/.env (HF_TOKEN and service settings) before enabling prompt-guard.
-# Enable omp-web-sessiond.service and omp-web.service only after completing 3h.
 ```
 
 Use `pkg-manifest/` plus the tracked `default.target.wants/` and
@@ -276,14 +266,14 @@ prove an older archive used above.
 - Secrets are **unencrypted** in R2, local archives are normally mode 0644, and directory
   source modes are not preserved. Bucket access is the trust boundary; use `umask 077`
   while recovering and reset modes as shown.
-- Retention baseline: 14 scheduled dailies + 1 monthly + 1 yearly (about 1.0 GB at
-  roughly 55–63 MB each). Manual runs remain additional daily objects until expiry.
-- The Open WebUI cache is intentionally excluded. OMP Web `/srv` state/artifacts, Beatz
-  play history and the entire `~/beatz-selected/` media/artwork library, Blog's secondary
-  SQLite DBs, Daily News trackers, Prompt-Guard's `.env`, the backup sudoers policy, and
-  the cloudflared tunnel token are also outside the current target set.
+- Retention baseline: 14 scheduled dailies + 1 monthly + 1 yearly. Manual runs remain
+  additional daily objects until expiry.
+- The Open WebUI cache is intentionally excluded. Beatz play history and the entire
+  `~/beatz-selected/` media/artwork library, Blog's secondary SQLite DBs, Daily News
+  trackers, Prompt-Guard's `.env`, the backup sudoers policy, and the cloudflared tunnel
+  token are also outside the current target set.
 - `pkg-manifest/` inventories packages and records service command output, but Git-backed
   unit definitions/enablement links remain authoritative for reconstruction.
 - `verify` validates archive readability and embedded databases, not the configured target
-  count or every non-database file. Confirm all 23 names and inspect critical targets
+  count or every non-database file. Confirm all 22 names and inspect critical targets
   before a destructive restore; partial archives are uploaded when a target fails.

@@ -5051,7 +5051,7 @@ AUDIT_SECTIONS = [
             "For every DRIFT propose exact OLD_TEXT -> NEW_TEXT edits. "
             "Prefer UNVERIFIABLE over guessing. "
             "Files to check: docs/homelab/hardware.md, deployment.md, k3s.md, blog.md, "
-            "hyperliquid-sdk.md, dependabot-webhook.md, open-webui.md, omp-web.md, searxng.md, "
+            "hyperliquid-sdk.md, dependabot-webhook.md, open-webui.md, searxng.md, "
             "cloudflare.md, opencode-go-proxy.md, local-llm-gaming-rig.md, email-digests.md, "
             "homelab-steward.md, homelab-backup.md."
         ),

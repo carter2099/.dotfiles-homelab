@@ -49,7 +49,6 @@ targets:
       - tools
       - "*.db-wal"
       - "*.db-shm"
-      - ".omp-web-test-auth-*.db*"
 
   - name: freshrss-db
     type: sqlite-host
@@ -90,16 +89,6 @@ targets:
     excludes:
       - releases
       - current
-
-  - name: omp-web-app
-    type: directory
-    source: /home/carter/dev/omp-web-worktrees/phase0
-    excludes:
-      - .git
-      - node_modules
-      - .next
-      - bun.lock
-      - "*.tsbuildinfo"
 
   # ---- Secrets (unencrypted in R2; Carter accepts bucket-access = bigger problem) ----
   # These are gitignored everywhere else; R2 is the DR copy.
