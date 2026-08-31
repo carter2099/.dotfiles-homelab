@@ -397,6 +397,117 @@ def test_phase_four_concurrency_and_shared_cache() -> None:
         check(all(item["cache_hit"] for item in second), "second topic missed shared cache")
 
 
+
+def test_phase_five_backfills_date_confirmed_from_date_published() -> None:
+    """A candidate whose Phase 4 fetch and Phase 5 re-fetch could not confirm a
+    publication date must still carry date_confirmed, backfilled explicitly from
+    date_published — never null (digest-quality audit 2026-08-29: ai-tech
+    shipped Hunyuan Hy4 and GLM-5.3 with date_confirmed=null)."""
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary) / "ai-tech" / "2026-08-29"
+        run_dir.mkdir(parents=True)
+        summaries = [
+            {
+                "title": "Unconfirmed date story",
+                "url": "https://a.example/story",
+                "source_domain": "a.example",
+                "summary": "Verified factual summary.",
+                "date_published": "2026-08-28",
+                "date_confirmed": "",
+                "source_verdict": "fresh",
+                "fetch_success": True,
+            },
+            {
+                "title": "Confirmed date story",
+                "url": "https://b.example/story",
+                "source_domain": "b.example",
+                "summary": "Verified factual summary.",
+                "date_published": "2026-08-29",
+                "date_confirmed": "2026-08-29",
+                "source_verdict": "fresh",
+                "fetch_success": True,
+            },
+        ]
+        judgments = json.dumps([
+            {"url": "https://a.example/story", "verdict": "keep", "issues": [], "fixed_summary": ""},
+            {"url": "https://b.example/story", "verdict": "keep", "issues": [], "fixed_summary": ""},
+        ])
+        with patch("digest_runner._refetch_article_date", return_value=None), \
+             patch("digest_runner._call_llm_proxy", return_value=judgments):
+            results = digest.phase_5_judge_summaries(
+                digest.TOPICS["ai-tech"], summaries, run_dir
+            )
+        by_url = {r["url"]: r for r in results}
+        unconfirmed = by_url["https://a.example/story"]
+        check(unconfirmed["date_confirmed"] == "2026-08-28",
+              f"unconfirmed date was not backfilled: {unconfirmed['date_confirmed']!r}")
+        check(unconfirmed["judge_verdict"] == "keep", unconfirmed)
+        confirmed = by_url["https://b.example/story"]
+        check(confirmed["date_confirmed"] == "2026-08-29",
+              f"confirmed date was overwritten: {confirmed['date_confirmed']!r}")
+
+
+def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
+    """A curated fresh story that somehow still lacks date_confirmed must be
+    backfilled from date_published and flagged in 06c's validation warnings
+    (digest-quality audit 2026-08-29)."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "ai-tech" / "2026-08-29"
+        run_dir.mkdir(parents=True)
+        fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        summary = {
+            "title": "Fresh story without confirmed date",
+            "url": "https://example.com/fresh-unconfirmed",
+            "source_domain": "example.com",
+            "summary": "Verified fresh summary.",
+            "category": "Research",
+            **validated_high_fields(),
+            "date_published": fresh_day,
+            "source_verdict": "fresh",
+            "judge_verdict": "keep",
+        }
+        candidate_id = digest._editorial_candidate_id(summary)
+        proposal = {
+            "selected_fresh": [{
+                "candidate_id": candidate_id,
+                "editorial_summary": "Verified fresh summary.",
+                "selection_reason": "Fresh impact.",
+                "related_story_url": None,
+            }],
+            "selected_ongoing": [],
+            "story_state_proposals": [{
+                "operation": "add",
+                "candidate_id": candidate_id,
+                "evidence_candidate_ids": [candidate_id],
+                "latest_dev": "Verified fresh summary.",
+                "editorial_significance": "high",
+                "status": "active",
+            }],
+            "rejected": [],
+            "gaps": "",
+            "balance_summary": "One lead story.",
+        }
+        responses = [
+            json.dumps(proposal),
+            json.dumps({"verdict": "approve", "changes": [], "notes": "OK"}),
+        ]
+        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
+            digest, "_call_llm_proxy", side_effect=responses
+        ):
+            fresh, _, _ = digest.phase_6_curate(
+                digest.TOPICS["ai-tech"], [summary], [], {}, run_dir
+            )
+        check(len(fresh) == 1, f"fresh story was not curated: {fresh}")
+        check(fresh[0]["date_confirmed"] == fresh_day,
+              f"date_confirmed not backfilled: {fresh[0].get('date_confirmed')!r}")
+        final = json.loads((run_dir / "06c-editorial-final.json").read_text())
+        check(
+            any("date_confirmed" in warning for warning in final["validation_warnings"]),
+            final["validation_warnings"],
+        )
+
+
 def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
     # Publication dates are yesterday-relative: the Phase 6c freshness gate
     # (digest-quality audit 2026-08-12) drops fresh selections outside the
@@ -2002,6 +2113,8 @@ def main() -> None:
         test_attention_phase_persists_durable_observations,
         test_phase_three_uses_product_priority,
         test_phase_four_concurrency_and_shared_cache,
+        test_phase_five_backfills_date_confirmed_from_date_published,
+        test_phase_six_backfills_missing_date_confirmed_on_curated_fresh,
         test_editorial_validation_and_state_application,
         test_editorial_critic_patch_contract,
         test_editorial_drops_stale_fresh_selection,

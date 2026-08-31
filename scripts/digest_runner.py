@@ -2672,6 +2672,18 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
                 print(f"  [FAIL] {label} — {e} ({elapsed:.0f}s), passing to LLM")
                 validated.append(s)
 
+    # Hygiene (digest-quality audit 2026-08-29): every surviving candidate must
+    # carry a parseable date_confirmed. When neither Phase 4's fetch nor the
+    # Phase 5 re-fetch confirms a publication date, fall back explicitly to
+    # Phase 1's date_published instead of shipping null. ai-tech 08-29 shipped
+    # Hunyuan Hy4 and GLM-5.3 with date_confirmed=null; priority_sort_key's
+    # `date_confirmed or date_published` fallback kept ranking deterministic,
+    # but the null field is a schema-hygiene gap.
+    for s in validated:
+        dc = (s.get("date_confirmed") or "").strip()
+        if not dc or _parse_date(dc) is None:
+            s["date_confirmed"] = (s.get("date_published") or "").strip()
+
     print(f"  Date validation: {len(validated)} pass, "
           f"{len(date_dropped)} auto-dropped (stale/mismatch), {len(need_refetch)} refetched")
 
@@ -3830,6 +3842,23 @@ def phase_6_curate(
     fresh, ongoing = _materialize_editorial_selection(
         final_proposal, candidates, updated_sif
     )
+    # Hygiene assertion (digest-quality audit 2026-08-29): every curated fresh
+    # story must carry date_confirmed; Phase 5 backfills it from date_published
+    # when the fetch could not confirm one, so a miss here is a regression.
+    # Backfill defensively and persist the warning in 06c's validation warnings
+    # for auditability. Tracker-sourced ongoing stories carry evidence dates
+    # (first_seen/developments), not publication dates, so they are exempt.
+    hygiene_warnings: list[str] = []
+    for story in fresh:
+        if not (story.get("date_confirmed") or "").strip():
+            story["date_confirmed"] = (story.get("date_published") or "").strip()
+            hygiene_warnings.append(
+                "date_confirmed missing on curated fresh story; backfilled from "
+                f"date_published ({story['date_confirmed'] or 'none'}): "
+                f"{story.get('url', '?')}"
+            )
+    if hygiene_warnings:
+        review_warnings.extend(hygiene_warnings)
     fresh.sort(key=priority_sort_key, reverse=True)
     for rank, item in enumerate(fresh, 1):
         item["rank"] = rank
