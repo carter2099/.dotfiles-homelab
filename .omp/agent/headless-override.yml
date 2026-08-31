@@ -6,3 +6,10 @@
 advisor:
   enabled: false
   syncBacklog: off
+providers:
+  webSearchOrder:
+    - searxng
+searxng:
+  endpoint: http://localhost:8080
+  categories: general,news
+  language: en

@@ -217,9 +217,9 @@ MIN_WORKING_ENGINES = 2               # minimum engines returning results
 
 
 def check_search_health(label: str = "") -> dict[str, Any]:
-    """Check SearXNG health and return a status dict.
+    """Check the fresh-news SearXNG path used by digest research.
 
-    Performs a test search and checks engine config. Returns:
+    Returns:
         {
             "ok": True/False,
             "results": count,
@@ -233,14 +233,24 @@ def check_search_health(label: str = "") -> dict[str, Any]:
         "ok": False, "results": 0, "engines_working": [],
         "engines_suspended": [], "recent_errors": 0,
         "recommendation": "ok", "label": label,
+        "query": "artificial intelligence", "time_range": "day",
+        "categories": "news",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     try:
-        # 1. Test search
+        # Test the same time-filtered news path digest discovery depends on.
+        # A generic unfiltered query can look healthy while every fresh-news
+        # query returns zero results.
         resp = requests.get(
             f"{SEARXNG_URL}/search",
-            params={"q": "test news today", "format": "json", "language": "en"},
+            params={
+                "q": status["query"],
+                "format": "json",
+                "language": "en",
+                "time_range": status["time_range"],
+                "categories": status["categories"],
+            },
             timeout=20,
         )
         resp.raise_for_status()
@@ -249,8 +259,10 @@ def check_search_health(label: str = "") -> dict[str, Any]:
         status["results"] = len(results)
 
         engines_seen: set[str] = set()
-        for r in results:
-            engines_seen.add(r.get("engine", "?"))
+        for result in results:
+            engines_seen.update(result.get("engines", []))
+            if result.get("engine"):
+                engines_seen.add(result["engine"])
         status["engines_working"] = sorted(engines_seen)
 
         unresponsive = data.get("unresponsive_engines", [])
@@ -258,32 +270,25 @@ def check_search_health(label: str = "") -> dict[str, Any]:
             {"engine": e[0], "reason": e[1]} for e in unresponsive
         ]
 
-        # 2. Check engine config for enabled general/web engines
-        cfg_resp = requests.get(f"{SEARXNG_URL}/config?format=json", timeout=10)
-        cfg = cfg_resp.json()
-        enabled_general = 0
-        for e in cfg.get("engines", []):
-            cats = e.get("categories", [])
-            if ("general" in cats or "web" in cats) and e.get("enabled"):
-                enabled_general += 1
-        status["enabled_general_engines"] = enabled_general
-
-        # 3. Check recent SearXNG errors via docker logs (fast grep)
+        # Check recent SearXNG errors. Docker writes container logs to stderr.
         try:
             result = subprocess.run(
                 ["docker", "logs", "searxng", "--since", "1h"],
                 capture_output=True, text=True, timeout=10,
             )
-            error_count = result.stdout.count("ERROR:searx.engines")
-            status["recent_errors"] = error_count
+            log_output = result.stdout + result.stderr
+            status["recent_errors"] = log_output.count("ERROR:searx.engines")
         except Exception:
             status["recent_errors"] = -1  # couldn't check
 
-        # 4. Determine recommendation
+        # Determine recommendation
         working_count = len(status["engines_working"])
         suspended_count = len(status["engines_suspended"])
 
-        if working_count == 0 or (working_count < MIN_WORKING_ENGINES and suspended_count > 3):
+        if status["results"] == 0 or working_count == 0:
+            status["recommendation"] = "halt"
+            status["ok"] = False
+        elif working_count < MIN_WORKING_ENGINES and suspended_count > 3:
             status["recommendation"] = "halt"
             status["ok"] = False
         elif suspended_count >= 3 or status.get("recent_errors", 0) > MAX_ENGINE_ERRORS_BEFORE_HALT:
@@ -295,7 +300,7 @@ def check_search_health(label: str = "") -> dict[str, Any]:
 
     except Exception as e:
         status["error"] = str(e)[:200]
-        status["recommendation"] = "warn"
+        status["recommendation"] = "halt"
         status["ok"] = False
 
     # 5. Log to health file
@@ -562,17 +567,19 @@ TOPICS: dict[str, dict[str, Any]] = {
                 "prompt": (
                     "Search for agentic AI platform news: new features, launches, and major "
                     "updates from platforms like Claude Code, Codex, Cursor, omp, Pi, Aider, "
-                    "OpenCode, Windsurf, Copilot, and other coding agent platforms. "
-                    "Focus on the last 24 hours.\n\n"
-                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "OpenCode, Windsurf, Copilot, OpenClaw, Devin, Kiro, Jules, Replit Agent, "
+                    "and other coding or general-purpose agent platforms. The examples are not "
+                    "exhaustive: use at least one broad agent-platform launch query so new or "
+                    "renamed platforms are not missed. Focus on the last 24 hours.\n\n"
+                    "For each story found, record from the web_search results:\n"
                     "- Title\n"
-                    "- URL (exact URL you fetched)\n"
+                    "- URL (exact URL returned by web_search)\n"
                     "- Source domain\n"
                     "- Publication date\n"
-                    "- 1-2 sentence factual summary\n"
-                    "- Category: Platform Updates, New Features, or Launches\n"
+                    "- 1-2 sentence factual summary based only on the search evidence\n"
+                    "- Category: Platform Updates, Releases, or Industry News\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories that web_search actually returned; article verification happens later."
                 ),
             },
             {
@@ -582,12 +589,12 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "orchestration frameworks, workflow engines, evaluation benchmarks, "
                     "and notable community projects from the last 24 hours. "
                     "Check GitHub trending, Hacker News, dev.to, and AI newsletters.\n\n"
-                    "For each story found, use web_fetch to read and extract:\n"
-                    "- Title, URL, source domain, publication date\n"
-                    "- 1-2 sentence factual summary\n"
+                    "For each story found, record from the web_search results:\n"
+                    "- Title, exact URL returned by web_search, source domain, publication date\n"
+                    "- 1-2 sentence factual summary based only on the search evidence\n"
                     "- Category: MCP/Ecosystem, SDKs & Frameworks, Benchmarks, or Community Projects\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories that web_search actually returned; article verification happens later."
                 ),
             },
             {
@@ -596,12 +603,12 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for advances in agentic AI techniques: multi-agent patterns, "
                     "deterministic orchestration, agent evaluation methods, prompting strategies, "
                     "context management, and relevant research papers from the last 24 hours.\n\n"
-                    "For each finding, use web_fetch to read and extract:\n"
-                    "- Title, URL, source domain, publication date\n"
-                    "- 1-2 sentence factual summary\n"
+                    "For each finding, record from the web_search results:\n"
+                    "- Title, exact URL returned by web_search, source domain, publication date\n"
+                    "- 1-2 sentence factual summary based only on the search evidence\n"
                     "- Category: Techniques & Patterns, Research, or Evaluation\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include findings you actually fetched and confirmed."
+                    "Only include findings that web_search actually returned; article verification happens later."
                 ),
             },
         ],

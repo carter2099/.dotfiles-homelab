@@ -43,6 +43,54 @@ def test_url_normalization() -> None:
     check(normalized == "example.com/Case-Sensitive?a=1&b=2", normalized)
 
 
+def test_search_health_uses_fresh_news_path() -> None:
+    """Health must exercise the time-filtered news path used for discovery."""
+    class FakeResponse:
+        def __init__(self, results: list[dict]) -> None:
+            self._results = results
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "results": self._results,
+                "unresponsive_engines": [["startpage news", "Suspended: CAPTCHA"]],
+            }
+
+    class FakeCompleted:
+        stdout = ""
+        stderr = "ERROR:searx.engines one recent engine failure\n"
+
+    request: dict = {}
+
+    def fresh_get(url, params=None, timeout=None):
+        request.update({"url": url, "params": params, "timeout": timeout})
+        return FakeResponse([{"engines": ["bing news", "reuters"]}])
+
+    with tempfile.TemporaryDirectory() as temporary, \
+         patch("digest_runner.requests.get", side_effect=fresh_get), \
+         patch("digest_runner.subprocess.run", return_value=FakeCompleted()), \
+         patch("digest_runner.HEALTH_LOG_PATH", Path(temporary) / "health.jsonl"):
+        status = digest.check_search_health("test-fresh")
+
+    check(request["params"]["categories"] == "news", request)
+    check(request["params"]["time_range"] == "day", request)
+    check(request["params"]["language"] == "en", request)
+    check(status["engines_working"] == ["bing news", "reuters"], status)
+    check(status["recent_errors"] == 1, status)
+    check(status["ok"], status)
+
+    with tempfile.TemporaryDirectory() as temporary, \
+         patch("digest_runner.requests.get", return_value=FakeResponse([])), \
+         patch("digest_runner.subprocess.run", return_value=FakeCompleted()), \
+         patch("digest_runner.HEALTH_LOG_PATH", Path(temporary) / "health.jsonl"):
+        empty_status = digest.check_search_health("test-empty")
+
+    check(empty_status["recommendation"] == "halt", empty_status)
+    check(not empty_status["ok"], empty_status)
+
+
 def test_article_cache_contract() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         cache_dir = Path(temporary)
@@ -2111,6 +2159,7 @@ def test_proxy_5xx_retry_with_backoff() -> None:
 def main() -> None:
     tests = [
         test_url_normalization,
+        test_search_health_uses_fresh_news_path,
         test_article_cache_contract,
         test_cross_topic_dedup_precedes_fetch_queue,
         test_cross_topic_same_event_referenced_url_dedup,
