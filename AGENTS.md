@@ -232,12 +232,13 @@ The ThinkPad remains the sole notes/docs/infrastructure/production source of tru
 sessions/auth, Herdr sessions/logs, or Cloudflare credentials to the rig. The rig must never
 join k3s, receive kubeconfig, or host homelab applications.
 
-Windows gaming uses Apollo in headless mode with SudoVDA. With NVIDIA Windows driver 616.56,
-HAGS must remain disabled (`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\HwSchMode=1`);
-616.56 plus HAGS breaks virtual-display creation and produces Moonlight error 503. This
-Windows-only workaround does not affect the Linux inference driver. It disables DLSS Frame
-Generation; do not re-enable HAGS until the driver is rolled back or the Apollo/NVIDIA
-regression is verified fixed. Recovery evidence and the Windows-staying reboot command are in
+Windows gaming uses Apollo in headless mode with SudoVDA. Keep the Windows NVIDIA driver at
+Game Ready `610.88` (`32.0.16.1088`) with HAGS enabled
+(`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\HwSchMode=2`): Moonlight streaming
+and Black Myth: Wukong DLSS Frame Generation are verified. Do not install 616.56; its
+confirmed HAGS/SudoVDA regression breaks virtual-display creation and produces Moonlight
+error 503. This Windows-only driver pin does not affect Linux inference. Recovery evidence,
+the retained signed 610.88 installer, and the Windows-staying reboot command are in
 [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md).
 
 Linux serves five retained llama-swap model IDs through the ThinkPad's `llm-proxy`, with
