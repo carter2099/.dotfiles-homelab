@@ -116,7 +116,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **Blog** (Rails 8, Docker on port 33099; public blog.carter2099.com served via k3s Traefik ingress — tunnel origin is 127.0.0.1:80, not 33099) → [`blog.md`](notes/docs/homelab/blog.md)
 - **Beatz** (public Go music player branded “Beats” in-app, localhost:30142; no Cloudflare Access; media: `~/beatz-selected/`; play history: `~/beatz-data/plays.jsonl`) → [`beatz.md`](notes/docs/homelab/beatz.md)
 - **Daily News** (public static newspaper UI, localhost:30144, news.carter2099.com; priority-ranked front page + five category pages, historical editions, one summary email, durable data in the existing R2 backup) → [`email-digests.md`](notes/docs/homelab/email-digests.md)
-- **Hyperliquid SDK maintenance** (automated dependency maintenance; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
+- **Hyperliquid SDK maintenance** (scheduled upstream API + dependency maintenance; Dependabot PR metadata is deterministically collected and Prompt-Guard-classified before the agent sees a sanitized batch; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
 - **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 - **Open WebUI** (chat frontend + native SearXNG + Weather v2, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)

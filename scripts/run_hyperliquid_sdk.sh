@@ -22,12 +22,15 @@ fi
 
 RECIPIENT="carter2099@pm.me"
 RUN_LOG="$(mktemp /tmp/hyperliquid-sdk-run.XXXXXX.log)"
+DEPENDABOT_MANIFEST="$(mktemp /tmp/hyperliquid-dependabot-intake.XXXXXX.json)"
+export HYPERLIQUID_DEPENDABOT_MANIFEST="$DEPENDABOT_MANIFEST"
+OMP_PATH="${OMP_PATH:-omp}"
 
 # On failure, email Carter. Runs on EXIT so success paths stay untouched.
 on_exit() {
     local rc=$?
     if [ "$rc" -eq 0 ]; then
-        rm -f "$RUN_LOG"
+        rm -f "$RUN_LOG" "$DEPENDABOT_MANIFEST"
         return 0
     fi
     local ts body_file logs
@@ -85,22 +88,37 @@ HTMLEOF
         --body-file "$body_file" \
         --to "$RECIPIENT" \
         || echo "WARNING: failed to send failure email" >&2
-    rm -f "$body_file" "$RUN_LOG"
+    rm -f "$body_file" "$RUN_LOG" "$DEPENDABOT_MANIFEST"
 }
 trap on_exit EXIT
 
 # Sanity check: verify omp and its bun interpreter are reachable
 # (exit 127 on omp means PATH issue at execution time)
-if ! command -v omp &>/dev/null; then
-    echo "FATAL: omp not found in PATH=$PATH" >&2
+if ! command -v "$OMP_PATH" &>/dev/null; then
+    echo "FATAL: omp not found: $OMP_PATH (PATH=$PATH)" >&2
     exit 1
 fi
 if ! command -v bun &>/dev/null; then
     echo "FATAL: bun (omp interpreter) not found in PATH=$PATH" >&2
     exit 1
 fi
-echo "ok: omp at $(command -v omp), bun at $(command -v bun)"
+echo "ok: omp at $(command -v "$OMP_PATH"), bun at $(command -v bun)"
+
+# GitHub discovery and Prompt-Guard classification happen outside the model.
+# The manifest contains only validated branch metadata; PR titles and bodies
+# never enter the agent prompt or tool context.
+python3 "$HOME/scripts/hyperliquid_dependabot_intake.py" \
+    --output "$DEPENDABOT_MANIFEST" \
+    2>&1 | tee -a "$RUN_LOG"
 
 PROMPT='/hyperliquid-run'
 
-omp -p --model opencode-go/glm-5.2 --api-key proxy --allow-home --config ~/.omp/agent/headless-override.yml --session-dir ~/.omp/agent/sessions-automated "$PROMPT" 2>&1 | tee "$RUN_LOG"
+"$OMP_PATH" -p \
+    --model opencode-go/glm-5.2 \
+    --api-key proxy \
+    --allow-home \
+    --config "$HOME/.omp/agent/headless-override.yml" \
+    --tools bash,read,write,edit,grep \
+    -e "$HOME/.config/hyperliquid-agent/omp-dependabot-guard.ts" \
+    --session-dir "$HOME/.omp/agent/sessions-automated" \
+    "$PROMPT" 2>&1 | tee -a "$RUN_LOG"
