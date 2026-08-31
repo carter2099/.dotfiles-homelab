@@ -100,6 +100,69 @@ class DelayedUpdateTests(unittest.TestCase):
             self.assertEqual(result["status"], "ok")
             self.assertIn(new_digest, compose.read_text())
 
+    def test_openwebui_reports_update_without_mutating_production(self):
+        release = {
+            "tag_name": "v0.11.3",
+            "draft": False,
+            "prerelease": False,
+            "html_url": "https://github.com/open-webui/open-webui/releases/tag/v0.11.3",
+            "published_at": "2026-08-31T14:55:53Z",
+        }
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(release).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            compose = Path(tmp) / "docker-compose.yml"
+            original = (
+                "services:\n  open-webui:\n"
+                "    image: ghcr.io/open-webui/open-webui:0.11.1\n"
+            )
+            compose.write_text(original)
+            with (
+                patch.object(steward, "OPENWEBUI_COMPOSE", compose),
+                patch.object(steward.urllib.request, "urlopen", return_value=response),
+                patch.object(steward, "run") as run_mock,
+                patch.object(steward, "run_capture") as run_capture_mock,
+            ):
+                result = steward._p1_openwebui()
+            final_compose = compose.read_text()
+
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(result["current_tag"], "0.11.1")
+        self.assertEqual(result["latest_tag"], "0.11.3")
+        self.assertFalse(result["local_mutation"])
+        self.assertEqual(final_compose, original)
+        self.assertFalse(steward._p1_deploy_step_ok(result))
+        run_mock.assert_not_called()
+        run_capture_mock.assert_not_called()
+        self.assertIn("/update-openweb-ui", steward._html_updates({"steps": [result]}))
+        self.assertIn(
+            "open-webui update available",
+            steward._tldr_collect_updates({"steps": [result]})[0][0],
+        )
+
+    def test_openwebui_never_reports_a_downgrade(self):
+        release = {
+            "tag_name": "v0.11.3",
+            "draft": False,
+            "prerelease": False,
+        }
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(release).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            compose = Path(tmp) / "docker-compose.yml"
+            compose.write_text(
+                "services:\n  open-webui:\n"
+                "    image: ghcr.io/open-webui/open-webui:0.11.4\n"
+            )
+            with (
+                patch.object(steward, "OPENWEBUI_COMPOSE", compose),
+                patch.object(steward.urllib.request, "urlopen", return_value=response),
+            ):
+                result = steward._p1_openwebui()
+
+        self.assertEqual(result["status"], "current")
+        self.assertFalse(result["local_mutation"])
+
     def test_llama_reports_verified_remote_rollback(self):
         releases = [
             {"tag_name": "b10488", "published_at": "2026-08-18T12:00:00Z"},

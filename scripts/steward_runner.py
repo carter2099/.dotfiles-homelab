@@ -1467,8 +1467,8 @@ def _p1_freshrss_update():
 
 
 def _p1_openwebui():
-    """Check open-webui GitHub releases for a newer stable tag, bump if found."""
-    print("  [1f] open-webui tag check")
+    """Report newer stable Open WebUI releases without mutating production."""
+    print("  [1f] open-webui stable release check (report-only)")
     if not OPENWEBUI_COMPOSE.exists():
         return {"step": "openwebui", "status": "skipped",
                 "reason": f"compose file not found: {OPENWEBUI_COMPOSE}"}
@@ -1480,53 +1480,50 @@ def _p1_openwebui():
         return {"step": "openwebui", "status": "skipped",
                 "reason": "could not parse current tag from compose file"}
 
-    latest_tag = None
     try:
         req = urllib.request.Request(GH_API, headers={"Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             release = json.loads(resp.read().decode())
-            latest_tag = release.get("tag_name", "").lstrip("v")
     except Exception as e:
         return {"step": "openwebui", "status": "error",
                 "reason": f"GitHub API unreachable: {e}", "current_tag": current_tag}
 
+    latest_tag = release.get("tag_name", "").lstrip("v")
     if not latest_tag:
         return {"step": "openwebui", "status": "error",
                 "reason": "no tag_name in GitHub release", "current_tag": current_tag}
+    if release.get("draft") or release.get("prerelease"):
+        return {"step": "openwebui", "status": "error",
+                "reason": f"latest release is not stable: {latest_tag}",
+                "current_tag": current_tag}
 
-    cur_clean = current_tag.lstrip("v")
-    lat_clean = latest_tag.lstrip("v")
-    if cur_clean == lat_clean:
-        return {"step": "openwebui", "status": "current",
+    current_m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", current_tag)
+    latest_m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", latest_tag)
+    if not current_m or not latest_m:
+        return {"step": "openwebui", "status": "error",
+                "reason": "current or latest tag is not numeric semver",
                 "current_tag": current_tag, "latest_tag": latest_tag}
 
-    print(f"    bumping open-webui: {current_tag} -> {latest_tag}")
-    new_compose = compose_text.replace(
-        f"ghcr.io/open-webui/open-webui:{current_tag}",
-        f"ghcr.io/open-webui/open-webui:{latest_tag}",
-    )
-    OPENWEBUI_COMPOSE.write_text(new_compose)
+    current_version = tuple(int(part) for part in current_m.groups())
+    latest_version = tuple(int(part) for part in latest_m.groups())
+    common = {
+        "step": "openwebui",
+        "current_tag": current_tag,
+        "latest_tag": latest_tag,
+        "release_url": release.get("html_url", ""),
+        "published_at": release.get("published_at", ""),
+        "local_mutation": False,
+    }
+    if latest_version <= current_version:
+        return {**common, "status": "current"}
 
-    try:
-        run(["docker", "compose", "-f", str(OPENWEBUI_COMPOSE), "pull"],
-            cwd=OPENWEBUI_COMPOSE.parent, capture_output=True, text=True)
-        run(["docker", "compose", "-f", str(OPENWEBUI_COMPOSE), "up", "-d"],
-            cwd=OPENWEBUI_COMPOSE.parent, capture_output=True, text=True)
-        healthy = False
-        for _ in range(30):
-            time.sleep(1)
-            status = run_capture(["docker", "ps", "--format", "{{.Names}}\t{{.Status}}"])
-            for line in status.splitlines():
-                if "open-webui" in line and "healthy" in line.lower():
-                    healthy = True
-                    break
-            if healthy:
-                break
-        return {"step": "openwebui", "status": "bumped",
-                "current_tag": current_tag, "latest_tag": latest_tag, "healthy": healthy}
-    except subprocess.CalledProcessError as e:
-        return {"step": "openwebui", "status": "failed",
-                "current_tag": current_tag, "latest_tag": latest_tag, "error": str(e)}
+    print(f"    update available: {current_tag} -> {latest_tag} "
+          "(manual: /update-openweb-ui)")
+    return {
+        **common,
+        "status": "available",
+        "reason": "manual guarded update required: /update-openweb-ui",
+    }
 
 
 def _p1_herdr_update():
@@ -1570,7 +1567,7 @@ def _p1_deploy_step_ok(step):
     status = step.get("status", "")
     if name.startswith("auto_") and status == "ok":
         return True
-    if name in ("openwebui", "freshrss") and status == "bumped":
+    if name == "freshrss" and status == "bumped":
         return True
     if name in (
         "herdr_update", "omp_update", "searxng",
@@ -2852,10 +2849,12 @@ def phase_1_apply(run_dir, dry_run=False):
     write_json(run_dir / "01-applied.json", data)
     n_ok = sum(1 for s in steps if s["status"] == "ok")
     n_bumped = sum(1 for s in steps if s["status"] == "bumped")
+    n_available = sum(1 for s in steps if s["status"] == "available")
     n_skipped = sum(1 for s in steps if s["status"] == "skipped")
     n_failed = sum(1 for s in steps if s["status"] == "failed")
     print(f"[P1] done -> {run_dir / '01-applied.json'}")
-    print(f"  {n_ok} ok, {n_bumped} bumped, {n_skipped} skipped, {n_failed} failed")
+    print(f"  {n_ok} ok, {n_bumped} bumped, {n_available} available, "
+          f"{n_skipped} skipped, {n_failed} failed")
     return data
 
 
@@ -6181,11 +6180,12 @@ def _html_updates(applied_data):
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
                              f'{pkg}: FAILED — {s.get("error","")}</p>')
 
-        # openwebui: show only bumped/failed/error
+        # Open WebUI updates are manual; surface availability and check failures.
         elif name == "openwebui":
-            if status == "bumped":
-                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
-                             f'open-webui: {s.get("current_tag")} -> {s.get("latest_tag")}</p>')
+            if status == "available":
+                lines.append(f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
+                             f'open-webui update available: {s.get("current_tag")} -> '
+                             f'{s.get("latest_tag")} — run /update-openweb-ui</p>')
             elif status in ("failed", "error"):
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
                              f'open-webui: {status} — {s.get("error",s.get("reason",""))}</p>')
@@ -7002,8 +7002,11 @@ def _tldr_collect_updates(applied):
             pkg = step.replace("auto_", "")
             if pre != post:
                 updates.append(f"{pkg}: {pre} -> {post}")
-        elif step == "openwebui" and status == "bumped":
-            updates.append(f"open-webui: {s.get('current_tag')} -> {s.get('latest_tag')}")
+        elif step == "openwebui" and status == "available":
+            updates.append(
+                f"open-webui update available: {s.get('current_tag')} -> "
+                f"{s.get('latest_tag')} (manual: /update-openweb-ui)"
+            )
         elif step == "freshrss" and status == "bumped":
             updates.append(f"freshrss: {s.get('current_tag')} -> {s.get('latest_tag')}")
         elif step == "herdr_update" and status == "ok":
@@ -7469,7 +7472,7 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
         f"# Steward Report — {date_str}",
         f"**Engine:** steward_runner.py",
         "",
-        "## Updates Applied",
+        "## Update Status",
     ]
     for s in applied.get("steps", []):
         if s.get("dry_run"):
@@ -7496,8 +7499,11 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
             else:
                 lines.append(f"- {pkg}: FAILED")
         elif name == "openwebui":
-            if status == "bumped":
-                lines.append(f"- open-webui: {s.get('current_tag')} -> {s.get('latest_tag')}")
+            if status == "available":
+                lines.append(
+                    f"- open-webui: {s.get('current_tag')} -> {s.get('latest_tag')} "
+                    "(available; run `/update-openweb-ui`)"
+                )
             elif status == "current":
                 lines.append(f"- open-webui: current at {s.get('current_tag')}")
 
