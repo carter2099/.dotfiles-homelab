@@ -19,7 +19,7 @@ Phases:
     2. Judge Research  — batched LLM: date, relevance, source, significance
    2b. Observe Attention — GDELT coverage time series; deterministic scores
     3. Rank URLs       — Python: cross-topic dedup, product priority, and caps
-    4. Fetch + Summarize — cached omp -p web_fetch (concurrency 2, ≤17 total)
+    4. Fetch + Summarize — cached omp -p read (concurrency 2, ≤17 total)
     5. Judge Summaries — batched LLM: accuracy/fidelity check
     6. Curate          — proposal → Python validation → independent critic → state apply
     7. Write HTML      — newspaper standfirst + deterministic escaped archive rendering
@@ -64,6 +64,7 @@ from news_attention import (
 DIGESTS_DIR = Path.home() / "digests"
 TEMPLATE_PATH = DIGESTS_DIR / "template.html"
 DIGEST_OMP_SANDBOX = Path.home() / "scripts" / "digest-omp-sandbox.ts"
+DIGEST_OMP_CONFIG = Path.home() / ".omp/agent/daily-news-headless.yml"
 ARTICLE_CACHE_DIR = DIGESTS_DIR / ".article-cache"
 ATTENTION_CACHE_DIR = DIGESTS_DIR / ".attention-cache"
 ATTENTION_ARCHIVE_DIR = DIGESTS_DIR / "news" / "attention"
@@ -212,12 +213,25 @@ FETCH_PROMPT_VERSION = 3
 # ── Search Health Monitoring ──────────────────────────────────────────────
 SEARXNG_URL = "http://localhost:8080"
 HEALTH_LOG_PATH = DIGESTS_DIR / ".search-health.log"
-MAX_ENGINE_ERRORS_BEFORE_HALT = 100  # per-engine suspended errors in 1h
+MAX_ENGINE_ERRORS_BEFORE_WARN = 100  # per-engine errors observed in 1h
 MIN_WORKING_ENGINES = 2               # minimum engines returning results
 
 
+def _configure_test_mode(test_root: Path | None = None) -> None:
+    """Route every mutable shared cache and monitor artifact under the test root."""
+    global TEST_MODE, ARTICLE_CACHE_DIR, ATTENTION_CACHE_DIR
+    global ATTENTION_ARCHIVE_DIR, HEALTH_LOG_PATH
+
+    TEST_MODE = True
+    root = test_root or DIGESTS_DIR / "test"
+    ARTICLE_CACHE_DIR = root / ".article-cache"
+    ATTENTION_CACHE_DIR = root / ".attention-cache"
+    ATTENTION_ARCHIVE_DIR = root / "news" / "attention"
+    HEALTH_LOG_PATH = root / ".search-health.log"
+
+
 def check_search_health(label: str = "") -> dict[str, Any]:
-    """Check the fresh-news SearXNG path used by digest research.
+    """Check the fresh-news SearXNG fallback without gating the primary provider.
 
     Returns:
         {
@@ -226,7 +240,7 @@ def check_search_health(label: str = "") -> dict[str, Any]:
             "engines_working": [names],
             "engines_suspended": [(name, reason), ...],
             "recent_errors": count (1h),
-            "recommendation": "ok" | "warn" | "halt",
+            "recommendation": "ok" | "warn",
         }
     """
     status: dict[str, Any] = {
@@ -281,17 +295,18 @@ def check_search_health(label: str = "") -> dict[str, Any]:
         except Exception:
             status["recent_errors"] = -1  # couldn't check
 
-        # Determine recommendation
+        # SearXNG is a fallback. Degradation is observable but must not block
+        # successful research from the primary provider.
         working_count = len(status["engines_working"])
         suspended_count = len(status["engines_suspended"])
 
         if status["results"] == 0 or working_count == 0:
-            status["recommendation"] = "halt"
+            status["recommendation"] = "warn"
             status["ok"] = False
         elif working_count < MIN_WORKING_ENGINES and suspended_count > 3:
-            status["recommendation"] = "halt"
+            status["recommendation"] = "warn"
             status["ok"] = False
-        elif suspended_count >= 3 or status.get("recent_errors", 0) > MAX_ENGINE_ERRORS_BEFORE_HALT:
+        elif suspended_count >= 3 or status.get("recent_errors", 0) > MAX_ENGINE_ERRORS_BEFORE_WARN:
             status["recommendation"] = "warn"
             status["ok"] = True
         else:
@@ -300,7 +315,7 @@ def check_search_health(label: str = "") -> dict[str, Any]:
 
     except Exception as e:
         status["error"] = str(e)[:200]
-        status["recommendation"] = "halt"
+        status["recommendation"] = "warn"
         status["ok"] = False
 
     # 5. Log to health file
@@ -311,7 +326,7 @@ def check_search_health(label: str = "") -> dict[str, Any]:
         pass
 
     # 6. Print summary
-    emoji = {"ok": "✓", "warn": "⚠", "halt": "✕"}.get(status["recommendation"], "?")
+    emoji = {"ok": "✓", "warn": "⚠"}.get(status["recommendation"], "?")
     print(f"  [health:{label}] {emoji} {status['results']} results from "
           f"{status['engines_working']} | "
           f"{len(status['engines_suspended'])} suspended | "
@@ -473,16 +488,16 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "(https://techcrunch.com/category/artificial-intelligence/), The Verge AI "
                     "(https://www.theverge.com/ai-artificial-intelligence), Ars Technica AI "
                     "(https://arstechnica.com/ai/), and Hacker News (https://news.ycombinator.com/).\n\n"
-                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "For each story found, record from the web_search results:\n"
                     "- Title\n"
-                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- URL (the exact URL returned by web_search — do not guess or construct)\n"
                     "- Source domain (e.g. techcrunch.com)\n"
-                    "- Publication date (from the article, ISO format if available)\n"
+                    "- Publication date (from the search evidence, ISO format if available)\n"
                     "- 1-2 sentence factual summary (no opinion, just what happened)\n"
                     "- Category: Model Releases, AI Infrastructure, or Research\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "If a source fails to load, try another. Prioritize stories from today. "
-                    "Only include stories you actually fetched and confirmed. "
+                    "If a search result lacks enough evidence, skip it. Prioritize stories from today. "
+                    "Only include stories web_search actually returned. "
                     "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
                 ),
             },
@@ -492,16 +507,16 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for agentic AI platform news, developer tools, open source AI projects, "
                     "and coding agent developments from the last 24 hours. Check TechCrunch, "
                     "The Verge, Ars Technica, Hacker News, and dev.to.\n\n"
-                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "For each story found, record from the web_search results:\n"
                     "- Title\n"
-                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- URL (the exact URL returned by web_search — do not guess or construct)\n"
                     "- Source domain\n"
-                    "- Publication date (from the article, ISO format if available)\n"
+                    "- Publication date (from the search evidence, ISO format if available)\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Agentic/Agent Platforms, Open Source, or Tools & Developer\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Prioritize stories from today. Only include stories you actually fetched "
-                    "and confirmed. If a source fails, try another. "
+                    "Prioritize stories from today. Only include stories web_search actually "
+                    "returned. If a search result lacks enough evidence, skip it. "
                     "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
                 ),
             },
@@ -511,16 +526,16 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for AI industry news, funding announcements, policy/regulation, major "
                     "company moves, and notable community discussions from the last 24 hours. "
                     "Check TechCrunch, The Verge, Ars Technica, Hacker News, and Reddit r/MachineLearning.\n\n"
-                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "For each story found, record from the web_search results:\n"
                     "- Title\n"
-                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- URL (the exact URL returned by web_search — do not guess or construct)\n"
                     "- Source domain\n"
-                    "- Publication date (from the article, ISO format if available)\n"
+                    "- Publication date (from the search evidence, ISO format if available)\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Industry News, Policy, Funding, or Community\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Prioritize stories from today. Only include stories you actually fetched "
-                    "and confirmed. If a source fails, try another. "
+                    "Prioritize stories from today. Only include stories web_search actually "
+                    "returned. If a search result lacks enough evidence, skip it. "
                     "Avoid low-quality aggregators (e.g. buildfastwithai.com) that repackage other outlets' content."
                 ),
             },
@@ -569,8 +584,10 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "updates from platforms like Claude Code, Codex, Cursor, omp, Pi, Aider, "
                     "OpenCode, Windsurf, Copilot, OpenClaw, Devin, Kiro, Jules, Replit Agent, "
                     "and other coding or general-purpose agent platforms. The examples are not "
-                    "exhaustive: use at least one broad agent-platform launch query so new or "
-                    "renamed platforms are not missed. Focus on the last 24 hours.\n\n"
+                    "exhaustive. Use three complementary searches: one broad platform-launch "
+                    "query, one major coding-agent/vendor query, and one open-source or "
+                    "general-purpose agent query covering primary project blogs and Hacker News. "
+                    "Do not spend every search on the named vendors. Focus on the last 24 hours.\n\n"
                     "For each story found, record from the web_search results:\n"
                     "- Title\n"
                     "- URL (exact URL returned by web_search)\n"
@@ -649,16 +666,16 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "(https://semianalysis.com/), The Next Platform "
                     "(https://www.nextplatform.com/), Ars Technica (https://arstechnica.com/), "
                     "and Hacker News (https://news.ycombinator.com/).\n\n"
-                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "For each story found, record from the web_search results:\n"
                     "- Title\n"
-                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- URL (the exact URL returned by web_search — do not guess or construct)\n"
                     "- Source domain (e.g. tomshardware.com)\n"
-                    "- Publication date (from the article, ISO format if available)\n"
+                    "- Publication date (from the search evidence, ISO format if available)\n"
                     "- 1-2 sentence factual summary (no opinion, just what happened)\n"
                     "- Category: Accelerators & Silicon or Custom/Startup Silicon\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "If a source fails to load, try another. Prioritize stories from today. "
-                    "Only include stories you actually fetched and confirmed."
+                    "If a search result lacks enough evidence, skip it. Prioritize stories from today. "
+                    "Only include stories web_search actually returned."
                 ),
             },
             {
@@ -674,17 +691,17 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "(https://www.datacenterdynamics.com/), SemiAnalysis "
                     "(https://semianalysis.com/), and Reuters technology "
                     "(https://www.reuters.com/technology/).\n\n"
-                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "For each story found, record from the web_search results:\n"
                     "- Title\n"
-                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- URL (the exact URL returned by web_search — do not guess or construct)\n"
                     "- Source domain\n"
-                    "- Publication date (from the article, ISO format if available)\n"
+                    "- Publication date (from the search evidence, ISO format if available)\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Memory & HBM, Networking & Interconnect, Datacenter & Power, "
                     "or Supply Chain & Fabs\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "If a source fails to load, try another. Prioritize stories from today. "
-                    "Only include stories you actually fetched and confirmed."
+                    "If a search result lacks enough evidence, skip it. Prioritize stories from today. "
+                    "Only include stories web_search actually returned."
                 ),
             },
             {
@@ -698,16 +715,16 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "(https://www.techpowerup.com/), Ars Technica (https://arstechnica.com/), "
                     "The Verge (https://www.theverge.com/), and Hacker News "
                     "(https://news.ycombinator.com/).\n\n"
-                    "For each story found, use web_fetch to read the actual article and extract:\n"
+                    "For each story found, record from the web_search results:\n"
                     "- Title\n"
-                    "- URL (the exact URL you fetched — do not guess or construct)\n"
+                    "- URL (the exact URL returned by web_search — do not guess or construct)\n"
                     "- Source domain\n"
-                    "- Publication date (from the article, ISO format if available)\n"
+                    "- Publication date (from the search evidence, ISO format if available)\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Consumer & Edge\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "If a source fails to load, try another. Prioritize stories from today. "
-                    "Only include stories you actually fetched and confirmed."
+                    "If a search result lacks enough evidence, skip it. Prioritize stories from today. "
+                    "Only include stories web_search actually returned."
                 ),
             },
         ],
@@ -755,12 +772,12 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for gaming news from the last 24 hours: game releases, major updates, "
                     "patches, DLC announcements, and platform news (Steam, Epic, console). "
                     "Check Kotaku, IGN, PC Gamer, Eurogamer, GameSpot, and gaming subreddits.\n\n"
-                    "For each story, use web_fetch to read and extract:\n"
+                    "For each story, record from the web_search results:\n"
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Releases, Updates & Patches, DLC/Expansions, or Platform News\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories web_search actually returned."
                 ),
             },
             {
@@ -769,12 +786,12 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for gaming industry news from the last 24 hours: studio news, "
                     "esports results, industry trends, hardware, and major community events. "
                     "Check gaming news sites and relevant subreddits.\n\n"
-                    "For each story, use web_fetch to read and extract:\n"
+                    "For each story, record from the web_search results:\n"
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Industry, Esports, Hardware, or Community\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories web_search actually returned."
                 ),
             },
             {
@@ -783,12 +800,12 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for notable indie game news from the last 24 hours: new indie releases, "
                     "early access launches, Steam Next Fest highlights, and indie dev stories. "
                     "Check Steam new releases, indie game subreddits, and gaming news sites.\n\n"
-                    "For each story, use web_fetch to read and extract:\n"
+                    "For each story, record from the web_search results:\n"
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Indie, Early Access, or Dev Stories\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories web_search actually returned."
                 ),
             },
         ],
@@ -823,12 +840,12 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for major U.S. news from the last 24 hours: politics, policy, "
                     "economy, Supreme Court, Congress, executive actions. Check AP News, "
                     "Reuters, NPR, BBC US section, and major newspaper sites.\n\n"
-                    "For each story, use web_fetch to read and extract:\n"
+                    "For each story, record from the web_search results:\n"
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary (strictly factual, no editorializing)\n"
                     "- Category: Politics, Policy, Economy, Judiciary, or Executive\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories web_search actually returned."
                 ),
             },
             {
@@ -837,12 +854,12 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for major international news from the last 24 hours: geopolitics, "
                     "conflicts, diplomacy, international organizations, global economy. "
                     "Check AP News, Reuters, BBC World, Al Jazeera, and major outlets.\n\n"
-                    "For each story, use web_fetch to read and extract:\n"
+                    "For each story, record from the web_search results:\n"
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Geopolitics, Conflict, Diplomacy, Global Economy, or International\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories web_search actually returned."
                 ),
             },
             {
@@ -851,12 +868,12 @@ TOPICS: dict[str, dict[str, Any]] = {
                     "Search for notable science, technology, health, environment, and cultural "
                     "news from the last 24 hours. Check major outlets, science journals' news "
                     "sections, and reputable science news sites.\n\n"
-                    "For each story, use web_fetch to read and extract:\n"
+                    "For each story, record from the web_search results:\n"
                     "- Title, URL, source domain, publication date\n"
                     "- 1-2 sentence factual summary\n"
                     "- Category: Science, Health, Environment, Technology, or Culture\n"
                     "- Editorial significance (consequence only, never popularity): high / medium / low\n\n"
-                    "Only include stories you actually fetched and confirmed."
+                    "Only include stories web_search actually returned."
                 ),
             },
         ],
@@ -1042,7 +1059,7 @@ def _call_omp_p(
     timeout: int = RESEARCH_TIMEOUT,
     append_system: str | None = None,
 ) -> str:
-    """Call omp -p (headless) for steps that need web_search/web_fetch tools.
+    """Call omp -p (headless) for steps that need web_search/read tools.
 
     Returns the raw stdout. Uses provider/model format so omp routes to the
     correct provider. Prompt is written to a temp file and passed via @file
@@ -1058,8 +1075,8 @@ def _call_omp_p(
     date_prefix = _date_context()
     full_system = f"{date_prefix}\n\n{append_system}" if append_system else date_prefix
 
-    # Write prompt to temp file — omp's web_fetch needs the URL in a file/arg,
-    # not stdin, to reliably trigger the tool.
+    # Pass the prompt by file so long research/fetch instructions avoid shell
+    # quoting and stdin ambiguity.
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", prefix="omp_digest_", delete=False
     ) as tf:
@@ -1071,7 +1088,7 @@ def _call_omp_p(
             "omp", "-p",
             "--model", omp_model,
             "--session-dir", str(Path.home() / ".omp/agent/sessions-automated"),
-            "--config", str(Path.home() / ".omp/agent/headless-override.yml"),
+            "--config", str(DIGEST_OMP_CONFIG),
             "--append-system-prompt", full_system,
             "--tools", "read,web_search",
             "--no-extensions",
@@ -1869,9 +1886,9 @@ def phase_1_research(
         "news events and report source-grounded findings in structured JSON. "
         "Write every finding, title, summary, and reason in English regardless of the "
         "source article's language. Translate non-English headlines into concise, idiomatic English.\n\n"
-        "IMPORTANT: Do NOT use web_fetch to read articles. Only use web_search to find "
-        "stories by their titles and URLs. The articles will be fetched later by a "
-        "separate process. Your job is discovery, not deep reading.\n\n"
+        "IMPORTANT: Do NOT use read to open articles during discovery. Only use "
+        "web_search to find stories by their titles and URLs. The articles will be "
+        "read later by a separate process. Your job is discovery, not deep reading.\n\n"
         "PREFER PRIMARY SOURCES: Link directly to the original article on the publisher's "
         "site (e.g. techcrunch.com, theverge.com, arstechnica.com, reuters.com). "
         "Avoid news aggregators, roundup sites, and link-blog posts — find the real "
@@ -1949,10 +1966,6 @@ def phase_1_research(
             print(f"  [FAIL] {label} — {failure_msg} ({elapsed:.0f}s)")
             check_search_health(f"fail-{angle['id']}")
             _RESEARCH_FAILURES.append(failure_msg)
-        # Check search health after each angle
-        h = check_search_health(f"after-{angle['id']}")
-        if h.get("recommendation") == "halt":
-            print(f"  *** HALT during {label}: search health critical ***")
         return findings
 
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_RESEARCH) as pool:
@@ -2461,13 +2474,13 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
         print(f"  [cache] pruned {pruned_cache_entries} expired/invalid entry(s)")
 
     system_prompt = (
-        "You are a research assistant. Read ONE article via web_fetch and produce a "
+        "You are a research assistant. Read ONE article with the read tool and produce a "
         "topic-neutral, detailed factual summary. Do not search. Write the summary and "
         "key_details in English even when the article is in another language. Return "
         "`title` in English: keep an English headline verbatim, and faithfully translate "
         "a non-English headline without adding facts or commentary.\n\n"
         "Output one JSON object in ```json fences with these fields:\n"
-        '  {"title": "English article title", "url": "the URL you fetched", '
+        '  {"title": "English article title", "url": "the URL you read", '
         '"date_confirmed": "YYYY-MM-DD or empty if not found in article", '
         '"author": "author name or empty", '
         '"summary": "2-4 sentence detailed summary capturing the main points", '
@@ -2494,7 +2507,7 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
             prompt = (
                 f"Fetch this article: {url}\n\n"
                 f"Title from research: {title}\n\n"
-                "Use web_fetch to read the article. Then output your summary as JSON "
+                "Use read to open the article. Then output your summary as JSON "
                 "wrapped in ```json fences."
                 f"{extra}"
             )
@@ -4539,6 +4552,45 @@ def validate_runtime_contract() -> None:
     ):
         if not callable(globals().get(name)):
             errors.append(f"{name} is missing or not callable")
+    for name, path in (
+        ("TEMPLATE_PATH", TEMPLATE_PATH),
+        ("DIGEST_OMP_SANDBOX", DIGEST_OMP_SANDBOX),
+        ("DIGEST_OMP_CONFIG", DIGEST_OMP_CONFIG),
+    ):
+        if not path.is_file():
+            errors.append(f"{name} is missing or not a file: {path}")
+    if DIGEST_OMP_CONFIG.is_file():
+        if yaml is None:
+            errors.append("PyYAML is required to validate DIGEST_OMP_CONFIG")
+        else:
+            try:
+                digest_config = yaml.safe_load(DIGEST_OMP_CONFIG.read_text()) or {}
+                provider_order = (
+                    digest_config.get("providers", {}).get("webSearchOrder", [])
+                )
+                if provider_order[:2] != ["codex", "searxng"]:
+                    errors.append(
+                        "DIGEST_OMP_CONFIG providers.webSearchOrder must start "
+                        "with ['codex', 'searxng']"
+                    )
+                searxng = digest_config.get("searxng", {})
+                if searxng.get("endpoint") != SEARXNG_URL:
+                    errors.append(
+                        f"DIGEST_OMP_CONFIG searxng.endpoint must be {SEARXNG_URL}"
+                    )
+                categories = {
+                    item.strip() for item in str(searxng.get("categories", "")).split(",")
+                }
+                if not {"general", "news"}.issubset(categories):
+                    errors.append(
+                        "DIGEST_OMP_CONFIG searxng.categories must include general and news"
+                    )
+                if searxng.get("language") not in (None, ""):
+                    errors.append(
+                        "DIGEST_OMP_CONFIG searxng.language must remain unset"
+                    )
+            except Exception as error:
+                errors.append(f"DIGEST_OMP_CONFIG is invalid YAML: {error}")
     if errors:
         raise RuntimeError("Daily News preflight failed: " + "; ".join(errors))
 
@@ -4650,12 +4702,6 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 findings = json.loads(phase_1_path.read_text())
             else:
                 findings = phase_1_research(topic, run_dir, stories_in_flight)
-            health = check_search_health("post-phase1")
-            if health.get("recommendation") == "halt":
-                print("  *** HALT: Search engine health critical. Stopping digest. ***")
-                print(f"  Working engines: {health.get('engines_working')}")
-                print(f"  Suspended: {health.get('engines_suspended')}")
-                sys.exit(2)
             if not findings:
                 # Retry with fallback model when primary model produces empty results
                 fallback = MODEL_FALLBACK
@@ -4721,7 +4767,6 @@ def run_digest(category: str, dry_run: bool = False) -> None:
 
             # Phase 4: Fetch + Summarize
             t4 = _phase_start("Phase 4: Fetch & Summarize")
-            check_search_health("pre-phase4")
             summaries = (
                 phase_4_fetch(topic, phase_4_queue, run_dir)
                 if phase_4_queue else []
@@ -4952,7 +4997,7 @@ if __name__ == "__main__":
 
     # Set module-level globals for test mode
     if args.test:
-        TEST_MODE = True
+        _configure_test_mode()
     if args.model:
         MODEL_OVERRIDE = args.model
     if args.test_label:

@@ -1,15 +1,9 @@
 # Headless-agent config overlay.
-# Loaded via --config on every scheduled omp -p invocation.
+# Loaded via --config by provider-neutral scheduled omp calls.
+# Daily News tool calls use the dedicated daily-news-headless.yml overlay.
 # Decouples automated-agent config from interactive sessions:
 # interactive toggles advisor via /advisor on/off in config.yml;
 # enabled: false keeps automated runs free of advisor output.
 advisor:
   enabled: false
   syncBacklog: off
-providers:
-  webSearchOrder:
-    - searxng
-searxng:
-  endpoint: http://localhost:8080
-  categories: general,news
-  language: en

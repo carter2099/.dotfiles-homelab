@@ -87,8 +87,65 @@ def test_search_health_uses_fresh_news_path() -> None:
          patch("digest_runner.HEALTH_LOG_PATH", Path(temporary) / "health.jsonl"):
         empty_status = digest.check_search_health("test-empty")
 
-    check(empty_status["recommendation"] == "halt", empty_status)
+    check(empty_status["recommendation"] == "warn", empty_status)
     check(not empty_status["ok"], empty_status)
+
+
+def test_tool_omp_uses_digest_specific_config() -> None:
+    """Tool-using digest calls must not alter every headless OMP consumer."""
+    class FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    with patch("digest_runner._effective_model", return_value="provider/model"), \
+         patch("digest_runner.subprocess.run", return_value=FakeCompleted()) as run:
+        result = digest._call_omp_p("search once", append_system="system")
+
+    command = run.call_args.args[0]
+    config_index = command.index("--config") + 1
+    check(command[config_index] == str(digest.DIGEST_OMP_CONFIG), command)
+    check("headless-override.yml" not in command[config_index], command)
+    check(result == "ok", result)
+
+
+def test_research_prompts_do_not_request_article_reads() -> None:
+    for topic_name, topic in digest.TOPICS.items():
+        for angle in topic["research_angles"]:
+            prompt_text = angle["prompt"].lower()
+            label = f"{topic_name}/{angle['id']}"
+            check("web_fetch" not in prompt_text, f"{label} requests unavailable web_fetch")
+            check("use read" not in prompt_text, f"{label} reads articles during discovery")
+
+
+def test_test_mode_isolates_mutable_shared_state() -> None:
+    with tempfile.TemporaryDirectory() as temporary, patch.multiple(
+        digest,
+        TEST_MODE=False,
+        ARTICLE_CACHE_DIR=Path("/production/article-cache"),
+        ATTENTION_CACHE_DIR=Path("/production/attention-cache"),
+        ATTENTION_ARCHIVE_DIR=Path("/production/attention"),
+        HEALTH_LOG_PATH=Path("/production/search-health.log"),
+    ):
+        root = Path(temporary)
+        digest._configure_test_mode(root)
+        check(digest.TEST_MODE, "test mode was not enabled")
+        check(
+            digest.ARTICLE_CACHE_DIR == root / ".article-cache",
+            "test article cache escaped the test root",
+        )
+        check(
+            digest.ATTENTION_CACHE_DIR == root / ".attention-cache",
+            "test attention cache escaped the test root",
+        )
+        check(
+            digest.ATTENTION_ARCHIVE_DIR == root / "news" / "attention",
+            "test attention archive escaped the test root",
+        )
+        check(
+            digest.HEALTH_LOG_PATH == root / ".search-health.log",
+            "test health log escaped the test root",
+        )
 
 
 def test_article_cache_contract() -> None:
@@ -304,6 +361,43 @@ def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
         except RuntimeError as error:
             raised = "CROSS_DAY_DEDUP_DAYS" in str(error)
         check(raised, "preflight accepted a missing cross-day dedup contract")
+
+    with tempfile.TemporaryDirectory() as temporary:
+        missing_config = Path(temporary) / "missing-digest-config.yml"
+        with patch.object(digest, "DIGEST_OMP_CONFIG", missing_config):
+            raised = False
+            try:
+                digest.validate_runtime_contract()
+            except RuntimeError as error:
+                raised = "DIGEST_OMP_CONFIG" in str(error)
+            check(raised, "preflight accepted a missing digest OMP config")
+
+        wrong_config = Path(temporary) / "wrong-digest-config.yml"
+        wrong_config.write_text(
+            "providers:\n  webSearchOrder:\n    - searxng\n"
+            "searxng:\n  endpoint: http://localhost:8080\n  categories: general,news\n"
+        )
+        with patch.object(digest, "DIGEST_OMP_CONFIG", wrong_config):
+            raised = False
+            try:
+                digest.validate_runtime_contract()
+            except RuntimeError as error:
+                raised = "webSearchOrder" in str(error)
+            check(raised, "preflight accepted the wrong search-provider order")
+
+        localized_config = Path(temporary) / "localized-digest-config.yml"
+        localized_config.write_text(
+            "providers:\n  webSearchOrder:\n    - codex\n    - searxng\n"
+            "searxng:\n  endpoint: http://localhost:8080\n"
+            "  categories: general,news\n  language: en\n"
+        )
+        with patch.object(digest, "DIGEST_OMP_CONFIG", localized_config):
+            raised = False
+            try:
+                digest.validate_runtime_contract()
+            except RuntimeError as error:
+                raised = "language must remain unset" in str(error)
+            check(raised, "preflight accepted a forced search language")
 
 
 def test_attention_phase_persists_durable_observations() -> None:
@@ -2160,6 +2254,9 @@ def main() -> None:
     tests = [
         test_url_normalization,
         test_search_health_uses_fresh_news_path,
+        test_tool_omp_uses_digest_specific_config,
+        test_research_prompts_do_not_request_article_reads,
+        test_test_mode_isolates_mutable_shared_state,
         test_article_cache_contract,
         test_cross_topic_dedup_precedes_fetch_queue,
         test_cross_topic_same_event_referenced_url_dedup,
