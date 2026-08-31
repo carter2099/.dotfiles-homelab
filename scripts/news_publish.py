@@ -34,7 +34,7 @@ NEWS_DIR = DIGESTS_DIR / "news"
 PUBLICATIONS_DIR = NEWS_DIR / "publications"
 RELEASES_DIR = NEWS_DIR / "releases"
 CURRENT_SITE = NEWS_DIR / "current"
-ASSET_VERSION = 4
+ASSET_VERSION = 5
 ASSET_DIR = HOME / "news" / "assets"
 BASE_URL = "https://news.carter2099.com"
 SUMMARY_RECIPIENT = "carter2099@pm.me"
@@ -561,7 +561,6 @@ def render_category_page(
     )
     canonical = f"{BASE_URL}/{issue_date}/{slug}/"
     description = html.escape(_page_description(publication), quote=True)
-    standfirst = html.escape(publication["standfirst"])
     page_title = html.escape(f"{title} — {_edition_date(issue_date)}")
 
     return f'''<!doctype html>
@@ -599,10 +598,6 @@ def render_category_page(
 </header>
 <main id="content" class="shell">
   {notice}
-  <section class="introduction" aria-labelledby="briefing-heading">
-    <p class="section-label" id="briefing-heading">In brief</p>
-    <p class="introduction-copy">{standfirst}</p>
-  </section>
   <section class="fresh-section" aria-labelledby="fresh-heading">
     <div class="section-heading"><h2 id="fresh-heading">Latest</h2><span>Last 24 hours</span></div>
     {fresh_html}
@@ -922,34 +917,31 @@ def render_summary_email(
     editions: dict[str, dict[str, Any]],
     base_url: str = BASE_URL,
 ) -> str:
-    sections = []
+    summaries = []
     for key in TOPIC_ORDER:
         topic = TOPICS[key]
-        slug = topic["web_slug"]
-        publication = editions.get(slug) or _empty_publication(topic, issue_date)
-        standfirst = html.escape(publication["standfirst"])
-        link = f"{base_url}/{issue_date}/{slug}/"
-        count = len(publication["fresh"]) + len(publication["ongoing"])
-        sections.append(f'''
-<tr><td style="padding:22px 30px;border-top:1px solid #d7dbe0;">
-  <p style="margin:0 0 5px;color:#626a73;font:600 11px/1.3 Arial,sans-serif;text-transform:uppercase;letter-spacing:1.2px;">{count} {'story' if count == 1 else 'stories'}</p>
-  <h2 style="margin:0 0 8px;color:#171716;font:700 21px/1.2 Georgia,serif;">{html.escape(topic['web_title'])}</h2>
-  <p style="margin:0 0 12px;color:#444b54;font:14px/1.55 Arial,sans-serif;">{standfirst}</p>
-  <a href="{html.escape(link, quote=True)}" style="color:#374151;font:700 13px/1.4 Arial,sans-serif;text-decoration:none;">Read {html.escape(topic['web_title'])} →</a>
-</td></tr>''')
+        publication = editions.get(topic["web_slug"])
+        if publication is None:
+            continue
+        standfirst = _clean_text(publication.get("standfirst"))
+        if standfirst:
+            summaries.append(standfirst)
+
+    overall_summary = html.escape(
+        " ".join(summaries) or "No coverage was selected for this edition."
+    )
     today_link = f"{base_url}/{issue_date}/"
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;background:#f2f0ea;color:#171716;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f0ea;padding:24px 10px;"><tr><td align="center">
-<table role="presentation" width="620" cellpadding="0" cellspacing="0" style="width:100%;max-width:620px;background:#fffdfa;border:1px solid #d7dbe0;">
+<body style="margin:0;background:#f3f4f6;color:#171716;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:24px 10px;"><tr><td align="center">
+<table role="presentation" width="620" cellpadding="0" cellspacing="0" style="width:100%;max-width:620px;background:#ffffff;border:1px solid #d7dbe0;">
 <tr><td style="padding:30px;border-top:4px solid #171716;">
   <p style="margin:0 0 7px;color:#626a73;font:600 11px/1.3 Arial,sans-serif;text-transform:uppercase;letter-spacing:1.2px;">{html.escape(_edition_date(issue_date))}</p>
-  <h1 style="margin:0 0 10px;color:#171716;font:700 32px/1.05 Georgia,serif;">Today’s news</h1>
-  <p style="margin:0 0 18px;color:#444b54;font:15px/1.55 Arial,sans-serif;">The day’s leading coverage across AI, agents, hardware, gaming, and world affairs.</p>
-  <a href="{html.escape(today_link, quote=True)}" style="display:inline-block;background:#171716;color:#fffdfa;padding:10px 15px;font:700 13px/1 Arial,sans-serif;text-decoration:none;">Open the front page</a>
+  <h1 style="margin:0 0 16px;color:#171716;font:700 32px/1.05 Georgia,serif;">Today’s news</h1>
+  <p data-summary="overall" style="margin:0 0 20px;color:#444b54;font:15px/1.65 Arial,sans-serif;">{overall_summary}</p>
+  <a href="{html.escape(today_link, quote=True)}" style="display:inline-block;background:#171716;color:#ffffff;padding:10px 15px;font:700 13px/1 Arial,sans-serif;text-decoration:none;">Open the front page</a>
 </td></tr>
-{''.join(sections)}
 <tr><td style="padding:18px 30px;border-top:1px solid #d7dbe0;color:#626a73;font:12px/1.5 Arial,sans-serif;">news.carter2099.com</td></tr>
 </table></td></tr></table></body></html>'''
 

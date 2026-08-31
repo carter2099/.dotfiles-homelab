@@ -203,12 +203,18 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check(result["dates"] == 2, result)
         check(result["email_sent"], result)
         check(len(sent) == 1, sent)
-        check("#7b2f2f" not in sent[0][1].casefold(), sent[0][1])
-        check("#374151" in sent[0][1].casefold(), sent[0][1])
+        email_body = sent[0][1]
+        check(email_body.count('data-summary="overall"') == 1, email_body)
+        check("<h2" not in email_body, email_body)
+        check("#f2f0ea" not in email_body.casefold(), email_body)
+        check("#fffdfa" not in email_body.casefold(), email_body)
+        check("#f3f4f6" in email_body.casefold(), email_body)
+        check("#ffffff" in email_body.casefold(), email_body)
         for key in news.TOPIC_ORDER:
             topic = news.TOPICS[key]
-            check(topic["web_title"].replace("&", "&amp;") in sent[0][1], sent[0][1])
-            check(f"/{current_date}/{topic['web_slug']}/" in sent[0][1], sent[0][1])
+            marker = topic["web_title"].replace("&", "&amp;")
+            check(f"{marker} reporting details" in email_body, email_body)
+            check(f"/{current_date}/{topic['web_slug']}/" not in email_body, email_body)
 
         current = news_dir / "current"
         check(current.is_symlink(), current)
@@ -219,7 +225,7 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check("<h1>Front Page</h1>" in front_page, front_page)
         check("Priority combines editorial consequence" not in front_page, front_page)
         check("<span>Updated daily.</span>" in front_page, front_page)
-        check("/assets/news.css?v=4" in front_page, front_page)
+        check("/assets/news.css?v=5" in front_page, front_page)
         for key in news.TOPIC_ORDER:
             marker = news.TOPICS[key]["web_title"]
             expected = (
@@ -228,6 +234,11 @@ def test_publish_builds_separate_history_and_one_email() -> None:
                 else f"{marker} lead story".replace("&", "&amp;")
             )
             check(expected in front_page, marker)
+            category_page = (
+                current / current_date / news.TOPICS[key]["web_slug"] / "index.html"
+            ).read_text()
+            check('<section class="introduction"' not in category_page, category_page)
+            check('id="briefing-heading"' not in category_page, category_page)
         stored = json.loads(
             (news_dir / "publications" / current_date / "gaming.json").read_text()
         )

@@ -362,9 +362,12 @@ def test_phase_four_concurrency_and_shared_cache() -> None:
         maximum = 0
         lock = threading.Lock()
 
-        def fake_omp(prompt: str, **_: object) -> str:
+        fetch_system_prompts: list[str] = []
+
+        def fake_omp(prompt: str, **kwargs: object) -> str:
             nonlocal active, maximum
             url = prompt.split("Fetch this article: ", 1)[1].splitlines()[0]
+            fetch_system_prompts.append(str(kwargs.get("append_system", "")))
             with lock:
                 active += 1
                 maximum = max(maximum, active)
@@ -392,6 +395,10 @@ def test_phase_four_concurrency_and_shared_cache() -> None:
             )
         check(maximum == 2, f"expected concurrency 2, saw {maximum}")
         check(mocked.call_count == 3, f"cache did not suppress calls: {mocked.call_count}")
+        check(
+            all("Return `title` in English" in prompt for prompt in fetch_system_prompts),
+            fetch_system_prompts,
+        )
         check([item["url"] for item in first] == [item["url"] for item in findings],
               "concurrency changed output order")
         check(all(item["cache_hit"] for item in second), "second topic missed shared cache")

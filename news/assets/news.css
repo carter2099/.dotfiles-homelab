@@ -133,7 +133,6 @@ select:focus-visible {
 }
 
 .eyebrow,
-.section-label,
 .story-meta {
   color: var(--muted);
   font: 750 0.68rem/1.35 var(--sans);
@@ -216,24 +215,6 @@ main.shell {
   font: 0.88rem/1.55 var(--sans);
 }
 
-.introduction {
-  display: grid;
-  grid-template-columns: 175px minmax(0, 1fr);
-  gap: 32px;
-  padding: 42px 34px;
-  border-bottom: 1px solid var(--strong-rule);
-}
-
-.section-label {
-  margin: 7px 0 0;
-}
-
-.introduction-copy {
-  max-width: 900px;
-  margin: 0;
-  font: 400 clamp(1.25rem, 2.2vw, 1.65rem)/1.5 var(--serif);
-  letter-spacing: -0.012em;
-}
 
 .fresh-section,
 .ongoing-section {
@@ -637,16 +618,6 @@ main.shell {
 
   .category-nav a {
     padding-inline: 14px;
-  }
-
-  .introduction {
-    grid-template-columns: 1fr;
-    gap: 13px;
-    padding: 32px 22px;
-  }
-
-  .section-label {
-    margin-top: 0;
   }
 
   .fresh-section,

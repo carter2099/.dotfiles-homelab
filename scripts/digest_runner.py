@@ -207,7 +207,7 @@ MAX_PARALLEL_RESEARCH = 2
 MAX_PARALLEL_FETCH = 2
 ARTICLE_CACHE_TTL_HOURS = 24
 ARTICLE_CACHE_VERSION = 1
-FETCH_PROMPT_VERSION = 2
+FETCH_PROMPT_VERSION = 3
 
 # ── Search Health Monitoring ──────────────────────────────────────────────
 SEARXNG_URL = "http://localhost:8080"
@@ -1860,8 +1860,8 @@ def phase_1_research(
     system_prompt = (
         "You are a research assistant for a daily newspaper. Search the web for recent "
         "news events and report source-grounded findings in structured JSON. "
-        "Write every finding, summary, and reason in English regardless of the source "
-        "article's language; keep story titles in their original language.\n\n"
+        "Write every finding, title, summary, and reason in English regardless of the "
+        "source article's language. Translate non-English headlines into concise, idiomatic English.\n\n"
         "IMPORTANT: Do NOT use web_fetch to read articles. Only use web_search to find "
         "stories by their titles and URLs. The articles will be fetched later by a "
         "separate process. Your job is discovery, not deep reading.\n\n"
@@ -2456,10 +2456,11 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
     system_prompt = (
         "You are a research assistant. Read ONE article via web_fetch and produce a "
         "topic-neutral, detailed factual summary. Do not search. Write the summary and "
-        "key_details in English even when the article is in another language; keep the "
-        "title verbatim in the article's original language.\n\n"
+        "key_details in English even when the article is in another language. Return "
+        "`title` in English: keep an English headline verbatim, and faithfully translate "
+        "a non-English headline without adding facts or commentary.\n\n"
         "Output one JSON object in ```json fences with these fields:\n"
-        '  {"title": "article title", "url": "the URL you fetched", '
+        '  {"title": "English article title", "url": "the URL you fetched", '
         '"date_confirmed": "YYYY-MM-DD or empty if not found in article", '
         '"author": "author name or empty", '
         '"summary": "2-4 sentence detailed summary capturing the main points", '
@@ -3609,7 +3610,7 @@ def phase_6_curate(
         "relevant, recent, unresolved, or the latest commentary. Write concise newspaper "
         "copy that leads with facts; never refer to a digest, edition, candidate list, "
         "ranking process, or the reader. Write all prose in English regardless of source "
-        "language; keep story titles in their original language.\n\n"
+        "language; keep the supplied English story titles unchanged.\n\n"
         "Output one JSON object in ```json fences:\n"
         '{"selected_fresh":[{"candidate_id":"...","rank":1,'
         '"editorial_summary":"2-3 factual sentences","selection_reason":"...",'
@@ -4033,8 +4034,8 @@ def _generate_section_standfirst(
         "or claims about rejected stories. Never mention a digest, edition, briefing, "
         "candidate list, ranking, the writing process, or the reader. Do not use phrases "
         "such as 'today's digest leads with', 'also in focus', or 'read on'. Finish every "
-        "sentence completely. Write in English while preserving source titles. "
-        'Output one JSON object: {\"standfirst\":\"...\"}'
+        "sentence completely. Write in English and keep any supplied English story title "
+        'unchanged. Output one JSON object: {"standfirst":"..."}'
     )
     user = (
         f"Newspaper section: {topic['web_title']}\n\n"
@@ -4335,9 +4336,9 @@ def phase_9_summary(topic: dict, fresh: list[dict], ongoing: list[dict],
 
     system = (
         "You are writing a concise markdown summary of today's published digest for "
-        "archival and future deduplication. Write the entire summary in English — the "
-        "digest language is always English regardless of source language; keep story "
-        "titles in their original language. Output ONLY the markdown, no explanations."
+        "archival and future deduplication. Write the entire summary in English and keep "
+        "the supplied English story titles unchanged. Output ONLY the markdown, no "
+        "explanations."
     )
 
     user = (
