@@ -120,7 +120,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 - **Open WebUI** (chat frontend + native SearXNG + Weather v2, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)
-- **Herdr Web Client** (browser product title **Herdr**; mobile-first attachment to the live Herdr server; `herdr-web-client.service`, loopback-only on 30145 at remote.carter2099.com; Cloudflare Access plus origin JWT validation; one hardened transient browser attachment; background completion toast/chime; Kitty Shift+Enter newline) → [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md)
+- **Herdr Web Client** (browser product title **Herdr Web**; mobile-first attachment to the live Herdr server; `herdr-web-client.service`, loopback-only on 30145 at remote.carter2099.com; Cloudflare Access plus origin JWT validation; one hardened transient browser attachment; background completion toast/chime; Kitty Shift+Enter newline) → [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md)
 - **SearXNG** (search backend, localhost:8080) → [`searxng.md`](notes/docs/homelab/searxng.md)
 - **FreshRSS** (RSS reader, k3s Deployment, freshrss.carter2099.com) → [`k3s.md`](notes/docs/homelab/k3s.md) (covered as third-party k3s service)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
@@ -148,7 +148,7 @@ The ThinkPad's sole agent CLI is **omp** (`@oh-my-pi/pi-coding-agent`, via bun; 
 
 ## Remote Agent Operations
 
-Carter's browser attachment is **Herdr Web Client** (browser title **Herdr**) at `remote.carter2099.com`; source is `github.com/carter2099/herdr-web-client` in `~/dev/herdr-web-client`, and production uses `herdr-web-client.service`. It connects to the live Herdr server instead of maintaining a separate web-owned OMP session store. OMP Web and `omp.carter2099.com` were retired on 2026-08-31. SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md).
+Carter's browser attachment is **Herdr Web Client** (browser title **Herdr Web**) at `remote.carter2099.com`; source is `github.com/carter2099/herdr-web-client` in `~/dev/herdr-web-client`, and production uses `herdr-web-client.service`. It connects to the live Herdr server instead of maintaining a separate web-owned OMP session store. OMP Web and `omp.carter2099.com` were retired on 2026-08-31. SSH details, `XDG_RUNTIME_DIR`, reboot protocol, `~/agent-state/pending.md` startup check: [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md)
 
 ## Persistent Memory (`~/notes/`)
 
