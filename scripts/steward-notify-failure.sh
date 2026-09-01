@@ -9,7 +9,8 @@ set -euo pipefail
 
 export HOME="/home/carter"
 export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin"
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export XDG_RUNTIME_DIR
 
 RECIPIENT="carter2099@pm.me"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

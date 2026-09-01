@@ -11,7 +11,8 @@ set -euo pipefail
 
 export HOME="/home/carter"
 export PATH="$HOME/.local/bin:$HOME/.rbenv/bin:$HOME/.rbenv/shims:$HOME/.fnm:$HOME/.bun/bin:$PATH"
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export XDG_RUNTIME_DIR
 # Timer/manual invocations share one maintenance workspace. Exit cleanly when
 # another run owns the lock rather than racing Git state and duplicate emails.
 exec 9>/tmp/hyperliquid-sdk.lock
@@ -27,7 +28,7 @@ export HYPERLIQUID_DEPENDABOT_MANIFEST="$DEPENDABOT_MANIFEST"
 OMP_PATH="${OMP_PATH:-omp}"
 
 # On failure, email Carter. Runs on EXIT so success paths stay untouched.
-on_exit() {
+on_exit() { # shellcheck disable=SC2329
     local rc=$?
     if [ "$rc" -eq 0 ]; then
         rm -f "$RUN_LOG" "$DEPENDABOT_MANIFEST"

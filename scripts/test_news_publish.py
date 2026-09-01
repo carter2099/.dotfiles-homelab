@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import news_publish as news  # noqa: E402
+from workflow_state import WorkflowState  # noqa: E402
 
 
 def check(condition: bool, message: object) -> None:
@@ -263,6 +264,34 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check(len(list((news_dir / "releases").iterdir())) == 2, "rollback release retention failed")
 
 
+def test_stateful_publication_requires_matching_archive_record() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary) / "2026-08-25"
+        run_dir.mkdir()
+        topic = news.TOPICS["ai-tech"]
+        publication_path = run_dir / "publication.json"
+        publication = sample_publication(topic, run_dir.name, "Stateful")
+        state = WorkflowState(run_dir, "daily-news", run_id=run_dir.name)
+        state.begin_phase(
+            "archive",
+            inputs={"fixture": 1},
+            artifact_path=publication_path,
+            schema_version=news.PUBLICATION_SCHEMA_VERSION,
+        )
+        state.complete_json("archive", publication)
+
+        loaded = news._publication_from_run(topic, run_dir.name, run_dir)
+        check(loaded is not None, "valid state-owned publication was rejected")
+
+        publication["fresh"][0]["title"] = "Tampered after completion"
+        publication_path.write_text(json.dumps(publication))
+        (run_dir / "06-curated.json").write_text(json.dumps(publication))
+        check(
+            news._publication_from_run(topic, run_dir.name, run_dir) is None,
+            "stateful run fell back to tampered or legacy artifacts",
+        )
+
+
 def test_publications_frozen_after_mail_sent() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -318,6 +347,7 @@ def main() -> None:
         test_digest_meta_and_truncated_copy_are_rewritten,
         test_front_page_guarantees_sections_then_applies_global_floor,
         test_publish_builds_separate_history_and_one_email,
+        test_stateful_publication_requires_matching_archive_record,
         test_publications_frozen_after_mail_sent,
     ]
     for test in tests:

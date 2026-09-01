@@ -6,8 +6,8 @@ from __future__ import annotations
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from news_attention import (
-    _observation_from_response,
+from daily_news.attention import (
+    observation_from_response,
     canonicalize_publisher_url,
     enforce_editorial_significance,
     event_terms,
@@ -45,7 +45,7 @@ def test_gdelt_timeline_observation_and_syndication_dedup() -> None:
         "title": "Company closes major AI deal",
         "event_terms": ["Company", "AI deal"],
     }
-    observation = _observation_from_response(
+    observation = observation_from_response(
         candidate,
         {"timeline": [{"series": "Volume Intensity", "data": data}]},
         now,

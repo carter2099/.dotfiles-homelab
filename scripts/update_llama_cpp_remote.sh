@@ -59,7 +59,7 @@ cleanup() {
   rm -rf "$STAGE"
 }
 
-rollback() {
+rollback() { # shellcheck disable=SC2329
   local rc=$?
   local rollback_failed=0
   trap - ERR

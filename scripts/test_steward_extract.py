@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from steward_runner import (  # noqa: E402
+from steward.runtime import (  # noqa: E402
     _extract_json,
     _ndjson_looks_like_event_stream,
     extract_from_ndjson,

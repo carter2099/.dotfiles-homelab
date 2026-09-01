@@ -31,21 +31,22 @@ Use `notes/` as a knowledge base. You will see this referenced throughout this A
 ## Repository Structure
 
 Home directory managed as a bare git repo for dotfiles. Key dirs:
-- `blog/` — Rails 8 deploy wrapper (app nested within)
+- `blog/` — Rails 8 production checkout/wrappers (canonical source is `~/dev/blog/`)
 - `beatz/` — public beat archive deployment checkout
 - `beatz-selected/` — read-only audio, starter-selection, and artwork library mounted by the beatz service (not Git-tracked)
 - `homelab-backup/` — Go backup service
 - `k3s/` — Kubernetes manifests
 - `dev/` — ThinkPad scratch space for cloned repos, tests, and development; gamingrig-linux uses `/home/carte/dev/<repo>` instead
 - `news/` — Daily News nginx deployment configuration and static assets
-- `scripts/` — Digest + steward orchestrators
+- `scripts/` — Daily News and steward entrypoints, bounded packages, and verification pipelines
 - `notes/` — Agent-maintained knowledge vault (`docs/` for maintained ref, `logs/sessions/` for session history, `journal/` for research/records)
 - `digests/` / `backups/` — Automated output archives; `digests/news/{publications,attention,mail}/` is durable Daily News state
 - `ideas/` — Unstructured ideas (not maintained)
 - `.dotfiles-homelab/` — Bare git repo tracking dotfiles
+- `.config/nvim/` — live Neovim config and canonical standalone Git repository; ignored by the parent bare repo
 ## Dev Workflow (`dev/`)
 
-**Hard rule:** On the ThinkPad, always develop in `~/dev/<repo>/`. Never edit files in prod deploy folders such as `/home/carter/blog/` — those are deployment artifacts only. If a ThinkPad dev clone doesn't exist for a repo, pull a fresh one with `git clone git@github.com:carter2099/<repo>.git ~/dev/<repo>` before making changes.
+**Hard rule:** On the ThinkPad, always develop application code in `~/dev/<repo>/`. Never edit files in production deploy folders such as `/home/carter/blog/` or `/home/carter/homelab-backup/`; those are deployment artifacts only. If a ThinkPad dev clone does not exist, clone `git@github.com:carter2099/<repo>.git` into `~/dev/<repo>` before changing it. **Explicit exception:** `~/.config/nvim/` is intentionally both the live config and its own canonical standalone Git repository; edit, commit, and push it in place. It has no deploy step and the parent dotfiles repo ignores it.
 
 The gaming rig is a separate development center: work only in `/home/carte/dev/<repo>`, use GitHub as the normal code-transfer boundary, and never deploy production from the rig. Do not place notes, production deploy trees, k3s manifests/kubeconfig, or homelab application state there. The only exception is the steward-managed `/home/carte/src/llama.cpp*` serving-build workspace; it is not a general development root and must remain outside normal project work. See [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md) and [`environment.md`](notes/docs/homelab/environment.md) for the boundary and installed conventions.
 
@@ -88,10 +89,12 @@ use the raw form: `/usr/bin/git --git-dir="$HOME/.dotfiles-homelab/" --work-tree
 
 ```bash
 dotfiles add .zshrc                                 # single file
-dotfiles add .config/systemd/user/homelab-backup.*  # glob pattern for related files
+dotfiles add .config/systemd/user/homelab-steward.* # canonical infrastructure units
 dotfiles add .omp/agent/prompts/create-command.md       # command-creation prompt
 dotfiles add .omp/agent/prompts/hyperliquid-run.md      # scheduled command prompt
 ```
+
+The steward's P9b dotfiles phase treats recent unclosed interactive OMP sessions as in-flight ownership evidence. It must not stage overlapping paths. A failed post-commit push may be retried only for the exact recorded branch and commit OID; divergence requires inspection.
 
 ## App Deployment Pattern
 
@@ -113,11 +116,11 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 
 Each app has a reference doc in `~/notes/docs/homelab/`:
 
-- **Blog** (Rails 8, Docker on port 33099; public blog.carter2099.com served via k3s Traefik ingress — tunnel origin is 127.0.0.1:80, not 33099) → [`blog.md`](notes/docs/homelab/blog.md)
+- **Blog** (canonical `~/dev/blog/`; transactional deploy via `deploy/deploy.sh`; production checkout `~/blog/blog/`; Docker on port 33099; public blog.carter2099.com served via k3s Traefik ingress — tunnel origin is 127.0.0.1:80, not 33099) → [`blog.md`](notes/docs/homelab/blog.md)
 - **Beatz** (public Go music player branded “Beats” in-app, localhost:30142; no Cloudflare Access; media: `~/beatz-selected/`; play history: `~/beatz-data/plays.jsonl`) → [`beatz.md`](notes/docs/homelab/beatz.md)
-- **Daily News** (public static newspaper UI, localhost:30144, news.carter2099.com; priority-ranked front page + five category pages, historical editions, one summary email, durable data in the existing R2 backup) → [`email-digests.md`](notes/docs/homelab/email-digests.md)
-- **Hyperliquid SDK maintenance** (scheduled upstream API + dependency maintenance; Dependabot PR metadata is deterministically collected, Prompt-Guard-classified, and reconciled into the regular maintenance queue before later bounded processing; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
-- **Homelab Backup** (Go, daily 03:00 UTC → R2) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
+- **Daily News** (public static newspaper UI, localhost:30144, news.carter2099.com; bounded `~/scripts/daily_news/` package; per-run validated SQLite workflow state; priority-ranked front page + five category pages, historical editions, one summary email, durable data in R2 backup) → [`email-digests.md`](notes/docs/homelab/email-digests.md)
+- **Hyperliquid SDK maintenance** (scheduled upstream API + dependency maintenance; Dependabot PR metadata is deterministically collected, Prompt-Guard-classified, and reconciled into the regular maintenance queue before later bounded processing; verification: `verify-dependabot-intake.sh full` and `verify-hyperliquid-guard.sh full`; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
+- **Homelab Backup** (canonical `~/dev/homelab-backup/`; transactional `release.sh`; 23 exact manifest targets; daily 03:00 UTC → R2; full verifier `verify.sh full`) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
 - **Dependabot Webhook** (Go, localhost:9099) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 - **Open WebUI** (chat frontend + native SearXNG + Weather v2, localhost:48100) → [`open-webui.md`](notes/docs/homelab/open-webui.md)
 - **Herdr Web Client** (browser product title **Herdr Web**; mobile-first attachment to the live Herdr server; `herdr-web-client.service`, loopback-only on 30145 at remote.carter2099.com; Cloudflare Access is the production authentication boundary and the origin has no authentication; one hardened transient browser attachment; background completion toast/chime; Kitty Shift+Enter newline) → [`omp-agent-cli.md`](notes/docs/homelab/omp-agent-cli.md)
@@ -125,8 +128,8 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 - **FreshRSS** (RSS reader, k3s Deployment, freshrss.carter2099.com) → [`k3s.md`](notes/docs/homelab/k3s.md) (covered as third-party k3s service)
 - **Cloudflare** (API token, tunnel, DNS) → [`cloudflare.md`](notes/docs/homelab/cloudflare.md)
 - **OpenCode Go Proxy** (0.0.0.0:8082, UFW-gated to Docker bridges; quota routing from the authenticated OpenCode usage API, API keys only). The optional direct Zen free-model path is controlled by `free_endpoint_enabled`; it is currently `false`, so all requests go directly through `/zen/go`. `/health` reports the active setting. If opencode-go models fail, check this first → [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md)
-- **LLM Proxy** (wildcard:8081, UFW-gated to Docker bridges; five reasoning-enabled local entries) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
-- **Prompt-Guard Classifier** (localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
+- **LLM Proxy** (canonical `~/dev/llm-proxy/`; transactional `release.sh`; wildcard:8081 with no client auth, so release requires active default-deny UFW and bridge-only 8081 rules; five reasoning-enabled local entries) → [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md)
+- **Prompt-Guard Classifier** (canonical `~/dev/prompt-guard/`; immutable model revision and release runtime; transactional `deploy.sh`; localhost:8090) → [`dependabot-webhook.md`](notes/docs/homelab/dependabot-webhook.md)
 
 ## Daily News Digests
 
@@ -135,12 +138,14 @@ Reader-facing headlines are always English: Phase 4 preserves English headlines 
 DeepSeek Flash handles primary synthesis and a separate critic pass; Mimo v2.5 is the API fallback.
 Daily News alone uses an explicit Codex-primary, SearXNG-fallback OMP `web_search` chain via `~/.omp/agent/daily-news-headless.yml`; the shared `~/.omp/agent/headless-override.yml` remains provider-neutral for steward, Hyperliquid, Dependabot, and ad hoc headless runs. SearXNG fallback health is monitored with `categories=news&time_range=day` but does not block successful primary-provider research. An unfiltered general search is not sufficient because the working general engines do not currently honor the day filter.
 Phase 1 records search evidence without opening articles; Phase 4 verifies queued sources with the public-HTTPS `read` tool. `digest_runner.py --test` routes mutable caches, attention observations, and search-health logs under `~/digests/test/`, never their production paths.
+Each topic run records attempt-owned, hash-validated phase state in `workflow-state.sqlite3`; source/policy mutation aborts at phase boundaries, and stateful publications are accepted only when Phase 8's recorded path/hash/schema match. Run `bash ~/scripts/verify-daily-news.sh full` after changes.
 
 `run_all_digests.sh` runs `digest_runner.py --preflight` before any research; missing load-bearing constants/contracts must fail immediately. If an edition is absent, inspect `systemctl --user status digests-daily.service`, then `journalctl --user -u digests-daily.service` and `~/digests/.digests.log`. The 2026-08-27 missed edition was a code regression (`CROSS_DAY_DEDUP_DAYS` removed by an automated audit fix), not an OpenCode subscription failure; 429s on the optional Zen free-model endpoint caused extra fallthrough attempts but did not indicate exhausted Go quota.
 
 ## Homelab Steward
 
-Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`) on the ThinkPad. Its deterministic remote branch connects only through pinned `gamingrig-linux`: Linux runs the approved apt, Herdr, and OMP maintenance with smoke/rollback and health gates; a Windows skip requires trusted local `llm-proxy` `/health` corroboration (`rig_os=windows`), while offline skip is limited to recognized timeout/refusal/no-route/unreachable transport failures; auth/config/unknown/host-key failures are failures. A required reboot re-arms Linux BootNext, requires a changed boot ID, and polls bounded full readiness/health before reporting reboot, return, or recheck. The steward is never installed on the rig. SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and attempt rollback when post-update checks fail. The llama helper reports `ROLLBACK_FAILED` when its own recovery validation fails; any failed recovery requires manual inspection. **Safety rules:** never `dist-upgrade`, never…
+Daily maintenance at 1:00 AM ET via `homelab-steward.timer` (`~/scripts/steward_runner.py`) on the ThinkPad. Its deterministic remote branch connects only through pinned `gamingrig-linux`: Linux runs the approved apt, Herdr, and OMP maintenance with smoke/rollback and health gates; a Windows skip requires trusted local `llm-proxy` `/health` corroboration (`rig_os=windows`), while offline skip is limited to recognized timeout/refusal/no-route/unreachable transport failures; auth/config/unknown/host-key failures are failures. A required reboot re-arms Linux BootNext, requires a changed boot ID, and polls bounded full readiness/health before reporting reboot, return, or recheck. The steward is never installed on the rig. SearXNG and Linux llama.cpp releases auto-deploy only after a 7-day upstream soak and attempt rollback when post-update checks fail. The llama helper reports `ROLLBACK_FAILED` when its own recovery validation fails; any failed recovery requires manual inspection. **Safety rules:** never `dist-upgrade` or `aa-remove-unknown`; upgrade Docker only through apt, never manual binary replacement; assert `DockerRootDir=/var/lib/docker` after Docker upgrades; record failures in durable artifacts and email badges rather than aborting later reporting.
+The executable is a thin entrypoint over `~/scripts/steward/`; each run uses attempt-owned, hash-validated SQLite workflow state and a fixed startup source/policy fingerprint. P1 nested failure packets remain retryable failed state while independent phases continue; P8 SMTP errors fail the phase. Run `bash ~/scripts/verify-steward.sh full` after changes.
 
 ## Agent CLI: omp
 
@@ -251,7 +256,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`k3s.md`](notes/docs/homelab/k3s.md) — k3s architecture, flannel, CNI ufw rules; also covers FreshRSS as a third-party k3s deployment
 - [`email-digests.md`](notes/docs/homelab/email-digests.md) — Daily News significance/attention/priority scoring, front page, standfirsts, R2 backup, delivery, audit/debug
 - [`homelab-steward.md`](notes/docs/homelab/homelab-steward.md) — steward phases, session memory, audit/fix loop, work queue, and debugging
-- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 22-target taxonomy, pre-collection, verify/latest/list subcommands, restore drill, retention, notify/debug
+- [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md) — 23-target manifest taxonomy, pre-collection, strict verify/latest/list, restore drill, retention, release, notify/debug
 - [`blog.md`](notes/docs/homelab/blog.md) — Rails 8 blog app
 - [`beatz.md`](notes/docs/homelab/beatz.md) — public beat archive player, starter/artwork pools, media library, deploy/runbook
 - [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md) — automated Hyperliquid SDK maintenance
@@ -265,4 +270,4 @@ Verbose architecture for subsystems an agent only needs when actively working on
 
 Grep the vault (`rg -l "term" ~/notes/`) before starting work on a known topic; the `~/notes/INDEX.md` lists all formal notes.
 
-After making changes to any code or functionality, anywhere, ask yourself: What else could these changes have broken? Did the blast radius hit anything we did not verify or test?
+Blast radius: after making changes to any code or functionality, anywhere, ask yourself: What else could these changes have broken? Did the blast radius hit anything we did not verify or test?

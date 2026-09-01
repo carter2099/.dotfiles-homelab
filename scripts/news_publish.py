@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import html
+import hashlib
+import os
 import json
 import re
 import shutil
@@ -15,19 +17,17 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from digest_runner import (
-    DIGESTS_DIR,
-    TOPICS,
-    _fallback_standfirst,
-    _validate_standfirst,
-)
-from news_attention import (
+from daily_news.catalog import RANKING_SCHEMA_VERSION, TOPICS
+from daily_news.copy import fallback_standfirst, validate_standfirst
+from daily_news.runtime import DIGESTS_DIR
+from daily_news.attention import (
     EDITORIAL_POINTS,
     canonicalize_publisher_url,
     normalize_editorial_significance,
     priority_sort_key,
 )
 from send_digest import send as smtp_send
+from workflow_state import WorkflowState
 
 HOME = Path.home()
 NEWS_DIR = DIGESTS_DIR / "news"
@@ -203,7 +203,7 @@ def _topic_for_slug(slug: str) -> tuple[str, dict[str, Any]]:
 def _empty_publication(topic: dict[str, Any], issue_date: str) -> dict[str, Any]:
     return {
         "schema_version": PUBLICATION_SCHEMA_VERSION,
-        "ranking_schema_version": 0,
+        "ranking_schema_version": RANKING_SCHEMA_VERSION,
         "date": issue_date,
         "slug": topic["web_slug"],
         "title": topic["web_title"],
@@ -245,21 +245,64 @@ def _normalize_publication(
         ) if item.get("title") and item.get("url")
     ]
     publication["fresh"].sort(key=priority_sort_key, reverse=True)
-    valid_standfirst, _ = _validate_standfirst(
+    valid_standfirst, _ = validate_standfirst(
         publication["standfirst"],
         publication["fresh"] + publication["ongoing"],
     )
     if not valid_standfirst:
-        publication["standfirst"] = _fallback_standfirst(
+        publication["standfirst"] = fallback_standfirst(
             publication["fresh"], publication["ongoing"]
         )
     return publication
+def _is_current_publication(
+    raw: object,
+    topic: dict[str, Any],
+    issue_date: str,
+) -> bool:
+    return (
+        isinstance(raw, dict)
+        and raw.get("schema_version") == PUBLICATION_SCHEMA_VERSION
+        and raw.get("ranking_schema_version") == RANKING_SCHEMA_VERSION
+        and raw.get("date") == issue_date
+        and raw.get("slug") == topic["web_slug"]
+        and raw.get("source_category") == topic["category"]
+        and isinstance(raw.get("fresh"), list)
+        and isinstance(raw.get("ongoing"), list)
+    )
 
 
 def _publication_from_run(
     topic: dict[str, Any], issue_date: str, run_dir: Path,
 ) -> dict[str, Any] | None:
     publication_path = run_dir / "publication.json"
+    configured_db = os.environ.get("WORKFLOW_STATE_DB")
+    state_db = Path(configured_db) if configured_db else run_dir / "workflow-state.sqlite3"
+    if state_db.exists():
+        state = WorkflowState(
+            run_dir, "daily-news", run_id=run_dir.name, db_path=state_db
+        )
+        record = state.phase_record("archive")
+        if (
+            record is None
+            or record.get("status") != "succeeded"
+            or int(record.get("schema_version", 0)) != PUBLICATION_SCHEMA_VERSION
+            or not record.get("resume_valid")
+            or Path(str(record.get("artifact_path", ""))).resolve(strict=False)
+            != publication_path.resolve(strict=False)
+        ):
+            return None
+        try:
+            payload = publication_path.read_bytes()
+            if hashlib.sha256(payload).hexdigest() != record.get("artifact_hash"):
+                return None
+            raw = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, OSError):
+            return None
+        if not _is_current_publication(raw, topic, issue_date):
+            return None
+        return _normalize_publication(raw, topic, issue_date)
+
+    # Only runs created before workflow-state adoption may use legacy files.
     if publication_path.exists():
         try:
             raw = json.loads(publication_path.read_text())
@@ -267,7 +310,6 @@ def _publication_from_run(
                 return _normalize_publication(raw, topic, issue_date)
         except (json.JSONDecodeError, OSError):
             pass
-
     curated_path = run_dir / "06-curated.json"
     if not curated_path.exists():
         return None

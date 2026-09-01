@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -58,8 +59,9 @@ try {
 
   // Dynamic import is required: the guard reads this test manifest at module initialization.
 
-  const guardUrl =
-    `file:///home/carter/.config/hyperliquid-agent/omp-dependabot-guard.ts?test=${randomUUID()}`;
+  const guardPath = process.env.HYPERLIQUID_GUARD_PATH;
+  if (!guardPath) throw new Error("HYPERLIQUID_GUARD_PATH is required");
+  const guardUrl = `${pathToFileURL(guardPath).href}?test=${randomUUID()}`;
   const guard = await import(guardUrl);
   let handler: ((event: unknown) => Promise<unknown>) | undefined;
   guard.default({

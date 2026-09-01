@@ -14,11 +14,11 @@ LOGFILE="$HOME/digests/.digests.log"
 
 # ── Signal trap: log cleanly on termination with current topic ──
 _CURRENT_TOPIC_FILE="$HOME/digests/.current-topic"
-_cleanup() {
+_cleanup() { # shellcheck disable=SC2329
     local rc=$?
     local topic="(unknown)"
     if [ -f "$_CURRENT_TOPIC_FILE" ]; then
-        topic=$(cat "$_CURRENT_TOPIC_FILE" 2>/dev/null || echo "(unknown)")
+        topic=$(<"$_CURRENT_TOPIC_FILE") || topic="(unknown)"
         rm -f "$_CURRENT_TOPIC_FILE"
     fi
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) SCRIPT TERMINATED (exit=$rc) topic=$topic — incomplete run" | tee -a "$LOGFILE" 2>/dev/null || true

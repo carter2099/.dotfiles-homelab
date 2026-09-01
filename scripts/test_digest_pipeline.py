@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import digest_runner as digest  # noqa: E402
+from daily_news import archive, attention, catalog, contracts, copy as copy_module, editorial, research, runtime, workflow  # noqa: E402
 
 
 def check(condition: bool, message: str) -> None:
@@ -37,7 +37,7 @@ def validated_high_fields() -> dict:
 
 
 def test_url_normalization() -> None:
-    normalized = digest._normalize_url(
+    normalized = contracts.normalize_url(
         "HTTPS://www.Example.com/Case-Sensitive/?utm_source=x&b=2&a=1#fragment"
     )
     check(normalized == "example.com/Case-Sensitive?a=1&b=2", normalized)
@@ -69,10 +69,10 @@ def test_search_health_uses_fresh_news_path() -> None:
         return FakeResponse([{"engines": ["bing news", "reuters"]}])
 
     with tempfile.TemporaryDirectory() as temporary, \
-         patch("digest_runner.requests.get", side_effect=fresh_get), \
-         patch("digest_runner.subprocess.run", return_value=FakeCompleted()), \
-         patch("digest_runner.HEALTH_LOG_PATH", Path(temporary) / "health.jsonl"):
-        status = digest.check_search_health("test-fresh")
+         patch("daily_news.runtime.requests.get", side_effect=fresh_get), \
+         patch("daily_news.runtime.subprocess.run", return_value=FakeCompleted()), \
+         patch("daily_news.runtime.HEALTH_LOG_PATH", Path(temporary) / "health.jsonl"):
+        status = runtime.check_search_health("test-fresh")
 
     check(request["params"]["categories"] == "news", request)
     check(request["params"]["time_range"] == "day", request)
@@ -82,10 +82,10 @@ def test_search_health_uses_fresh_news_path() -> None:
     check(status["ok"], status)
 
     with tempfile.TemporaryDirectory() as temporary, \
-         patch("digest_runner.requests.get", return_value=FakeResponse([])), \
-         patch("digest_runner.subprocess.run", return_value=FakeCompleted()), \
-         patch("digest_runner.HEALTH_LOG_PATH", Path(temporary) / "health.jsonl"):
-        empty_status = digest.check_search_health("test-empty")
+         patch("daily_news.runtime.requests.get", return_value=FakeResponse([])), \
+         patch("daily_news.runtime.subprocess.run", return_value=FakeCompleted()), \
+         patch("daily_news.runtime.HEALTH_LOG_PATH", Path(temporary) / "health.jsonl"):
+        empty_status = runtime.check_search_health("test-empty")
 
     check(empty_status["recommendation"] == "warn", empty_status)
     check(not empty_status["ok"], empty_status)
@@ -98,19 +98,19 @@ def test_tool_omp_uses_digest_specific_config() -> None:
         stdout = "ok"
         stderr = ""
 
-    with patch("digest_runner._effective_model", return_value="provider/model"), \
-         patch("digest_runner.subprocess.run", return_value=FakeCompleted()) as run:
-        result = digest._call_omp_p("search once", append_system="system")
+    with patch("daily_news.runtime._effective_model", return_value="provider/model"), \
+         patch("daily_news.runtime.subprocess.run", return_value=FakeCompleted()) as run:
+        result = runtime._call_omp_p("search once", append_system="system")
 
     command = run.call_args.args[0]
     config_index = command.index("--config") + 1
-    check(command[config_index] == str(digest.DIGEST_OMP_CONFIG), command)
+    check(command[config_index] == str(runtime.DIGEST_OMP_CONFIG), command)
     check("headless-override.yml" not in command[config_index], command)
     check(result == "ok", result)
 
 
 def test_research_prompts_do_not_request_article_reads() -> None:
-    for topic_name, topic in digest.TOPICS.items():
+    for topic_name, topic in catalog.TOPICS.items():
         for angle in topic["research_angles"]:
             prompt_text = angle["prompt"].lower()
             label = f"{topic_name}/{angle['id']}"
@@ -120,7 +120,7 @@ def test_research_prompts_do_not_request_article_reads() -> None:
 
 def test_test_mode_isolates_mutable_shared_state() -> None:
     with tempfile.TemporaryDirectory() as temporary, patch.multiple(
-        digest,
+        runtime,
         TEST_MODE=False,
         ARTICLE_CACHE_DIR=Path("/production/article-cache"),
         ATTENTION_CACHE_DIR=Path("/production/attention-cache"),
@@ -128,22 +128,22 @@ def test_test_mode_isolates_mutable_shared_state() -> None:
         HEALTH_LOG_PATH=Path("/production/search-health.log"),
     ):
         root = Path(temporary)
-        digest._configure_test_mode(root)
-        check(digest.TEST_MODE, "test mode was not enabled")
+        runtime.configure_test_mode(root)
+        check(runtime.TEST_MODE, "test mode was not enabled")
         check(
-            digest.ARTICLE_CACHE_DIR == root / ".article-cache",
+            runtime.ARTICLE_CACHE_DIR == root / ".article-cache",
             "test article cache escaped the test root",
         )
         check(
-            digest.ATTENTION_CACHE_DIR == root / ".attention-cache",
+            runtime.ATTENTION_CACHE_DIR == root / ".attention-cache",
             "test attention cache escaped the test root",
         )
         check(
-            digest.ATTENTION_ARCHIVE_DIR == root / "news" / "attention",
+            runtime.ATTENTION_ARCHIVE_DIR == root / "news" / "attention",
             "test attention archive escaped the test root",
         )
         check(
-            digest.HEALTH_LOG_PATH == root / ".search-health.log",
+            runtime.HEALTH_LOG_PATH == root / ".search-health.log",
             "test health log escaped the test root",
         )
 
@@ -158,35 +158,35 @@ def test_article_cache_contract() -> None:
             "summary": "Cached factual summary.",
             "fetch_success": True,
         }
-        digest._save_article_cache(
+        runtime._save_article_cache(
             "https://example.com/story?utm_source=test",
             result,
-            model=digest.MODEL,
+            model=runtime.MODEL,
             cache_dir=cache_dir,
             now=now,
         )
-        hit = digest._load_article_cache(
+        hit = runtime._load_article_cache(
             "https://www.example.com/story",
-            model=digest.MODEL,
+            model=runtime.MODEL,
             cache_dir=cache_dir,
             now=now + timedelta(hours=1),
         )
         check(hit == result, f"cache hit={hit!r}")
-        wrong_model = digest._load_article_cache(
+        wrong_model = runtime._load_article_cache(
             "https://example.com/story",
-            model=digest.MODEL_FALLBACK,
+            model=runtime.MODEL_FALLBACK,
             cache_dir=cache_dir,
             now=now + timedelta(hours=1),
         )
         check(wrong_model is None, "cache crossed model contract")
-        stale = digest._load_article_cache(
+        stale = runtime._load_article_cache(
             "https://example.com/story",
-            model=digest.MODEL,
+            model=runtime.MODEL,
             cache_dir=cache_dir,
             now=now + timedelta(hours=25),
         )
         check(stale is None, "stale cache entry was reused")
-        removed = digest._prune_article_cache(
+        removed = runtime._prune_article_cache(
             cache_dir=cache_dir, now=now + timedelta(hours=25)
         )
         check(removed == 1, f"expired cache entries removed={removed}")
@@ -198,7 +198,7 @@ def test_cross_topic_dedup_precedes_fetch_queue() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        other_category = digest.TOPICS["gaming"]["category"]
+        other_category = catalog.TOPICS["gaming"]["category"]
         other_dir = root / other_category / "2026-08-10"
         other_dir.mkdir(parents=True)
         duplicate = "https://example.com/shared?utm_source=gaming"
@@ -220,9 +220,9 @@ def test_cross_topic_dedup_precedes_fetch_queue() -> None:
                 "date_published": "2026-08-10",
             },
         ]
-        with patch.object(digest, "DIGESTS_DIR", root):
-            queue, _ = digest.phase_3_rank(
-                digest.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue, _ = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
             )
         check([item["title"] for item in queue] == ["Unique"], f"queue={queue!r}")
         artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
@@ -234,7 +234,7 @@ def test_cross_topic_same_event_referenced_url_dedup() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-26"
         run_dir.mkdir(parents=True)
-        other = root / digest.TOPICS["gaming"]["category"] / "2026-08-26"
+        other = root / catalog.TOPICS["gaming"]["category"] / "2026-08-26"
         other.mkdir(parents=True)
         (other / "06-curated.json").write_text(json.dumps({
             "fresh": [{
@@ -243,7 +243,7 @@ def test_cross_topic_same_event_referenced_url_dedup() -> None:
             "ongoing": [],
         }))
         (other / "referenced-urls.json").write_text(json.dumps({
-            "schema_version": digest.REFERENCED_URLS_SCHEMA_VERSION,
+            "schema_version": catalog.REFERENCED_URLS_SCHEMA_VERSION,
             "generated_at": "2026-08-27T00:00:00+00:00",
             "stories": [{
                 "url": "https://techcrunch.com/2026/08/25/openai-jalapeno-chip",
@@ -266,9 +266,9 @@ def test_cross_topic_same_event_referenced_url_dedup() -> None:
                 "date_published": "2026-08-25",
             },
         ]
-        with patch.object(digest, "DIGESTS_DIR", root):
-            queue, _ = digest.phase_3_rank(
-                digest.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue, _ = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
             )
         check(
             [item["title"] for item in queue] == ["Unique story"],
@@ -279,6 +279,47 @@ def test_cross_topic_same_event_referenced_url_dedup() -> None:
             len(artifact["cross_topic_rejected"]) == 1,
             "same-event source-page URL not blocked",
         )
+
+
+def test_rank_resume_fingerprint_includes_cross_topic_urls() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / catalog.TOPICS["ai-tech"]["category"] / "2026-08-26"
+        run_dir.mkdir(parents=True)
+        candidate = {
+            "title": "Shared event",
+            "url": "https://example.com/shared-event",
+            "editorial_significance": "medium",
+            "date_published": "2026-08-26",
+        }
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            first, _ = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"],
+                [copy.deepcopy(candidate)],
+                [],
+                {"stories": []},
+                run_dir,
+            )
+            check(len(first) == 1, first)
+
+            other_dir = (
+                root
+                / catalog.TOPICS["gaming"]["category"]
+                / run_dir.name
+            )
+            other_dir.mkdir(parents=True)
+            (other_dir / "06-curated.json").write_text(json.dumps({
+                "fresh": [{"url": candidate["url"]}],
+                "ongoing": [],
+            }))
+            second, _ = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"],
+                [copy.deepcopy(candidate)],
+                [],
+                {"stories": []},
+                run_dir,
+            )
+        check(not second, "rank reused cache after cross-topic URL set changed")
 
 
 def test_phase_two_cross_day_dedup_window_contract() -> None:
@@ -303,16 +344,16 @@ def test_phase_two_cross_day_dedup_window_contract() -> None:
             "rejected": [],
         }
         with patch(
-            "digest_runner._call_llm_proxy",
+            "daily_news.runtime._call_llm_proxy",
             return_value=json.dumps(judged),
         ):
-            fresh, ongoing = digest.phase_2_judge_research(
-                digest.TOPICS["ai-tech"],
+            fresh, ongoing = research.phase_2_judge_research(
+                catalog.TOPICS["ai-tech"],
                 [finding],
                 run_dir,
                 {"stories": []},
             )
-        check(digest.CROSS_DAY_DEDUP_DAYS == 5, digest.CROSS_DAY_DEDUP_DAYS)
+        check(catalog.CROSS_DAY_DEDUP_DAYS == 5, catalog.CROSS_DAY_DEDUP_DAYS)
         check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
 
 
@@ -345,29 +386,29 @@ def test_phase_two_rejects_unvalidated_legacy_followup() -> None:
             "research_angle_id": "developing-followups",
             "develops_story_url": root_url,
         }
-        with patch("digest_runner._call_llm_proxy") as call:
-            fresh, ongoing = digest.phase_2_judge_research(
-                digest.TOPICS["world"], [finding], run_dir, tracker
+        with patch("daily_news.runtime._call_llm_proxy") as call:
+            fresh, ongoing = research.phase_2_judge_research(
+                catalog.TOPICS["world"], [finding], run_dir, tracker
             )
         check(not fresh and not ongoing, (fresh, ongoing))
         check(not call.called, "unvalidated legacy root reached the LLM judge")
 
 def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
-    digest.validate_runtime_contract()
-    with patch.object(digest, "CROSS_DAY_DEDUP_DAYS", None):
+    workflow.validate_runtime_contract()
+    with patch.object(catalog, "CROSS_DAY_DEDUP_DAYS", None):
         raised = False
         try:
-            digest.validate_runtime_contract()
+            workflow.validate_runtime_contract()
         except RuntimeError as error:
             raised = "CROSS_DAY_DEDUP_DAYS" in str(error)
         check(raised, "preflight accepted a missing cross-day dedup contract")
 
     with tempfile.TemporaryDirectory() as temporary:
         missing_config = Path(temporary) / "missing-digest-config.yml"
-        with patch.object(digest, "DIGEST_OMP_CONFIG", missing_config):
+        with patch.object(runtime, "DIGEST_OMP_CONFIG", missing_config):
             raised = False
             try:
-                digest.validate_runtime_contract()
+                workflow.validate_runtime_contract()
             except RuntimeError as error:
                 raised = "DIGEST_OMP_CONFIG" in str(error)
             check(raised, "preflight accepted a missing digest OMP config")
@@ -377,10 +418,10 @@ def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
             "providers:\n  webSearchOrder:\n    - searxng\n"
             "searxng:\n  endpoint: http://localhost:8080\n  categories: general,news\n"
         )
-        with patch.object(digest, "DIGEST_OMP_CONFIG", wrong_config):
+        with patch.object(runtime, "DIGEST_OMP_CONFIG", wrong_config):
             raised = False
             try:
-                digest.validate_runtime_contract()
+                workflow.validate_runtime_contract()
             except RuntimeError as error:
                 raised = "webSearchOrder" in str(error)
             check(raised, "preflight accepted the wrong search-provider order")
@@ -391,13 +432,76 @@ def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
             "searxng:\n  endpoint: http://localhost:8080\n"
             "  categories: general,news\n  language: en\n"
         )
-        with patch.object(digest, "DIGEST_OMP_CONFIG", localized_config):
+        with patch.object(runtime, "DIGEST_OMP_CONFIG", localized_config):
             raised = False
             try:
-                digest.validate_runtime_contract()
+                workflow.validate_runtime_contract()
             except RuntimeError as error:
                 raised = "language must remain unset" in str(error)
             check(raised, "preflight accepted a forced search language")
+
+
+def test_phase_inputs_include_actual_code_hashes() -> None:
+    baseline = runtime.phase_inputs("contract-test", upstream={"value": 1})
+    check(len(baseline["code_hash"]) == 64, baseline)
+    for path in (
+        Path(runtime.__file__).resolve(),
+        runtime.DIGEST_OMP_CONFIG,
+        runtime.DIGEST_OMP_SANDBOX,
+        runtime.TEMPLATE_PATH,
+    ):
+        check(str(path) in baseline["code_hashes"], (path, baseline))
+    real_hash = runtime.file_sha256
+
+    def changed_hash(path) -> str:
+        if Path(path).resolve() == Path(runtime.__file__).resolve():
+            return "0" * 64
+        return real_hash(path)
+
+    with patch.object(runtime, "file_sha256", changed_hash):
+        raised = False
+        try:
+            runtime.phase_inputs("contract-test", upstream={"value": 1})
+        except RuntimeError as error:
+            raised = "changed during the run" in str(error)
+    check(raised, "mid-run code change did not abort resumable phase")
+
+
+def test_empty_phase_has_explicit_durable_outcome() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary) / "2026-09-01"
+        artifact = run_dir / "empty.json"
+        inputs = {"code_hash": "stable", "upstream": []}
+        state, cached = runtime.begin_or_load_phase(
+            run_dir,
+            "empty-contract",
+            inputs=inputs,
+            artifact_path=artifact,
+            schema_version=1,
+            validator=lambda value: isinstance(value, dict),
+        )
+        check(cached is None, cached)
+        runtime.complete_phase_json(
+            state,
+            "empty-contract",
+            artifact,
+            {"items": [], "reason": "no input"},
+            outcome="empty",
+            reason="no input",
+        )
+        record = state.phase_record("empty-contract")
+        check(record["status"] == "succeeded", record)
+        check(record["completion_outcome"] == "empty", record)
+        check(record["completion_reason"] == "no input", record)
+        _, resumed = runtime.begin_or_load_phase(
+            run_dir,
+            "empty-contract",
+            inputs=inputs,
+            artifact_path=artifact,
+            schema_version=1,
+            validator=lambda value: isinstance(value, dict),
+        )
+        check(resumed == {"items": [], "reason": "no input"}, resumed)
 
 
 def test_attention_phase_persists_durable_observations() -> None:
@@ -432,12 +536,12 @@ def test_attention_phase_persists_durable_observations() -> None:
             "observations": [],
         }
         with (
-            patch.object(digest, "ATTENTION_CACHE_DIR", root / "cache"),
-            patch.object(digest, "ATTENTION_ARCHIVE_DIR", root / "attention"),
-            patch("digest_runner.score_attention", return_value=(scored, artifact)),
+            patch.object(runtime, "ATTENTION_CACHE_DIR", root / "cache"),
+            patch.object(runtime, "ATTENTION_ARCHIVE_DIR", root / "attention"),
+            patch("daily_news.attention.score_attention", return_value=(scored, artifact)),
         ):
-            scored_fresh, scored_ongoing = digest.phase_2b_attention(
-                digest.TOPICS["ai-tech"], fresh, ongoing, run_dir
+            scored_fresh, scored_ongoing = research.phase_2b_attention(
+                catalog.TOPICS["ai-tech"], fresh, ongoing, run_dir
             )
         check(scored_fresh[0]["priority_score"] == 82.0, scored_fresh)
         check(scored_ongoing[0]["priority_score"] == 100.0, scored_ongoing)
@@ -467,9 +571,9 @@ def test_phase_three_uses_product_priority() -> None:
                 "date_published": "2026-08-25",
             },
         ]
-        with patch.object(digest, "DIGESTS_DIR", root):
-            queue, _ = digest.phase_3_rank(
-                digest.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue, _ = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
             )
         check(
             [item["title"] for item in queue]
@@ -481,7 +585,7 @@ def test_phase_three_uses_product_priority() -> None:
         )
         artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
         check(
-            artifact["ranking_schema_version"] == digest.RANKING_SCHEMA_VERSION,
+            artifact["ranking_schema_version"] == catalog.RANKING_SCHEMA_VERSION,
             artifact,
         )
 
@@ -526,14 +630,14 @@ def test_phase_four_concurrency_and_shared_cache() -> None:
                 "fetch_success": True,
             })
 
-        with patch.object(digest, "ARTICLE_CACHE_DIR", cache_dir), patch.object(
-            digest, "_call_omp_p", side_effect=fake_omp
+        with patch.object(runtime, "ARTICLE_CACHE_DIR", cache_dir), patch.object(
+            runtime, "_call_omp_p", side_effect=fake_omp
         ) as mocked:
-            first = digest.phase_4_fetch(
-                digest.TOPICS["ai-tech"], findings, root / "run-one"
+            first = research.phase_4_fetch(
+                catalog.TOPICS["ai-tech"], findings, root / "run-one"
             )
-            second = digest.phase_4_fetch(
-                digest.TOPICS["gaming"], findings, root / "run-two"
+            second = research.phase_4_fetch(
+                catalog.TOPICS["gaming"], findings, root / "run-two"
             )
         check(maximum == 2, f"expected concurrency 2, saw {maximum}")
         check(mocked.call_count == 3, f"cache did not suppress calls: {mocked.call_count}")
@@ -581,10 +685,10 @@ def test_phase_five_backfills_date_confirmed_from_date_published() -> None:
             {"url": "https://a.example/story", "verdict": "keep", "issues": [], "fixed_summary": ""},
             {"url": "https://b.example/story", "verdict": "keep", "issues": [], "fixed_summary": ""},
         ])
-        with patch("digest_runner._refetch_article_date", return_value=None), \
-             patch("digest_runner._call_llm_proxy", return_value=judgments):
-            results = digest.phase_5_judge_summaries(
-                digest.TOPICS["ai-tech"], summaries, run_dir
+        with patch("daily_news.research.refetch_article_date", return_value=None), \
+             patch("daily_news.runtime._call_llm_proxy", return_value=judgments):
+            results = research.phase_5_judge_summaries(
+                catalog.TOPICS["ai-tech"], summaries, run_dir
             )
         by_url = {r["url"]: r for r in results}
         unconfirmed = by_url["https://a.example/story"]
@@ -596,6 +700,66 @@ def test_phase_five_backfills_date_confirmed_from_date_published() -> None:
               f"confirmed date was overwritten: {confirmed['date_confirmed']!r}")
 
 
+def test_cached_curation_regenerates_referenced_url_sidecar() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary) / "ai-tech" / "2026-08-26"
+        run_dir.mkdir(parents=True)
+        topic = catalog.TOPICS["ai-tech"]
+        summaries: list[dict] = []
+        sif_candidates: list[dict] = []
+        tracker = {"stories": []}
+        blocked_urls = contracts.load_cross_topic_urls(topic, run_dir)
+        inputs = runtime.phase_inputs(
+            "curate",
+            topic=topic,
+            upstream={
+                "summaries": runtime.canonical_fingerprint(summaries),
+                "sif_candidates": runtime.canonical_fingerprint(sif_candidates),
+                "stories_in_flight": runtime.canonical_fingerprint(tracker),
+                "cross_topic_urls": sorted(blocked_urls),
+            },
+            policy={
+                "issue_date": run_dir.name,
+                "ranking_schema": catalog.RANKING_SCHEMA_VERSION,
+                "model": runtime._effective_model(runtime.MODEL),
+            },
+        )
+        state = runtime.WorkflowState(
+            run_dir, runtime.WORKFLOW_NAME, run_id=run_dir.name
+        )
+        state.begin_phase(
+            "curate",
+            inputs=inputs,
+            artifact_path=run_dir / "06-curated.json",
+            schema_version=catalog.RANKING_SCHEMA_VERSION,
+        )
+        cached_story = {
+            "title": "Cached selection",
+            "url": "https://example.com/cached-selection",
+            "summary": "Verified cached summary.",
+        }
+        state.complete_json(
+            "curate",
+            {
+                "fresh": [cached_story],
+                "stories_in_flight": tracker,
+                "ongoing": [],
+            },
+        )
+        sidecar = run_dir / "referenced-urls.json"
+        check(not sidecar.exists(), "sidecar unexpectedly preexisted")
+        with patch(
+            "daily_news.contracts.collect_referenced_urls",
+            return_value=["example.com/source"],
+        ):
+            fresh, _, _ = editorial.phase_6_curate(
+                topic, summaries, sif_candidates, tracker, run_dir
+            )
+        check(fresh == [cached_story], fresh)
+        sidecar_data = json.loads(sidecar.read_text())
+        check(sidecar_data["stories"][0]["url"] == cached_story["url"], sidecar_data)
+
+
 def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
     """A curated fresh story that somehow still lacks date_confirmed must be
     backfilled from date_published and flagged in 06c's validation warnings
@@ -604,7 +768,7 @@ def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-29"
         run_dir.mkdir(parents=True)
-        fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        fresh_day = "2026-08-28"
         summary = {
             "title": "Fresh story without confirmed date",
             "url": "https://example.com/fresh-unconfirmed",
@@ -616,7 +780,7 @@ def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
             "source_verdict": "fresh",
             "judge_verdict": "keep",
         }
-        candidate_id = digest._editorial_candidate_id(summary)
+        candidate_id = editorial.editorial_candidate_id(summary)
         proposal = {
             "selected_fresh": [{
                 "candidate_id": candidate_id,
@@ -641,11 +805,11 @@ def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
             json.dumps(proposal),
             json.dumps({"verdict": "approve", "changes": [], "notes": "OK"}),
         ]
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=responses
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=responses
         ):
-            fresh, _, _ = digest.phase_6_curate(
-                digest.TOPICS["ai-tech"], [summary], [], {}, run_dir
+            fresh, _, _ = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], [summary], [], {}, run_dir
             )
         check(len(fresh) == 1, f"fresh story was not curated: {fresh}")
         check(fresh[0]["date_confirmed"] == fresh_day,
@@ -657,13 +821,16 @@ def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
         )
 
 
-def editorial_fixture() -> tuple[list[dict], list[dict], dict]:
-    # Publication dates are yesterday-relative: the Phase 6c freshness gate
-    # (digest-quality audit 2026-08-12) drops fresh selections outside the
-    # last-24h window, so fixture candidates must stay fresh-eligible on any
-    # run day.
-    fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    candidates, _ = digest._prepare_editorial_candidates([
+def editorial_fixture(issue_date: str | None = None) -> tuple[list[dict], list[dict], dict]:
+    # Phase-oriented fixtures derive freshness from the immutable run date;
+    # pure proposal tests default to the current date.
+    base_date = (
+        datetime.fromisoformat(issue_date).date()
+        if issue_date is not None
+        else datetime.now(timezone.utc).date()
+    )
+    fresh_day = (base_date - timedelta(days=1)).isoformat()
+    candidates, _ = editorial.prepare_editorial_candidates([
         {
             "title": "Primary story",
             "url": "https://example.com/primary",
@@ -750,7 +917,7 @@ def test_editorial_validation_and_state_application() -> None:
             },
         ],
     }
-    validated, warnings = digest._validate_editorial_proposal(
+    validated, warnings = editorial.validate_editorial_proposal(
         proposal, candidates, sif_candidates, tracker
     )
     check(len(validated["selected_fresh"]) == 2, validated)
@@ -772,14 +939,14 @@ def test_editorial_validation_and_state_application() -> None:
         warnings,
     )
     original = json.loads(json.dumps(tracker))
-    updated = digest._apply_story_state_proposals(
+    updated = editorial.apply_story_state_proposals(
         tracker, validated, candidates, "2026-08-10"
     )
     check(tracker == original, "state application mutated its input")
     check(updated["stories"][0]["latest_dev"] == "New verified development.", updated)
     check(updated["stories"][0]["last_updated"] == "2026-08-10", updated)
     check(
-        digest._story_development_dates(updated["stories"][0])
+        contracts.story_development_dates(updated["stories"][0])
         == {"2026-08-08", "2026-08-09", "2026-08-10"},
         updated["stories"][0],
     )
@@ -795,7 +962,7 @@ def test_editorial_critic_patch_contract() -> None:
         "selected_ongoing": [],
         "story_state_proposals": [],
     }
-    patched, applied, warnings = digest._apply_editorial_patches(proposal, {
+    patched, applied, warnings = editorial.apply_editorial_patches(proposal, {
         "changes": [{
             "operation": "move_fresh",
             "candidate_id": candidates[1]["candidate_id"],
@@ -832,7 +999,7 @@ def test_editorial_drops_stale_fresh_selection() -> None:
             "status": "active",
         }],
     }
-    validated, warnings = digest._validate_editorial_proposal(
+    validated, warnings = editorial.validate_editorial_proposal(
         proposal, candidates, sif_candidates, tracker
     )
     check(len(validated["selected_fresh"]) == 1, validated["selected_fresh"])
@@ -845,7 +1012,7 @@ def test_editorial_drops_stale_fresh_selection() -> None:
     # not evidence and therefore creates no tracker update.
     check(validated["story_state_proposals"] == [],
           validated["story_state_proposals"])
-    updated = digest._apply_story_state_proposals(
+    updated = editorial.apply_story_state_proposals(
         tracker, validated, candidates, "2026-08-10"
     )
     check(
@@ -866,19 +1033,19 @@ def test_freshness_gate_rejects_future_dates() -> None:
     yesterday = datetime(2026, 8, 13, tzinfo=timezone.utc).date()
     today = datetime(2026, 8, 14, tzinfo=timezone.utc).date()
     future = {"date_confirmed": "2026-10-15", "date_published": "2026-08-12"}
-    check(not digest._is_fresh_eligible(future, yesterday, today),
+    check(not contracts.is_fresh_eligible(future, yesterday, today),
           "future-dated candidate passed the freshness gate")
     fresh = {"date_confirmed": "2026-08-13"}
-    check(digest._is_fresh_eligible(fresh, yesterday, today),
+    check(contracts.is_fresh_eligible(fresh, yesterday, today),
           "yesterday-dated candidate must stay fresh-eligible")
     same_day = {"date_confirmed": "2026-08-14"}
-    check(digest._is_fresh_eligible(same_day, yesterday, today),
+    check(contracts.is_fresh_eligible(same_day, yesterday, today),
           "today-dated candidate must stay fresh-eligible")
     stale = {"date_confirmed": "2026-08-10"}
-    check(not digest._is_fresh_eligible(stale, yesterday, today),
+    check(not contracts.is_fresh_eligible(stale, yesterday, today),
           "stale candidate passed the freshness gate")
     undated = {"date_confirmed": "", "date_published": ""}
-    check(digest._is_fresh_eligible(undated, yesterday, today),
+    check(contracts.is_fresh_eligible(undated, yesterday, today),
           "undated candidate must pass through")
 
 
@@ -892,11 +1059,11 @@ def test_freshness_gate_ignores_future_event_date_confirmed() -> None:
     yesterday = datetime(2026, 8, 16, tzinfo=timezone.utc).date()
     today = datetime(2026, 8, 17, tzinfo=timezone.utc).date()
     fresh_event = {"date_published": "2026-08-17", "date_confirmed": "2026-08-24"}
-    check(digest._is_fresh_eligible(fresh_event, yesterday, today),
+    check(contracts.is_fresh_eligible(fresh_event, yesterday, today),
           "future event date_confirmed dropped a fresh-eligible candidate")
     # Regression guard: keep the genuine future-dated (publication) rejection.
     genuine_future = {"date_published": "2026-10-15", "date_confirmed": ""}
-    check(not digest._is_fresh_eligible(genuine_future, yesterday, today),
+    check(not contracts.is_fresh_eligible(genuine_future, yesterday, today),
           "genuine future-dated publication must still be rejected")
 
 
@@ -906,7 +1073,7 @@ def test_editorial_caps_source_concentration() -> None:
     single-source Fresh section (digest-quality audit 2026-08-14: ai-tech
     shipped 5 TechCrunch stories, ai-hardware 4 Data Center Dynamics stories)."""
     fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    candidates, _ = digest._prepare_editorial_candidates([
+    candidates, _ = editorial.prepare_editorial_candidates([
         {
             "title": f"TechCrunch story {index}",
             "url": f"https://techcrunch.com/{index}",
@@ -942,7 +1109,7 @@ def test_editorial_caps_source_concentration() -> None:
         "gaps": "",
         "balance_summary": "",
     }
-    validated, warnings = digest._validate_editorial_proposal(
+    validated, warnings = editorial.validate_editorial_proposal(
         proposal, candidates, [], {"stories": []}
     )
     selected = validated["selected_fresh"]
@@ -970,8 +1137,8 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
         root = Path(temporary)
         run_dir = root / "agentic-platform" / "2026-08-14"
         run_dir.mkdir(parents=True)
-        fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-        stale_day = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
+        fresh_day = "2026-08-13"
+        stale_day = "2026-08-09"
 
         def build(title: str, url: str, day: str, significance: str) -> dict:
             return {
@@ -992,9 +1159,9 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
         stale_b = build("Stale story B", "https://example.com/stale-b", stale_day, "medium")
         fresh_c = build("Fresh story C", "https://example.com/fresh-c", fresh_day, "medium")
         summaries = [stale_a, stale_b, fresh_c]
-        stale_a_id = digest._editorial_candidate_id(stale_a)
-        stale_b_id = digest._editorial_candidate_id(stale_b)
-        fresh_c_id = digest._editorial_candidate_id(fresh_c)
+        stale_a_id = editorial.editorial_candidate_id(stale_a)
+        stale_b_id = editorial.editorial_candidate_id(stale_b)
+        fresh_c_id = editorial.editorial_candidate_id(fresh_c)
 
         stale_only = {
             "selected_fresh": [
@@ -1039,11 +1206,11 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
                 raise value
             return str(value)
 
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=fake_call
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, ongoing = digest.phase_6_curate(
-                digest.TOPICS["agentic-platform"], summaries, [], {"stories": []}, run_dir
+            fresh, _, ongoing = editorial.phase_6_curate(
+                catalog.TOPICS["agentic-platform"], summaries, [], {"stories": []}, run_dir
             )
         check(len(fresh) == 1, f"expected 1 fresh after hint retry, got {fresh}")
         check(fresh[0]["url"] == "https://example.com/fresh-c", fresh)
@@ -1064,7 +1231,7 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
             artifact,
         )
         check(
-            artifact["output"]["editorial"]["proposal_model"] == digest.MODEL,
+            artifact["output"]["editorial"]["proposal_model"] == runtime.MODEL,
             artifact,
         )
         check(
@@ -1082,7 +1249,7 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
         root = Path(temporary)
         run_dir = root / "ai-hardware" / "2026-08-12"
         run_dir.mkdir(parents=True)
-        stale_day = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
+        stale_day = "2026-08-10"
         summary = {
             "title": "RTX 50-series price spike",
             "url": "https://example.com/rtx-prices",
@@ -1096,7 +1263,7 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
             "source_verdict": "ongoing",
             "judge_verdict": "keep",
         }
-        candidate_id = digest._editorial_candidate_id(summary)
+        candidate_id = editorial.editorial_candidate_id(summary)
         proposal = {
             "selected_fresh": [{
                 "candidate_id": candidate_id,
@@ -1134,11 +1301,11 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
                 raise value
             return str(value)
 
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=fake_call
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, updated, _ = digest.phase_6_curate(
-                digest.TOPICS["ai-hardware"], [summary], [], {}, run_dir
+            fresh, updated, _ = editorial.phase_6_curate(
+                catalog.TOPICS["ai-hardware"], [summary], [], {}, run_dir
             )
         check(fresh == [], f"stale story shipped under Fresh: {fresh}")
         artifact = json.loads((run_dir / "06-curated.json").read_text())
@@ -1169,7 +1336,7 @@ def test_critic_emptying_valid_fresh_still_fails_closed() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-12"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture()
+        candidates, _, tracker = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -1205,11 +1372,11 @@ def test_critic_emptying_valid_fresh_still_fails_closed() -> None:
                 raise value
             return str(value)
 
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=fake_call
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, _ = digest.phase_6_curate(
-                digest.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh, _, _ = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
             )
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(artifact["editorial"]["review_status"] == "unavailable", artifact)
@@ -1221,7 +1388,7 @@ def test_phase_six_fallback_and_review_chain() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture()
+        candidates, _, tracker = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -1261,16 +1428,16 @@ def test_phase_six_fallback_and_review_chain() -> None:
                 raise value
             return str(value)
 
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=fake_call
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, updated, ongoing = digest.phase_6_curate(
-                digest.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh, updated, ongoing = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
             )
         check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
         check(len(updated["stories"]) == 2, updated)
         artifact = json.loads((run_dir / "06-curated.json").read_text())
-        check(artifact["editorial"]["proposal_model"] == digest.MODEL_FALLBACK, artifact)
+        check(artifact["editorial"]["proposal_model"] == runtime.MODEL_FALLBACK, artifact)
         check(artifact["editorial"]["review_status"] == "reviewed", artifact)
         check(
             artifact["editorial"]["degraded"] is True,
@@ -1285,7 +1452,7 @@ def test_editorial_proposal_retries_primary_before_fallback() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture()
+        candidates, _, tracker = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -1324,16 +1491,16 @@ def test_editorial_proposal_retries_primary_before_fallback() -> None:
                 raise value
             return str(value)
 
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=fake_call
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, ongoing = digest.phase_6_curate(
-                digest.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh, _, ongoing = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
             )
         check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(
-            artifact["editorial"]["proposal_model"] == digest.MODEL,
+            artifact["editorial"]["proposal_model"] == runtime.MODEL,
             artifact,
         )
         check(
@@ -1357,7 +1524,7 @@ def test_editorial_critic_retries_primary_after_transient_error() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture()
+        candidates, _, tracker = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -1396,16 +1563,16 @@ def test_editorial_critic_retries_primary_after_transient_error() -> None:
                 raise value
             return str(value)
 
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=fake_call
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, _ = digest.phase_6_curate(
-                digest.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh, _, _ = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
             )
         check(len(fresh) == 1, (fresh,))
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(
-            artifact["editorial"]["review_model"] == digest.MODEL_REVIEWER,
+            artifact["editorial"]["review_model"] == runtime.MODEL_REVIEWER,
             artifact,
         )
         check(artifact["editorial"]["review_status"] == "reviewed", artifact)
@@ -1425,7 +1592,7 @@ def test_critic_fallback_verdict_spelling_normalized() -> None:
         root = Path(temporary)
         run_dir = root / "world" / "2026-08-31"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture()
+        candidates, _, tracker = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -1459,16 +1626,16 @@ def test_critic_fallback_verdict_spelling_normalized() -> None:
                 raise value
             return str(value)
 
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=fake_call
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, _ = digest.phase_6_curate(
-                digest.TOPICS["world"], summaries, [], tracker, run_dir
+            fresh, _, _ = editorial.phase_6_curate(
+                catalog.TOPICS["world"], summaries, [], tracker, run_dir
             )
         check(len(fresh) == 1, (fresh,))
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(
-            artifact["editorial"]["review_model"] == digest.MODEL_FALLBACK,
+            artifact["editorial"]["review_model"] == runtime.MODEL_FALLBACK,
             artifact,
         )
         check(artifact["editorial"]["review_status"] == "reviewed", artifact)
@@ -1492,7 +1659,7 @@ def test_critic_rejection_fails_closed() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture()
+        candidates, _, tracker = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -1518,11 +1685,11 @@ def test_critic_rejection_fails_closed() -> None:
             json.dumps({"verdict": "reject", "changes": []}),
             json.dumps({"verdict": "reject", "changes": []}),
         ]
-        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
-            digest, "_call_llm_proxy", side_effect=responses
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
+            runtime, "_call_llm_proxy", side_effect=responses
         ):
-            fresh, updated, _ = digest.phase_6_curate(
-                digest.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh, updated, _ = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
             )
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(len(fresh) == 2, "critic rejection did not use source-ranked fallback")
@@ -1536,7 +1703,7 @@ def test_critic_rejection_fails_closed() -> None:
             ),
             "rejected state proposal was applied",
         )
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = run_dir.name
         added = {
             story.get("url"): story
             for story in updated["stories"]
@@ -1563,29 +1730,29 @@ def test_critic_rejection_fails_closed() -> None:
 
 def test_standfirst_boundary_and_deterministic_render() -> None:
     stories = [{"title": "Safe <Title>", "summary": "Verified 12% result."}]
-    valid, _ = digest._validate_standfirst(
+    valid, _ = copy_module.validate_standfirst(
         "Verified results reached 12%. The source-backed change reshapes the market.",
         stories,
     )
     check(valid, "source-backed newspaper standfirst was rejected")
-    valid, reason = digest._validate_standfirst(
+    valid, reason = copy_module.validate_standfirst(
         "Verified results reached 99%. The change reshapes the market.", stories
     )
     check(not valid and "99" in reason, reason)
-    valid, reason = digest._validate_standfirst(
+    valid, reason = copy_module.validate_standfirst(
         "Today’s digest leads with the verified 12% result. Read on for details.",
         stories,
     )
     check(not valid and "meta language" in reason, reason)
-    valid, reason = digest._validate_standfirst(
+    valid, reason = copy_module.validate_standfirst(
         "Verified results reached 12% while the market", stories
     )
     check(not valid and "mid-sentence" in reason, reason)
-    fallback = digest._fallback_standfirst(
+    fallback = copy_module.fallback_standfirst(
         [{"summary": "A verified change occurred. Additional detail follows."}], []
     )
     check(fallback == "A verified change occurred.", fallback)
-    clipped = digest._clean_editorial_text("word " * 300, limit=80)
+    clipped = editorial.clean_editorial_text("word " * 300, limit=80)
     check(clipped.endswith("word…") and len(clipped) <= 81, clipped)
 
     fresh = [{
@@ -1601,7 +1768,7 @@ def test_standfirst_boundary_and_deterministic_render() -> None:
         "summary": "Existing summary.",
         "why_still_relevant": "New evidence.",
     }]
-    rendered = digest._render_digest_html(
+    rendered = archive.render_digest_html(
         {"title": "Test Section"}, fresh, ongoing, "Verified source-backed standfirst."
     )
     check("Safe &lt;Title&gt;" in rendered, "title was not escaped")
@@ -1628,13 +1795,13 @@ def test_tracker_updates_require_material_evidence() -> None:
         }],
         "story_state_proposals": [],
     }
-    validated, _ = digest._validate_editorial_proposal(
+    validated, _ = editorial.validate_editorial_proposal(
         proposal, candidates, sif_candidates, tracker
     )
     check(validated["story_state_proposals"] == [],
           validated["story_state_proposals"])
     original = json.loads(json.dumps(tracker))
-    displayed = digest._apply_story_state_proposals(
+    displayed = editorial.apply_story_state_proposals(
         tracker, validated, candidates, "2026-08-10"
     )
     check(tracker == original, "state application mutated its input")
@@ -1664,7 +1831,7 @@ def test_tracker_updates_require_material_evidence() -> None:
         }],
         "story_state_proposals": [],
     }
-    validated, _ = digest._validate_editorial_proposal(
+    validated, _ = editorial.validate_editorial_proposal(
         with_update, candidates, sif_candidates, tracker
     )
     update_ops = [
@@ -1676,13 +1843,13 @@ def test_tracker_updates_require_material_evidence() -> None:
         update_ops[0]["evidence_candidate_ids"] == [followup["candidate_id"]],
         update_ops,
     )
-    updated = digest._apply_story_state_proposals(
+    updated = editorial.apply_story_state_proposals(
         tracker, validated, candidates, "2026-08-10"
     )
     story = updated["stories"][0]
     check(story["latest_dev"] == "Officials took a new, verified action.", story)
     check(
-        digest._story_development_dates(story)
+        contracts.story_development_dates(story)
         == {"2026-08-08", "2026-08-09", "2026-08-10"},
         story,
     )
@@ -1757,7 +1924,7 @@ def test_developing_section_requires_significance_and_multiple_dates() -> None:
         ],
         "story_state_proposals": [],
     }
-    validated, warnings = digest._validate_editorial_proposal(
+    validated, warnings = editorial.validate_editorial_proposal(
         proposal, candidates, tracker["stories"], tracker
     )
     check(
@@ -1801,7 +1968,7 @@ def test_followup_research_targets_prior_high_significance_stories() -> None:
             },
         ]
     }
-    angle = digest._build_developing_followup_angle(stories, today)
+    angle = contracts.build_developing_followup_angle(stories, today)
     check(angle is not None, "high-priority prior story was not scheduled")
     prompt = angle["prompt"]
     check("https://tracker.example/high" in prompt, prompt)
@@ -1846,7 +2013,7 @@ def test_tracker_retention_uses_evidence_inactivity() -> None:
             {"date": "2026-08-10", "url": "https://tracker.example/expired"},
         ],
     }
-    kept, cooled, pruned = digest._prune_and_cool_stories(
+    kept, cooled, pruned = archive.prune_and_cool_stories(
         [active_long_running, inactive_active, expired_cooled], today
     )
     kept_by_url = {story["url"]: story for story in kept}
@@ -1895,7 +2062,7 @@ def test_ongoing_resurface_cap_cools_recurring_story() -> None:
                 "fresh": [],
                 "ongoing": [{"url": story_url, "title": "Recurring story"}],
             }))
-        warnings, ops = digest._enforce_ongoing_resurface_cap(
+        warnings, ops = contracts.enforce_ongoing_resurface_cap(
             proposal, tracker, digest_dir, today
         )
         check(proposal["selected_ongoing"] == [], proposal["selected_ongoing"])
@@ -1923,8 +2090,8 @@ def test_ongoing_resurface_cap_cools_recurring_story() -> None:
                 "ongoing": [{"url": story_url}],
             }))
         check(
-            digest._consecutive_surfaced_days(gap_dir, story_url, today) == 1,
-            digest._consecutive_surfaced_days(gap_dir, story_url, today),
+            contracts.consecutive_surfaced_days(gap_dir, story_url, today) == 1,
+            contracts.consecutive_surfaced_days(gap_dir, story_url, today),
         )
 
         # An evidence-backed update op (a real development) resets the cap.
@@ -1944,7 +2111,7 @@ def test_ongoing_resurface_cap_cools_recurring_story() -> None:
                 "status": "active",
             }],
         }
-        warnings, ops = digest._enforce_ongoing_resurface_cap(
+        warnings, ops = contracts.enforce_ongoing_resurface_cap(
             evidenced, tracker, digest_dir
         )
         check(len(evidenced["selected_ongoing"]) == 1, evidenced["selected_ongoing"])
@@ -1986,7 +2153,7 @@ def test_editorial_floor_and_publication_artifact() -> None:
         "selected_ongoing": [],
         "story_state_proposals": [],
     }
-    validated, warnings = digest._validate_editorial_proposal(
+    validated, warnings = editorial.validate_editorial_proposal(
         proposal, candidates, sif_candidates, tracker
     )
     filled = {item["story_url"] for item in validated["selected_ongoing"]}
@@ -2014,13 +2181,13 @@ def test_editorial_floor_and_publication_artifact() -> None:
         }],
         "story_state_proposals": [],
     }
-    validated, _ = digest._validate_editorial_proposal(
+    validated, _ = editorial.validate_editorial_proposal(
         both, candidates, sif_candidates, tracker
     )
     check(len(validated["selected_ongoing"]) == 1, validated["selected_ongoing"])
 
     # 0 fresh + 0 ongoing and an empty pool remains honestly empty.
-    empty_validated, _ = digest._validate_editorial_proposal(
+    empty_validated, _ = editorial.validate_editorial_proposal(
         {"selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []},
         candidates, [], {"stories": []}, set(),
     )
@@ -2033,14 +2200,10 @@ def test_editorial_floor_and_publication_artifact() -> None:
         digest_dir.mkdir(parents=True)
         run_dir.mkdir()
         (run_dir / "06-curated.json").write_text(json.dumps({"fresh": [], "ongoing": []}))
-        (run_dir / "07-standfirst.json").write_text(json.dumps({
-            "prompt_version": digest.STANDFIRST_PROMPT_VERSION,
-            "standfirst": "Two verified stories reshape policy and public debate."
-        }))
         fresh_story = {
             "title": "First",
             "url": "https://example.com/a",
-            "summary": "First source-backed summary.",
+            "summary": "First source-backed summary explains a consequential verified policy change.",
             "category": "Policy",
             "editorial_significance": "high",
             "priority_score": 91.5,
@@ -2056,10 +2219,39 @@ def test_editorial_floor_and_publication_artifact() -> None:
             "why_still_relevant": "A material development occurred today.",
             "selection_reason": "private editorial reasoning",
         }
+        stories = [fresh_story, ongoing_story]
+        standfirst = fresh_story["summary"]
+        story_fingerprint = copy_module.standfirst_story_fingerprint(stories)
+        standfirst_inputs = runtime.phase_inputs(
+            "standfirst",
+            topic=catalog.TOPICS["world"],
+            upstream={"stories": runtime.canonical_fingerprint(stories)},
+            policy={"prompt_version": catalog.STANDFIRST_PROMPT_VERSION},
+        )
+        standfirst_state = runtime.WorkflowState(
+            run_dir, runtime.WORKFLOW_NAME, run_id=run_dir.name
+        )
+        standfirst_state.begin_phase(
+            "standfirst",
+            inputs=standfirst_inputs,
+            artifact_path=run_dir / "07-standfirst.json",
+            schema_version=catalog.STANDFIRST_PROMPT_VERSION,
+        )
+        standfirst_state.complete_json(
+            "standfirst",
+            {
+                "prompt_version": catalog.STANDFIRST_PROMPT_VERSION,
+                "story_fingerprint": story_fingerprint,
+                "standfirst": standfirst,
+                "status": "fixture",
+                "model": "",
+                "errors": [],
+            },
+        )
 
-        with patch("digest_runner.subprocess.run") as subprocess_run:
-            publication_path = digest.phase_8_archive(
-                digest.TOPICS["world"],
+        with patch("daily_news.runtime.subprocess.run") as subprocess_run:
+            publication_path = archive.phase_8_archive(
+                catalog.TOPICS["world"],
                 "<html>archive</html>",
                 {"stories": []},
                 run_dir,
@@ -2073,7 +2265,7 @@ def test_editorial_floor_and_publication_artifact() -> None:
         publication = json.loads(publication_path.read_text())
         check(publication["slug"] == "world", publication)
         check(publication["schema_version"] == 2, publication)
-        check(publication["standfirst"].startswith("Two verified"), publication["standfirst"])
+        check(publication["standfirst"] == standfirst, publication["standfirst"])
         check(len(publication["fresh"]) + len(publication["ongoing"]) == 2, publication)
         check("candidate_id" not in publication["fresh"][0], publication["fresh"][0])
         check("selection_reason" not in publication["ongoing"][0], publication["ongoing"][0])
@@ -2087,15 +2279,15 @@ def test_listing_urls_rejected() -> None:
     world-digest ongoing entries on 08-20 and 08-21 were the same two Guardian
     .../all pages, which fetch as the section listing, not an article)."""
     listing = "https://www.theguardian.com/technology/2026/aug/18/all"
-    check(digest._is_listing_url(listing), listing)
-    check(digest._is_listing_url(listing + "?utm_source=x"), "query-suffixed listing")
-    check(not digest._is_listing_url("https://www.theguardian.com/world/article"),
+    check(contracts.is_listing_url(listing), listing)
+    check(contracts.is_listing_url(listing + "?utm_source=x"), "query-suffixed listing")
+    check(not contracts.is_listing_url("https://www.theguardian.com/world/article"),
           "normal article flagged")
-    check(not digest._is_listing_url("https://example.com/all-about-x"),
+    check(not contracts.is_listing_url("https://example.com/all-about-x"),
           "prefix segment flagged")
 
     fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    candidates, _ = digest._prepare_editorial_candidates([
+    candidates, _ = editorial.prepare_editorial_candidates([
         {
             "title": "OpenAI listing page",
             "url": listing,
@@ -2136,7 +2328,7 @@ def test_listing_urls_rejected() -> None:
             "status": "active",
         }],
     }
-    validated, warnings = digest._validate_editorial_proposal(
+    validated, warnings = editorial.validate_editorial_proposal(
         proposal, candidates, [tracker_listing],
         {"stories": [tracker_listing]}, set(),
     )
@@ -2150,7 +2342,7 @@ def test_listing_urls_rejected() -> None:
     floor_proposal = {
         "selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []
     }
-    validated, _ = digest._validate_editorial_proposal(
+    validated, _ = editorial.validate_editorial_proposal(
         floor_proposal, candidates, [tracker_listing],
         {"stories": [tracker_listing]}, set(),
     )
@@ -2164,7 +2356,7 @@ def test_stub_retry_preserves_failed_attempt_artifacts() -> None:
         names = ["01-research-raw.json", "03-urls-ranked.json", "06-curated.json"]
         for name in names:
             (run_dir / name).write_text(json.dumps({"attempt": 1, "name": name}))
-        digest._archive_stub_attempt(run_dir)
+        archive.archive_stub_attempt(run_dir)
         archived = sorted(p.name for p in run_dir.glob("stub-attempt-*/*.json"))
         check(archived == names, f"archived={archived}")
         check(not list(run_dir.glob("0*-*.json")), "failed attempt artifacts not preserved")
@@ -2180,7 +2372,7 @@ def test_stub_attempts_cleaned_after_success() -> None:
         (stub / "01-research-raw.json").write_text("{}")
         keep = run_dir / "06-curated.json"
         keep.write_text("{}")
-        digest._cleanup_stub_attempts(run_dir)
+        archive.cleanup_stub_attempts(run_dir)
         check(not stub.exists(), "stub-attempt dir not removed")
         check(keep.exists(), "final-run artifact was removed")
 
@@ -2191,14 +2383,14 @@ def test_asset_cdn_urls_rejected() -> None:
     (digest-quality audit 2026-08-24: research invented assets.theregister.com
     links that 405'd and resurfaced in the tracker for five days)."""
     cdn = "https://assets.theregister.com/2026/08/19/20262/?td=keepreading&utm_source=openai"
-    check(digest._is_asset_cdn_url(cdn), cdn)
-    check(digest._is_asset_cdn_url(cdn + "?x=1"), "query-suffixed asset CDN")
-    check(not digest._is_asset_cdn_url(
+    check(contracts.is_asset_cdn_url(cdn), cdn)
+    check(contracts.is_asset_cdn_url(cdn + "?x=1"), "query-suffixed asset CDN")
+    check(not contracts.is_asset_cdn_url(
         "https://www.theregister.com/systems/2026/08/19/story/1"),
         "article host flagged")
 
     fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    candidates, _ = digest._prepare_editorial_candidates([
+    candidates, _ = editorial.prepare_editorial_candidates([
         {
             "title": "Baidu chips",
             "url": cdn,
@@ -2239,7 +2431,7 @@ def test_asset_cdn_urls_rejected() -> None:
             "status": "active",
         }],
     }
-    validated, warnings = digest._validate_editorial_proposal(
+    validated, warnings = editorial.validate_editorial_proposal(
         proposal, candidates, [tracker_cdn],
         {"stories": [tracker_cdn]}, set(),
     )
@@ -2253,7 +2445,7 @@ def test_asset_cdn_urls_rejected() -> None:
     floor_proposal = {
         "selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []
     }
-    validated, _ = digest._validate_editorial_proposal(
+    validated, _ = editorial.validate_editorial_proposal(
         floor_proposal, candidates, [tracker_cdn],
         {"stories": [tracker_cdn]}, set(),
     )
@@ -2287,17 +2479,17 @@ def test_proxy_5xx_retry_with_backoff() -> None:
             return FakeResponse(503)
         return FakeResponse(200, {"choices": [{"message": {"content": "reviewed ok"}}]})
 
-    with patch("digest_runner.requests.post", side_effect=fake_post), \
-         patch("digest_runner._detect_model_provider",
+    with patch("daily_news.runtime.requests.post", side_effect=fake_post), \
+         patch("daily_news.runtime._detect_model_provider",
                return_value={"provider": "fake",
                              "chat_url": "http://proxy.test/v1/chat/completions"}), \
-         patch("digest_runner.time.sleep", side_effect=lambda s: sleeps.append(s)):
-        content = digest._call_llm_proxy("system", "user", model="mimo-v2.5")
+         patch("daily_news.runtime.time.sleep", side_effect=lambda s: sleeps.append(s)):
+        content = runtime._call_llm_proxy("system", "user", model="mimo-v2.5")
         check(content == "reviewed ok", content)
         check(len(calls) == 3, f"503 was not retried: {len(calls)} calls")
         check(len(sleeps) == 2, f"backoff sleeps={sleeps}")
-        check(sleeps == [digest.PROXY_5XX_BACKOFF_SECONDS,
-                         digest.PROXY_5XX_BACKOFF_SECONDS * 2], sleeps)
+        check(sleeps == [runtime.PROXY_5XX_BACKOFF_SECONDS,
+                         runtime.PROXY_5XX_BACKOFF_SECONDS * 2], sleeps)
 
     # Exhausted 5xx retries still propagate so the stage-level fallback can act.
     calls.clear()
@@ -2305,19 +2497,19 @@ def test_proxy_5xx_retry_with_backoff() -> None:
         calls.append(url)
         return FakeResponse(503)
 
-    with patch("digest_runner.requests.post",
+    with patch("daily_news.runtime.requests.post",
                side_effect=always_503), \
-         patch("digest_runner._detect_model_provider",
+         patch("daily_news.runtime._detect_model_provider",
                return_value={"provider": "fake",
                              "chat_url": "http://proxy.test/v1/chat/completions"}), \
-         patch("digest_runner.time.sleep"):
+         patch("daily_news.runtime.time.sleep"):
         raised = False
         try:
-            digest._call_llm_proxy("system", "user", model="mimo-v2.5")
+            runtime._call_llm_proxy("system", "user", model="mimo-v2.5")
         except requests.HTTPError:
             raised = True
         check(raised, "exhausted 503 did not raise")
-        check(len(calls) == digest.PROXY_5XX_RETRIES + 1,
+        check(len(calls) == runtime.PROXY_5XX_RETRIES + 1,
               f"503 retried {len(calls)} times")
 
 
@@ -2331,13 +2523,17 @@ def main() -> None:
         test_article_cache_contract,
         test_cross_topic_dedup_precedes_fetch_queue,
         test_cross_topic_same_event_referenced_url_dedup,
+        test_rank_resume_fingerprint_includes_cross_topic_urls,
         test_phase_two_cross_day_dedup_window_contract,
         test_phase_two_rejects_unvalidated_legacy_followup,
         test_runtime_preflight_fails_closed_on_missing_symbol,
+        test_phase_inputs_include_actual_code_hashes,
+        test_empty_phase_has_explicit_durable_outcome,
         test_attention_phase_persists_durable_observations,
         test_phase_three_uses_product_priority,
         test_phase_four_concurrency_and_shared_cache,
         test_phase_five_backfills_date_confirmed_from_date_published,
+        test_cached_curation_regenerates_referenced_url_sidecar,
         test_phase_six_backfills_missing_date_confirmed_on_curated_fresh,
         test_editorial_validation_and_state_application,
         test_editorial_critic_patch_contract,
