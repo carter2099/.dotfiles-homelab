@@ -225,7 +225,7 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check("<h1>Front Page</h1>" in front_page, front_page)
         check("Priority combines editorial consequence" not in front_page, front_page)
         check("<span>Updated daily.</span>" in front_page, front_page)
-        check("/assets/news.css?v=5" in front_page, front_page)
+        check("/assets/news.css?v=6" in front_page, front_page)
         for key in news.TOPIC_ORDER:
             marker = news.TOPICS[key]["web_title"]
             expected = (

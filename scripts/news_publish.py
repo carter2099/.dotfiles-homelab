@@ -34,7 +34,7 @@ NEWS_DIR = DIGESTS_DIR / "news"
 PUBLICATIONS_DIR = NEWS_DIR / "publications"
 RELEASES_DIR = NEWS_DIR / "releases"
 CURRENT_SITE = NEWS_DIR / "current"
-ASSET_VERSION = 5
+ASSET_VERSION = 6
 ASSET_DIR = HOME / "news" / "assets"
 BASE_URL = "https://news.carter2099.com"
 SUMMARY_RECIPIENT = "carter2099@pm.me"
@@ -703,27 +703,28 @@ def render_front_page(
 
     section_html = []
     lead_url = _safe_url(lead.get("url")) if lead else ""
+    rendered_sections = 0
     for section in sections:
         stories = [
             story for story in section["stories"]
             if _safe_url(story.get("url")) != lead_url
         ]
-        if stories:
-            cards = "".join(
-                _render_story(
-                    story,
-                    ongoing=bool(story.get("_ongoing")),
-                    section_title=section["title"],
-                )
-                for story in stories
+        if not stories:
+            continue
+        rendered_sections += 1
+        cards = "".join(
+            _render_story(
+                story,
+                ongoing=bool(story.get("_ongoing")),
+                section_title=section["title"],
             )
-        else:
-            cards = '<p class="front-section-reference">Lead story above.</p>'
+            for story in stories
+        )
         section_html.append(
             f'<section class="front-section" aria-labelledby="front-{html.escape(section["slug"], quote=True)}">'
             f'<div class="front-section-heading"><h2 id="front-{html.escape(section["slug"], quote=True)}">'
             f'<a href="/{issue_date}/{html.escape(section["slug"], quote=True)}/">'
-            f'{html.escape(section["title"])}</a></h2><span>Top coverage</span></div>'
+            f'{html.escape(section["title"])}</a></h2></div>'
             f'<div class="front-story-list">{cards}</div></section>'
         )
 
@@ -767,7 +768,7 @@ def render_front_page(
   <div class="masthead shell">
     <p class="eyebrow">{html.escape(_edition_date(issue_date))}</p>
     <h1>Front Page</h1>
-    <p>{len(sections)} sections · {selected_count} top stories</p>
+    <p>{rendered_sections} sections · {selected_count} top stories</p>
   </div>
   <nav class="category-nav" aria-label="News categories"><div class="shell">
     {_category_nav(issue_date, "front-page")}

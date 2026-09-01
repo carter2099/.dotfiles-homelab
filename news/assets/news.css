@@ -429,13 +429,6 @@ main.shell {
   color: var(--accent);
 }
 
-.front-section-heading span {
-  color: var(--muted);
-  font: 700 0.66rem/1.2 var(--sans);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .front-story-list > .story {
   padding: 0 0 24px;
 }
@@ -448,12 +441,6 @@ main.shell {
 .front-story-list .story-title {
   font-size: clamp(1.35rem, 2.25vw, 1.8rem);
   line-height: 1.14;
-}
-
-.front-section-reference {
-  margin: 0;
-  color: var(--muted);
-  font: italic 1rem/1.5 var(--serif);
 }
 
 .edition-pagination {
