@@ -3564,6 +3564,21 @@ def _model_attempts(*models: str) -> list[tuple[str, str]]:
     return attempts
 
 
+def _normalize_critic_verdict(verdict: object) -> object:
+    """Canonicalize critic verdict strings. Models occasionally phrase the
+    approve-with-changes verdict as 'approve_with_these_changes' or with
+    spaces/case variants; those are semantically valid (digest-quality audit
+    2026-08-31: mimo-v2.5 returned 'approve_with_these_changes', which failed
+    the strict parse and degraded the whole review to unavailable). Unknown
+    strings pass through unchanged and still fail closed at the call site."""
+    if not isinstance(verdict, str):
+        return verdict
+    normalized = " ".join(verdict.strip().lower().split()).replace(" ", "_")
+    if normalized == "approve_with_these_changes":
+        return "approve_with_changes"
+    return normalized
+
+
 def phase_6_curate(
     topic: dict,
     summaries: list[dict],
@@ -3775,10 +3790,12 @@ def phase_6_curate(
         critic_models = (MODEL_REVIEWER, MODEL_FALLBACK)
         critic_rejected = False
         for requested_model, effective_model in _model_attempts(*critic_models):
-            # Retry the primary critic once before falling back to a weaker model
-            # (a transient proxy 500 degraded review on 2026-08-11); an
-            # authoritative reject is not retried.
-            attempts = 2 if effective_model == _effective_model(MODEL_REVIEWER) else 1
+            # Retry each critic model once: the primary against a transient
+            # proxy 500 (degraded review on 2026-08-11) and the fallback
+            # against the same class of error (digest-quality audit 2026-08-31:
+            # deepseek-v4-flash 500 + read timeout left the fallback a single
+            # shot). An authoritative reject is not retried.
+            attempts = 2
             for _ in range(attempts):
                 try:
                     raw = _call_llm_proxy(
@@ -3789,9 +3806,10 @@ def phase_6_curate(
                     if not isinstance(parsed_review, dict):
                         raise ValueError("critic output must be a JSON object")
                     review_result = parsed_review
-                    verdict = parsed_review.get("verdict")
+                    verdict = _normalize_critic_verdict(parsed_review.get("verdict"))
                     if verdict not in ("approve", "approve_with_changes", "reject"):
                         raise ValueError(f"unknown critic verdict {verdict!r}")
+                    parsed_review["verdict"] = verdict
                     if verdict == "reject":
                         critic_rejected = True
                         raise ValueError("critic rejected the editorial proposal")

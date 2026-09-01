@@ -1416,6 +1416,77 @@ def test_editorial_critic_retries_primary_after_transient_error() -> None:
         check(len(review_artifact["errors"]) == 1, review_artifact["errors"])
 
 
+def test_critic_fallback_verdict_spelling_normalized() -> None:
+    """A semantically valid but non-canonical fallback critic verdict
+    ('approve_with_these_changes') must not degrade review to unavailable
+    (digest-quality audit 2026-08-31: world shipped review_status=unavailable
+    because mimo-v2.5's verdict failed the strict parse)."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "world" / "2026-08-31"
+        run_dir.mkdir(parents=True)
+        candidates, _, tracker = editorial_fixture()
+        summaries = [
+            {key: value for key, value in candidate.items() if key != "candidate_id"}
+            for candidate in candidates
+        ]
+        selected_id = candidates[0]["candidate_id"]
+        proposal = {
+            "selected_fresh": [{
+                "candidate_id": selected_id,
+                "rank": 1,
+                "editorial_summary": "Reviewed factual summary.",
+                "selection_reason": "Highest product priority.",
+                "related_story_url": None,
+            }],
+            "selected_ongoing": [],
+            "story_state_proposals": [],
+            "rejected": [],
+            "gaps": "",
+            "balance_summary": "One lead story.",
+        }
+        responses: list[object] = [
+            json.dumps(proposal),
+            RuntimeError("deepseek-v4-flash: 500 Server Error: Internal Server Error for url: http://localhost:8082/v1/chat/completions"),
+            RuntimeError("deepseek-v4-flash: HTTPConnectionPool(host='localhost', port=8082): Read timed out. (read timeout=300)"),
+            RuntimeError("mimo-v2.5: 500 Server Error: Internal Server Error for url: http://localhost:8082/v1/chat/completions"),
+            json.dumps({"verdict": "approve_with_these_changes", "changes": [], "notes": "Approved."}),
+        ]
+
+        def fake_call(*_: object, **__: object) -> str:
+            value = responses.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return str(value)
+
+        with patch.object(digest, "DIGESTS_DIR", root), patch.object(
+            digest, "_call_llm_proxy", side_effect=fake_call
+        ):
+            fresh, _, _ = digest.phase_6_curate(
+                digest.TOPICS["world"], summaries, [], tracker, run_dir
+            )
+        check(len(fresh) == 1, (fresh,))
+        artifact = json.loads((run_dir / "06-curated.json").read_text())
+        check(
+            artifact["editorial"]["review_model"] == digest.MODEL_FALLBACK,
+            artifact,
+        )
+        check(artifact["editorial"]["review_status"] == "reviewed", artifact)
+        check(not responses, f"unused model responses: {responses!r}")
+        review_artifact = json.loads(
+            (run_dir / "06b-editorial-review.json").read_text()
+        )
+        check(
+            review_artifact["review"]["verdict"] == "approve_with_changes",
+            review_artifact,
+        )
+        check(len(review_artifact["errors"]) == 3, review_artifact["errors"])
+        check(
+            all("unknown critic verdict" not in error for error in review_artifact["errors"]),
+            review_artifact["errors"],
+        )
+
+
 def test_critic_rejection_fails_closed() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -2281,6 +2352,7 @@ def main() -> None:
         test_stub_retry_preserves_failed_attempt_artifacts,
         test_editorial_proposal_retries_primary_before_fallback,
         test_editorial_critic_retries_primary_after_transient_error,
+        test_critic_fallback_verdict_spelling_normalized,
         test_critic_rejection_fails_closed,
         test_standfirst_boundary_and_deterministic_render,
         test_tracker_updates_require_material_evidence,
