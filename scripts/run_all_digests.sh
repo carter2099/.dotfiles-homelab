@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Curate all five categories sequentially, publish the static news site, then
 # send one all-category summary email.
-# Scheduled by systemd timer (digests-daily.timer) in the 4am-8am ET window.
+# Scheduled by systemd timer (digests-daily.timer) beginning at 2am ET.
 #
 # Topic curation stays sequential; independent work inside a topic is bounded.
 

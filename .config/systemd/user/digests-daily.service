@@ -1,7 +1,7 @@
 [Unit]
 Description=Curate and publish the daily news edition
 Wants=network-online.target
-After=network-online.target
+After=network-online.target homelab-steward.service
 
 [Service]
 Type=oneshot

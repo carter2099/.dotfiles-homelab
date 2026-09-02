@@ -1,8 +1,8 @@
 [Unit]
-Description=Publish Daily News at 4am ET (8am UTC)
+Description=Publish Daily News at 02:00 America/New_York (2am ET)
 
 [Timer]
-OnCalendar=*-*-* 08:00:00
+OnCalendar=*-*-* 02:00:00 America/New_York
 Persistent=true
 
 [Install]
