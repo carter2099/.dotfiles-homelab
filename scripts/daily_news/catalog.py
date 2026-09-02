@@ -38,13 +38,13 @@ HTML_FETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (homelab Daily News; link collector)",
 }
 
-_REFERENCED_URL_SKIP_HOSTS = {
+REFERENCED_URL_SKIP_HOSTS = {
     "twitter.com", "x.com", "facebook.com", "instagram.com", "linkedin.com",
     "reddit.com", "threads.net", "youtube.com", "youtu.be", "tiktok.com",
     "mstdn.social", "bsky.app",
 }
 
-_REFERENCED_URL_SKIP_SEGMENTS = {
+REFERENCED_URL_SKIP_SEGMENTS = {
     "about", "contact", "privacy", "terms", "terms-of-service", "terms-of-use",
     "login", "log-in", "signup", "sign-up", "subscribe", "newsletter",
     "feed", "rss", "sitemap", "search", "press", "advertise", "careers",

@@ -25,6 +25,8 @@ from .catalog import (
     MIN_DEVELOPMENT_DAYS,
     PRUNE_AFTER_DAYS,
     REFERENCED_URLS_SCHEMA_VERSION,
+    REFERENCED_URL_SKIP_HOSTS,
+    REFERENCED_URL_SKIP_SEGMENTS,
     REFERENCED_URL_TIMEOUT,
     RESURFACE_CAP_DAYS,
     TOPICS,
@@ -211,14 +213,14 @@ def collect_referenced_urls(page_url: str) -> list[str]:
             host = host[4:]
         if not host or host == page_host:
             continue
-        if host in _REFERENCED_URL_SKIP_HOSTS:
+        if host in REFERENCED_URL_SKIP_HOSTS:
             continue
         if is_listing_url(absolute) or is_asset_cdn_url(absolute):
             continue
         segments = [s for s in parts.path.strip("/").split("/") if s]
         if not segments or not any(re.search(r"[a-zA-Z]", s) for s in segments):
             continue
-        if any(s.lower() in _REFERENCED_URL_SKIP_SEGMENTS for s in segments):
+        if any(s.lower() in REFERENCED_URL_SKIP_SEGMENTS for s in segments):
             continue
         normalized = normalize_url(absolute)
         if not normalized or normalized in seen:

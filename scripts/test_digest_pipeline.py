@@ -42,6 +42,30 @@ def test_url_normalization() -> None:
     )
     check(normalized == "example.com/Case-Sensitive?a=1&b=2", normalized)
 
+def test_referenced_url_collection_uses_catalog_filters() -> None:
+    class FakeResponse:
+        text = """
+        <a href="/same-site-story">same site</a>
+        <a href="https://twitter.com/example/status/1">social</a>
+        <a href="https://source.example/privacy">utility</a>
+        <a href="https://source.example/news/verified-story?utm_source=page">source</a>
+        """
+        content = text.encode()
+
+        def raise_for_status(self) -> None:
+            return None
+
+    with patch("daily_news.contracts.requests.get", return_value=FakeResponse()):
+        referenced = contracts.collect_referenced_urls(
+            "https://publisher.example/articles/primary"
+        )
+
+    check(
+        referenced == ["source.example/news/verified-story"],
+        f"referenced URLs were not filtered: {referenced!r}",
+    )
+
+
 
 def test_search_health_uses_fresh_news_path() -> None:
     """Health must exercise the time-filtered news path used for discovery."""
@@ -2576,6 +2600,7 @@ def main() -> None:
     tests = [
         test_url_normalization,
         test_search_health_uses_fresh_news_path,
+        test_referenced_url_collection_uses_catalog_filters,
         test_tool_omp_uses_digest_specific_config,
         test_research_prompts_do_not_request_article_reads,
         test_test_mode_isolates_mutable_shared_state,
