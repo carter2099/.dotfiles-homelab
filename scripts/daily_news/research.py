@@ -604,6 +604,7 @@ def phase_2b_attention(
     archive_path = runtime.ATTENTION_ARCHIVE_DIR / issue_date / f"{topic['web_slug']}.json"
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     runtime.atomic_write_json(archive_path, attention_artifact)
+    runtime.check_gdelt_health(attention_artifact, label=f"attention-{topic['web_slug']}")
 
     if runtime.ATTENTION_CACHE_DIR.exists():
         cutoff = time.time() - 48 * 3600

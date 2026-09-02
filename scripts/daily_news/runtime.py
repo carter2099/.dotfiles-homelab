@@ -185,14 +185,21 @@ SEARXNG_URL = "http://localhost:8080"
 
 HEALTH_LOG_PATH = DIGESTS_DIR / ".search-health.log"
 
+GDELT_HEALTH_LOG_PATH = DIGESTS_DIR / ".gdelt-health.log"
+
 MAX_ENGINE_ERRORS_BEFORE_WARN = 100  # per-engine errors observed in 1h
 
 MIN_WORKING_ENGINES = 2               # minimum engines returning results
 
+# GDELT attention monitor thresholds (see check_gdelt_health)
+GDELT_MIN_AVAILABILITY = 0.6          # provider responded >= 60% of observations
+GDELT_MIN_HIT_RATE = 0.3              # queries matched coverage >= 30% of observations
+GDELT_HEALTH_WINDOW_RUNS = 5          # records considered for sustained-degradation judgment
+
 def configure_test_mode(test_root: Path | None = None) -> None:
     """Route every mutable shared cache and monitor artifact under the test root."""
     global TEST_MODE, TEST_ROOT, ARTICLE_CACHE_DIR, ATTENTION_CACHE_DIR
-    global ATTENTION_ARCHIVE_DIR, HEALTH_LOG_PATH
+    global ATTENTION_ARCHIVE_DIR, HEALTH_LOG_PATH, GDELT_HEALTH_LOG_PATH
 
     TEST_MODE = True
     root = test_root or DIGESTS_DIR / "test"
@@ -201,6 +208,7 @@ def configure_test_mode(test_root: Path | None = None) -> None:
     ATTENTION_CACHE_DIR = root / ".attention-cache"
     ATTENTION_ARCHIVE_DIR = root / "news" / "attention"
     HEALTH_LOG_PATH = root / ".search-health.log"
+    GDELT_HEALTH_LOG_PATH = root / ".gdelt-health.log"
 
 def check_search_health(label: str = "") -> dict[str, Any]:
     """Check the fresh-news SearXNG fallback without gating the primary provider.
@@ -299,11 +307,125 @@ def check_search_health(label: str = "") -> dict[str, Any]:
 
     # 6. Print summary
     emoji = {"ok": "✓", "warn": "⚠"}.get(status["recommendation"], "?")
-    print(f"  [health:{label}] {emoji} {status['results']} results from "
-          f"{status['engines_working']} | "
-          f"{len(status['engines_suspended'])} suspended | "
-          f"{status.get('recent_errors', '?')} errors/1h | "
-          f"rec: {status['recommendation']}")
+def check_gdelt_health(
+    attention_artifact: dict[str, Any],
+    label: str = "attention",
+) -> dict[str, Any]:
+    """Record GDELT API availability and query hit-rate for one attention run.
+
+    Unavailable attention already falls back to editorial-only priority (per
+    digest spec), so a degraded provider never blocks publication — this
+    monitor exists to surface sustained degradation so a provider
+    fallback/retry policy can be considered. Appends one JSON line per run to
+    GDELT_HEALTH_LOG_PATH and judges the rolling window (current record plus
+    the GDELT_HEALTH_WINDOW_RUNS - 1 most recent prior records).
+
+    Returns:
+        {
+            "ok": True/False,
+            "recommendation": "ok" | "warn",
+            "requests": int, "cache_hits": int,
+            "available": int, "unavailable": int,
+            "no_matches": int,
+            "availability_rate": float | None,
+            "hit_rate": float | None,
+            "window_availability": float | None,
+            "window_hit_rate": float | None,
+            "label": str, "provider": str, "timestamp": str,
+        }
+    """
+    available = int(attention_artifact.get("available") or 0)
+    unavailable = int(attention_artifact.get("unavailable") or 0)
+    total = available + unavailable
+    observations = attention_artifact.get("observations") or []
+    ok_count = sum(
+        1 for observation in observations
+        if (observation.get("raw") or {}).get("status") == "ok"
+    )
+    no_matches = (available - ok_count) if observations else None
+    availability_rate = (available / total) if total else None
+    hit_rate = (ok_count / total) if total and observations else None
+
+    status: dict[str, Any] = {
+        "ok": True,
+        "recommendation": "ok",
+        "kind": "gdelt",
+        "provider": "GDELT DOC 2.0",
+        "label": label,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "requests": int(attention_artifact.get("requests") or 0),
+        "cache_hits": int(attention_artifact.get("cache_hits") or 0),
+        "available": available,
+        "unavailable": unavailable,
+        "no_matches": no_matches,
+        "availability_rate": availability_rate,
+        "hit_rate": hit_rate,
+        "window_availability": None,
+        "window_hit_rate": None,
+    }
+
+    window_availability: list[float] = []
+    window_hit_rate: list[float] = []
+    if availability_rate is not None:
+        window_availability.append(availability_rate)
+    if hit_rate is not None:
+        window_hit_rate.append(hit_rate)
+
+    try:
+        if GDELT_HEALTH_LOG_PATH.exists():
+            lines = GDELT_HEALTH_LOG_PATH.read_text().splitlines()
+            lines = lines[-(GDELT_HEALTH_WINDOW_RUNS - 1):]
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                if record.get("kind") != "gdelt":
+                    continue
+                if isinstance(record.get("availability_rate"), (int, float)):
+                    window_availability.append(float(record["availability_rate"]))
+                if isinstance(record.get("hit_rate"), (int, float)):
+                    window_hit_rate.append(float(record["hit_rate"]))
+    except Exception:
+        pass
+
+    if window_availability:
+        status["window_availability"] = round(
+            sum(window_availability) / len(window_availability), 3
+        )
+    if window_hit_rate:
+        status["window_hit_rate"] = round(
+            sum(window_hit_rate) / len(window_hit_rate), 3
+        )
+
+    sustained_availability = (
+        status["window_availability"] is not None
+        and status["window_availability"] < GDELT_MIN_AVAILABILITY
+    )
+    sustained_hit_rate = (
+        status["window_hit_rate"] is not None
+        and status["window_hit_rate"] < GDELT_MIN_HIT_RATE
+    )
+    if sustained_availability or sustained_hit_rate:
+        status["recommendation"] = "warn"
+        status["ok"] = False
+        status["degradation"] = {
+            "availability": sustained_availability,
+            "hit_rate": sustained_hit_rate,
+        }
+
+    try:
+        with open(GDELT_HEALTH_LOG_PATH, "a") as f:
+            f.write(json.dumps(status) + "\n")
+    except Exception:
+        pass
+
+    print(
+        f"  [gdelt:{label}] {'✓' if status['ok'] else '⚠'} "
+        f"{available} available / {unavailable} unavailable, "
+        f"hit-rate {hit_rate if hit_rate is not None else 'n/a'}, "
+        f"rec: {status['recommendation']}"
+    )
 
     return status
 

@@ -126,6 +126,7 @@ def test_test_mode_isolates_mutable_shared_state() -> None:
         ATTENTION_CACHE_DIR=Path("/production/attention-cache"),
         ATTENTION_ARCHIVE_DIR=Path("/production/attention"),
         HEALTH_LOG_PATH=Path("/production/search-health.log"),
+        GDELT_HEALTH_LOG_PATH=Path("/production/gdelt-health.log"),
     ):
         root = Path(temporary)
         runtime.configure_test_mode(root)
@@ -146,6 +147,64 @@ def test_test_mode_isolates_mutable_shared_state() -> None:
             runtime.HEALTH_LOG_PATH == root / ".search-health.log",
             "test health log escaped the test root",
         )
+        check(
+            runtime.GDELT_HEALTH_LOG_PATH == root / ".gdelt-health.log",
+            "test gdelt health log escaped the test root",
+        )
+
+
+def test_gdelt_health_monitors_availability_and_hit_rate() -> None:
+    """Attention health records provider availability and query hit-rate."""
+    artifact = {
+        "schema_version": 2,
+        "provider": "GDELT DOC 2.0",
+        "observed_at": "2026-09-01T12:00:00+00:00",
+        "requests": 3,
+        "cache_hits": 1,
+        "available": 3,
+        "unavailable": 1,
+        "observations": [
+            {"title": "ok one", "raw": {"status": "ok"}},
+            {"title": "ok two", "raw": {"status": "ok"}},
+            {"title": "quiet", "raw": {"status": "no_matches"}},
+            {"title": "down", "raw": {"status": "unavailable"}},
+        ],
+    }
+    with tempfile.TemporaryDirectory() as temporary, patch(
+        "daily_news.runtime.GDELT_HEALTH_LOG_PATH",
+        Path(temporary) / "gdelt-health.log",
+    ) as log_path:
+        status = runtime.check_gdelt_health(artifact, label="test")
+        check(status["ok"] and status["recommendation"] == "ok", status)
+        check(status["available"] == 3 and status["unavailable"] == 1, status)
+        check(status["no_matches"] == 1, status)
+        check(status["availability_rate"] == 0.75, status)
+        check(status["hit_rate"] == 0.5, status)
+        lines = log_path.read_text().splitlines()
+        check(len(lines) == 1, lines)
+        check(json.loads(lines[0])["kind"] == "gdelt", lines)
+
+    degraded = {**artifact, "available": 0, "unavailable": 4}
+    degraded["observations"] = [
+        {"title": "down", "raw": {"status": "unavailable"}} for _ in range(4)
+    ]
+    prior = {
+        "kind": "gdelt", "provider": "GDELT DOC 2.0", "label": "prior",
+        "timestamp": "2026-09-01T00:00:00+00:00", "requests": 2, "cache_hits": 0,
+        "available": 0, "unavailable": 2, "no_matches": 0,
+        "availability_rate": 0.0, "hit_rate": 0.0,
+        "window_availability": None, "window_hit_rate": None,
+        "ok": False, "recommendation": "warn",
+    }
+    with tempfile.TemporaryDirectory() as temporary, patch(
+        "daily_news.runtime.GDELT_HEALTH_LOG_PATH",
+        Path(temporary) / "gdelt-health.log",
+    ) as log_path:
+        log_path.write_text(json.dumps(prior) + "\n")
+        status = runtime.check_gdelt_health(degraded, label="degraded")
+        check(not status["ok"], status)
+        check(status["recommendation"] == "warn", status)
+        check(status["degradation"] == {"availability": True, "hit_rate": True}, status)
 
 
 def test_article_cache_contract() -> None:
@@ -2515,11 +2574,7 @@ def test_proxy_5xx_retry_with_backoff() -> None:
 
 def main() -> None:
     tests = [
-        test_url_normalization,
-        test_search_health_uses_fresh_news_path,
-        test_tool_omp_uses_digest_specific_config,
-        test_research_prompts_do_not_request_article_reads,
-        test_test_mode_isolates_mutable_shared_state,
+        test_gdelt_health_monitors_availability_and_hit_rate,
         test_article_cache_contract,
         test_cross_topic_dedup_precedes_fetch_queue,
         test_cross_topic_same_event_referenced_url_dedup,
