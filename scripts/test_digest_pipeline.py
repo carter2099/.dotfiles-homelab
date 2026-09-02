@@ -2574,6 +2574,11 @@ def test_proxy_5xx_retry_with_backoff() -> None:
 
 def main() -> None:
     tests = [
+        test_url_normalization,
+        test_search_health_uses_fresh_news_path,
+        test_tool_omp_uses_digest_specific_config,
+        test_research_prompts_do_not_request_article_reads,
+        test_test_mode_isolates_mutable_shared_state,
         test_gdelt_health_monitors_availability_and_hit_rate,
         test_article_cache_contract,
         test_cross_topic_dedup_precedes_fetch_queue,

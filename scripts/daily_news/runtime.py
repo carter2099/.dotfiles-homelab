@@ -307,6 +307,15 @@ def check_search_health(label: str = "") -> dict[str, Any]:
 
     # 6. Print summary
     emoji = {"ok": "✓", "warn": "⚠"}.get(status["recommendation"], "?")
+    print(f"  [health:{label}] {emoji} {status['results']} results from "
+          f"{status['engines_working']} | "
+          f"{len(status['engines_suspended'])} suspended | "
+          f"{status.get('recent_errors', '?')} errors/1h | "
+          f"rec: {status['recommendation']}")
+
+    return status
+
+
 def check_gdelt_health(
     attention_artifact: dict[str, Any],
     label: str = "attention",
