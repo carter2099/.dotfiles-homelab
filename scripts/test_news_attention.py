@@ -11,6 +11,8 @@ from daily_news.attention import (
     canonicalize_publisher_url,
     enforce_editorial_significance,
     event_terms,
+    fetch_gdelt_attention,
+    gdelt_query,
     normalize_editorial_significance,
     priority_sort_key,
     score_attention,
@@ -20,6 +22,114 @@ from daily_news.attention import (
 def check(condition: bool, message: object) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def test_gdelt_query_uses_explicit_or_alternatives() -> None:
+    candidate = {
+        "title": "Anthropic model release",
+        "event_terms": [
+            "Claude Fable 5.1",
+            "Anthropic",
+            "Fable release",
+        ],
+    }
+    check(
+        gdelt_query(candidate)
+        == '("Claude Fable 5.1" OR Anthropic OR "Fable release")',
+        gdelt_query(candidate),
+    )
+    check(
+        gdelt_query({"title": "Nvidia unveils Rubin GPU platform"})
+        == '"Nvidia unveils Rubin GPU"',
+        "single title fallback must remain one exact phrase",
+    )
+
+
+def test_gdelt_rate_limit_honors_retry_after_and_paces_candidates() -> None:
+    now = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+    candidate = {
+        "title": "Company announces model",
+        "url": "https://example.com/model",
+        "editorial_significance": "medium",
+        "event_terms": ["Company model", "model launch"],
+    }
+
+    class FakeResponse:
+        def __init__(
+            self,
+            status_code: int,
+            payload: dict | None = None,
+            headers: dict | None = None,
+        ) -> None:
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.headers = headers or {}
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+        def json(self) -> dict:
+            return self._payload
+
+    responses = [
+        FakeResponse(429, headers={"Retry-After": "45"}),
+        FakeResponse(200, {"timeline": []}),
+    ]
+    calls: list[dict] = []
+    retry_sleeps: list[float] = []
+
+    def request_get(*_: object, **kwargs: object) -> FakeResponse:
+        calls.append(kwargs)
+        return responses.pop(0)
+
+    observation = fetch_gdelt_attention(
+        candidate,
+        now,
+        request_get=request_get,
+        sleep=retry_sleeps.append,
+    )
+    check(observation["status"] == "no_matches", observation)
+    check(len(calls) == 2, calls)
+    check(retry_sleeps == [45.0], retry_sleeps)
+    check(observation["_next_request_delay_seconds"] == 45.0, observation)
+
+    paced_candidates = [
+        {
+            "title": f"Story {index}",
+            "url": f"https://example.com/story-{index}",
+            "editorial_significance": "medium",
+            "event_terms": [f"Story {index}", f"event {index}"],
+        }
+        for index in range(3)
+    ]
+    pacing_sleeps: list[float] = []
+    paced_calls: list[str] = []
+
+    def no_matches(item: dict, observed_at: datetime) -> dict:
+        paced_calls.append(item["url"])
+        result = {
+            "status": "no_matches",
+            "provider": "GDELT DOC 2.0",
+            "query": gdelt_query(item),
+            "terms": event_terms(item),
+            "observed_at": observed_at.isoformat(),
+            "timeline": [],
+        }
+        if len(paced_calls) == 1:
+            result["_next_request_delay_seconds"] = 45.0
+        return result
+
+    with tempfile.TemporaryDirectory() as temporary:
+        score_attention(
+            paced_candidates,
+            Path(temporary),
+            now=now,
+            fetcher=no_matches,
+            sleep=pacing_sleeps.append,
+            request_interval=10.0,
+        )
+    check(pacing_sleeps == [45.0, 10.0], pacing_sleeps)
 
 
 def test_gdelt_timeline_observation_and_syndication_dedup() -> None:
@@ -327,6 +437,8 @@ def test_canonicalize_publisher_url_maps_sample_hosts_only() -> None:
 
 def main() -> None:
     tests = [
+        test_gdelt_query_uses_explicit_or_alternatives,
+        test_gdelt_rate_limit_honors_retry_after_and_paces_candidates,
         test_gdelt_timeline_observation_and_syndication_dedup,
         test_attention_and_editorial_significance_remain_separate,
         test_unavailable_attention_falls_back_to_editorial_only,

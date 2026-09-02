@@ -14,6 +14,7 @@ import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -25,8 +26,11 @@ SCHEMA_VERSION = 2
 PROVIDER = "GDELT DOC 2.0"
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 CACHE_TTL_HOURS = 6
-REQUEST_INTERVAL_SECONDS = 6.0
+REQUEST_INTERVAL_SECONDS = 10.0
 REQUEST_TIMEOUT_SECONDS = 45
+REQUEST_ATTEMPTS = 2
+RETRY_BASE_DELAY_SECONDS = 30.0
+RETRY_MAX_DELAY_SECONDS = 300.0
 
 EDITORIAL_POINTS = {
     "high": 100.0,
@@ -244,10 +248,13 @@ def event_term_source(candidate: dict[str, Any]) -> str:
 
 
 def gdelt_query(candidate: dict[str, Any]) -> str:
-    parts = []
-    for term in event_terms(candidate):
-        parts.append(f'"{term}"' if " " in term else term)
-    return " ".join(parts[:4])
+    parts = [
+        f'"{term}"' if " " in term else term
+        for term in event_terms(candidate)[:4]
+    ]
+    if len(parts) <= 1:
+        return "".join(parts)
+    return f"({' OR '.join(parts)})"
 
 
 def _parse_gdelt_time(value: Any) -> datetime | None:
@@ -439,6 +446,33 @@ def observation_from_response(
     }
 
 
+def _retry_delay_seconds(response: Any | None, attempt: int) -> float:
+    delay = min(
+        RETRY_BASE_DELAY_SECONDS * (2 ** attempt),
+        RETRY_MAX_DELAY_SECONDS,
+    )
+    headers = getattr(response, "headers", {}) if response is not None else {}
+    retry_after = _clean_text((headers or {}).get("Retry-After"))
+    if not retry_after:
+        return delay
+    try:
+        requested_delay = float(retry_after)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(retry_after)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            requested_delay = (
+                retry_at - datetime.now(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return delay
+    return min(
+        max(delay, requested_delay, 0.0),
+        RETRY_MAX_DELAY_SECONDS,
+    )
+
+
 def fetch_gdelt_attention(
     candidate: dict[str, Any],
     now: datetime | None = None,
@@ -471,9 +505,9 @@ def fetch_gdelt_attention(
         "Accept": "application/json",
     }
     errors: list[str] = []
-    for attempt in range(2):
-        if attempt:
-            sleep(12.0)
+    next_request_delay = 0.0
+    for attempt in range(REQUEST_ATTEMPTS):
+        response = None
         try:
             response = request_get(
                 GDELT_DOC_URL,
@@ -483,14 +517,25 @@ def fetch_gdelt_attention(
             )
             if response.status_code == 429 or response.status_code >= 500:
                 errors.append(f"HTTP {response.status_code}")
+                retry_delay = _retry_delay_seconds(response, attempt)
+                next_request_delay = max(next_request_delay, retry_delay)
+                if attempt + 1 < REQUEST_ATTEMPTS:
+                    sleep(retry_delay)
                 continue
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):
                 raise ValueError("GDELT response was not a JSON object")
-            return observation_from_response(candidate, payload, observed_at)
+            observation = observation_from_response(candidate, payload, observed_at)
+            if next_request_delay:
+                observation["_next_request_delay_seconds"] = next_request_delay
+            return observation
         except Exception as error:
             errors.append(" ".join(str(error).split())[:240])
+            retry_delay = _retry_delay_seconds(response, attempt)
+            next_request_delay = max(next_request_delay, retry_delay)
+            if attempt + 1 < REQUEST_ATTEMPTS:
+                sleep(retry_delay)
     return {
         "status": "unavailable",
         "provider": PROVIDER,
@@ -498,6 +543,7 @@ def fetch_gdelt_attention(
         "terms": event_terms(candidate),
         "observed_at": observed_at.isoformat(),
         "error": "; ".join(errors),
+        "_next_request_delay_seconds": next_request_delay,
     }
 
 
@@ -629,12 +675,17 @@ def score_attention(
     """Attach independent attention and final product-priority scores."""
     observed_at = now or datetime.now(timezone.utc)
     effective_fetcher = fetcher or (
-        lambda candidate, timestamp: fetch_gdelt_attention(candidate, timestamp)
+        lambda candidate, timestamp: fetch_gdelt_attention(
+            candidate,
+            timestamp,
+            sleep=sleep,
+        )
     )
     scored = [enforce_editorial_significance(copy.deepcopy(item)) for item in candidates]
     observations: list[dict[str, Any]] = []
     requested = 0
     cache_hits = 0
+    next_request_delay = request_interval
 
     for candidate in scored:
         cached = _load_cache(candidate, cache_dir, observed_at)
@@ -642,8 +693,8 @@ def score_attention(
             observation = cached
             cache_hits += 1
         else:
-            if requested and request_interval > 0:
-                sleep(request_interval)
+            if requested and next_request_delay > 0:
+                sleep(next_request_delay)
             try:
                 observation = effective_fetcher(candidate, observed_at)
             except Exception as error:
@@ -656,6 +707,13 @@ def score_attention(
                     "error": " ".join(str(error).split())[:240],
                 }
             requested += 1
+            try:
+                adaptive_delay = float(
+                    observation.pop("_next_request_delay_seconds", 0.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                adaptive_delay = 0.0
+            next_request_delay = max(request_interval, adaptive_delay)
             _save_cache(candidate, cache_dir, observation)
         observation.setdefault("term_source", event_term_source(candidate))
         observations.append(observation)
