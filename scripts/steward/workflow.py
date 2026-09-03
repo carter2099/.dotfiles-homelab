@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
+import os
 import re
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -99,25 +101,40 @@ def _code_fingerprint() -> dict[str, str]:
     return result
 
 
-def _assert_startup_fingerprint(expected: dict[str, str]) -> None:
-    """Abort rather than mixing source/policy versions within one run."""
-    current = _code_fingerprint()
-    if current == expected:
-        return
-    changed = sorted(
+def _fingerprint_changes(
+    expected: dict[str, str],
+    current: dict[str, str],
+) -> list[str]:
+    """Return fingerprint members whose path or content changed."""
+    return sorted(
         path
         for path in set(expected) | set(current)
         if expected.get(path) != current.get(path)
     )
+
+
+def _fingerprint_change_error(
+    expected: dict[str, str],
+    current: dict[str, str],
+    changed: list[str],
+) -> StartupFingerprintChanged:
     detail = ", ".join(
         f"{path}: {expected.get(path, 'missing')} -> {current.get(path, 'missing')}"
         for path in changed[:12]
     )
     if len(changed) > 12:
         detail += f", ... ({len(changed)} paths changed)"
-    raise StartupFingerprintChanged(
+    return StartupFingerprintChanged(
         f"startup source/policy fingerprint changed during run: {detail}"
     )
+
+
+def _assert_startup_fingerprint(expected: dict[str, str]) -> None:
+    """Abort rather than mixing source/policy versions within one process."""
+    current = _code_fingerprint()
+    changed = _fingerprint_changes(expected, current)
+    if changed:
+        raise _fingerprint_change_error(expected, current, changed)
 
 
 
@@ -130,10 +147,49 @@ def _phase_code_fingerprint(args: argparse.Namespace) -> dict[str, str]:
         args._startup_code_fingerprint = dict(snapshot)
     return dict(snapshot)
 
+
 def _code_fingerprint_changed(args: argparse.Namespace) -> None:
     snapshot = getattr(args, "_startup_code_fingerprint", None)
     if snapshot is not None:
         _assert_startup_fingerprint(snapshot)
+
+
+def _is_restartable_fix_source(path: str) -> bool:
+    """Whether P7b may hand this changed source to a fresh process."""
+    script_dir = Path(__file__).resolve().parent.parent
+    steward_dir = Path(__file__).resolve().parent
+    candidate = Path(path).expanduser().resolve()
+    explicit_sources = {
+        script_dir / "steward_runner.py",
+        script_dir / "workflow_state.py",
+    }
+    for value in (
+        DIGEST_SCRIPT,
+        LLAMA_CPP_UPDATE_SCRIPT,
+        getattr(report, "DIGEST_SCRIPT", None),
+        getattr(updates, "LLAMA_CPP_UPDATE_SCRIPT", None),
+    ):
+        if value is not None:
+            explicit_sources.add(Path(value).expanduser().resolve())
+    return candidate in explicit_sources or (
+        candidate.parent == steward_dir and candidate.suffix == ".py"
+    )
+
+
+def _record_restartable_fix_changes(args: argparse.Namespace) -> tuple[str, ...]:
+    """Record P7b source changes that require a clean-process continuation."""
+    expected = getattr(args, "_startup_code_fingerprint", None)
+    if expected is None:
+        return ()
+    current = _code_fingerprint()
+    changed = _fingerprint_changes(expected, current)
+    if not changed:
+        return ()
+    if any(not _is_restartable_fix_source(path) for path in changed):
+        raise _fingerprint_change_error(expected, current, changed)
+    recorded = tuple(changed)
+    args._post_fix_source_changes = recorded
+    return recorded
 
 _PHASE_ARTIFACTS = {
     "setup": "00-setup.json",
@@ -312,6 +368,7 @@ def _run_phase(
     args: argparse.Namespace,
     operation: Callable[[], Any],
     json_artifact: bool = True,
+    source_reload_boundary: bool = False,
 ) -> tuple[Any, bool]:
     """Resume only a matching succeeded state row; otherwise run atomically."""
     _code_fingerprint_changed(args)
@@ -344,7 +401,10 @@ def _run_phase(
     )
     try:
         data = operation()
-        _code_fingerprint_changed(args)
+        if source_reload_boundary:
+            _record_restartable_fix_changes(args)
+        else:
+            _code_fingerprint_changed(args)
         artifact_changed = _artifact_created_or_changed(
             artifact,
             existed=artifact_existed,
@@ -414,6 +474,148 @@ def _run_phase(
 
 
 
+def _load_completed_json_phase(
+    state: WorkflowState,
+    phase: str,
+    artifact: Path,
+) -> dict[str, Any]:
+    """Load an exact completed artifact for the post-P7b process handoff."""
+    record = state.phase_record(phase)
+    expected_path = artifact.expanduser().resolve()
+    try:
+        recorded_path = Path(str(record["artifact_path"])).expanduser().resolve()
+    except (KeyError, TypeError):
+        recorded_path = None
+    try:
+        artifact_hash = file_sha256(expected_path)
+    except OSError:
+        artifact_hash = None
+    if (
+        not record
+        or record.get("status") != "succeeded"
+        or not record.get("resume_valid")
+        or int(record.get("schema_version") or 0) != SCHEMA_VERSION
+        or recorded_path != expected_path
+        or record.get("artifact_hash") != artifact_hash
+    ):
+        raise RuntimeError(
+            f"post-fix continuation rejected incomplete or changed {phase} state"
+        )
+    try:
+        data = json.loads(expected_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"post-fix continuation could not read {phase} artifact: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"post-fix continuation requires an object artifact for {phase}"
+        )
+    return data
+
+
+def _restart_after_fixes(
+    args: argparse.Namespace,
+    run_dir: Path,
+    started: float,
+) -> None:
+    """Re-exec after an authorized P7b source change, then resume at P8."""
+    changed = tuple(getattr(args, "_post_fix_source_changes", ()))
+    if not changed:
+        return
+    entrypoint = Path(__file__).resolve().parent.parent / "steward_runner.py"
+    command = [
+        sys.executable,
+        str(entrypoint),
+        "--resume",
+        "--run-dir",
+        str(run_dir),
+        "--continue-after-fixes",
+        "--started-at",
+        repr(started),
+    ]
+    if args.dry_run:
+        command.insert(2, "--dry-run")
+    names = ", ".join(Path(path).name for path in changed)
+    print(f"[P7b] reloading changed source before reporting: {names}", flush=True)
+    sys.stderr.flush()
+    os.execv(command[0], command)
+    raise RuntimeError("post-fix source reload returned unexpectedly")
+
+
+def _finish_after_fixes(
+    state: WorkflowState,
+    args: argparse.Namespace,
+    run_dir: Path,
+    setup_data: dict[str, Any],
+    started: float,
+) -> int:
+    """Render, archive, commit, and clean up after P7b is stable."""
+    _run_phase(
+        state,
+        phase="render",
+        artifact=run_dir / _PHASE_ARTIFACTS["render"],
+        inputs=_phase_inputs(
+            "render",
+            args,
+            run_dir,
+            [
+                "01-applied.json",
+                "02-validation.json",
+                "05-queue.json",
+                "07-audit.json",
+                "07b-fixes.json",
+            ],
+        ),
+        args=args,
+        operation=lambda: report.phase_8_render_send(
+            run_dir, setup_data, dry_run=args.dry_run
+        ),
+        json_artifact=False,
+    )
+    elapsed = time.time() - started
+    _run_phase(
+        state,
+        phase="archive",
+        artifact=run_dir / _PHASE_ARTIFACTS["archive"],
+        inputs=_phase_inputs(
+            "archive",
+            args,
+            run_dir,
+            [
+                "01-applied.json",
+                "02-validation.json",
+                "05-queue.json",
+                "07-audit.json",
+                "07b-fixes.json",
+            ],
+        ),
+        args=args,
+        operation=lambda: report.phase_9_archive(run_dir, setup_data, elapsed),
+        json_artifact=False,
+    )
+    _run_phase(
+        state,
+        phase="dotfiles",
+        artifact=run_dir / _PHASE_ARTIFACTS["dotfiles"],
+        inputs=_phase_inputs("dotfiles", args, run_dir, ["summary.md"]),
+        args=args,
+        operation=lambda: dotfiles.phase_9b_dotfiles(
+            run_dir, dry_run=args.dry_run
+        ),
+    )
+
+    dep = setup_data.get("dependabot", {})
+    if dep.get("stopped") and not args.dry_run:
+        try:
+            run(["systemctl", "--user", "start", DEPENDABOT_UNIT], env=user_env())
+            print("[cleanup] dependabot-webhook restarted")
+        except Exception as error:
+            print(f"[cleanup] dependabot restart failed: {error}")
+    print(f"\nDone in {elapsed:.0f}s")
+    return 0
+
+
 def _setup_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Homelab Steward — nightly deterministic Python orchestrator"
@@ -430,6 +632,12 @@ def _setup_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--run-dir",
         help="Exact prior run directory to resume; valid only with --resume",
     )
+    parser.add_argument(
+        "--continue-after-fixes",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--started-at", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.run_dir:
         if not args.resume:
@@ -439,6 +647,13 @@ def _setup_args(argv: list[str] | None = None) -> argparse.Namespace:
         if requested.parent != base or re.fullmatch(r"\d{4}-\d{2}-\d{2}", requested.name) is None:
             parser.error(f"--run-dir must be an immediate YYYY-MM-DD child of {base}")
         args.run_dir = str(requested)
+    if args.continue_after_fixes:
+        if not args.resume or not args.run_dir or args.started_at is None:
+            parser.error(
+                "--continue-after-fixes requires --resume, --run-dir, and --started-at"
+            )
+    elif args.started_at is not None:
+        parser.error("--started-at requires --continue-after-fixes")
     return args
 
 
@@ -447,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
     # Every phase in this process must observe the same loaded source and
     # policy files.  Each phase boundary compares this fixed startup snapshot.
     args._startup_code_fingerprint = _code_fingerprint()
-    started = time.time()
+    started = args.started_at if args.started_at is not None else time.time()
     # A reboot resume must retain the original run identity across midnight.
     # The boot handoff passes --run-dir; manual same-day resumes use today's run.
     if args.run_dir:
@@ -456,6 +671,22 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = RUN_DIR_BASE / datetime.now().strftime("%Y-%m-%d")
     date_str = run_dir.name
     state = WorkflowState(run_dir, WORKFLOW_NAME, run_id=date_str)
+
+    if args.continue_after_fixes:
+        setup_data = _load_completed_json_phase(
+            state,
+            "setup",
+            run_dir / _PHASE_ARTIFACTS["setup"],
+        )
+        _load_completed_json_phase(
+            state,
+            "fixes",
+            run_dir / _PHASE_ARTIFACTS["fixes"],
+        )
+        if bool(setup_data.get("dry_run")) != bool(args.dry_run):
+            raise RuntimeError("post-fix continuation changed dry-run mode")
+        print("[resume] source reloaded; continuing at reporting boundary")
+        return _finish_after_fixes(state, args, run_dir, setup_data, started)
 
     setup_data, _ = _run_phase(
         state,
@@ -547,44 +778,10 @@ def main(argv: list[str] | None = None) -> int:
         inputs=_phase_inputs("fixes", args, run_dir, ["07-audit.json"]),
         args=args,
         operation=lambda: fixes.phase_7b_fix(run_dir, dry_run=args.dry_run),
+        source_reload_boundary=True,
     )
-    _run_phase(
-        state,
-        phase="render",
-        artifact=run_dir / _PHASE_ARTIFACTS["render"],
-        inputs=_phase_inputs("render", args, run_dir, ["01-applied.json", "02-validation.json", "05-queue.json", "07-audit.json", "07b-fixes.json"]),
-        args=args,
-        operation=lambda: report.phase_8_render_send(run_dir, setup_data, dry_run=args.dry_run),
-        json_artifact=False,
-    )
-    elapsed = time.time() - started
-    _run_phase(
-        state,
-        phase="archive",
-        artifact=run_dir / _PHASE_ARTIFACTS["archive"],
-        inputs=_phase_inputs("archive", args, run_dir, ["01-applied.json", "02-validation.json", "05-queue.json", "07-audit.json", "07b-fixes.json"]),
-        args=args,
-        operation=lambda: report.phase_9_archive(run_dir, setup_data, elapsed),
-        json_artifact=False,
-    )
-    _run_phase(
-        state,
-        phase="dotfiles",
-        artifact=run_dir / _PHASE_ARTIFACTS["dotfiles"],
-        inputs=_phase_inputs("dotfiles", args, run_dir, ["summary.md"]),
-        args=args,
-        operation=lambda: dotfiles.phase_9b_dotfiles(run_dir, dry_run=args.dry_run),
-    )
-
-    dep = setup_data.get("dependabot", {})
-    if dep.get("stopped") and not args.dry_run:
-        try:
-            run(["systemctl", "--user", "start", DEPENDABOT_UNIT], env=user_env())
-            print("[cleanup] dependabot-webhook restarted")
-        except Exception as error:
-            print(f"[cleanup] dependabot restart failed: {error}")
-    print(f"\nDone in {elapsed:.0f}s")
-    return 0
+    _restart_after_fixes(args, run_dir, started)
+    return _finish_after_fixes(state, args, run_dir, setup_data, started)
 
 
 __all__ = ["main"]

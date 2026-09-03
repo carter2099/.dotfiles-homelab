@@ -22,6 +22,23 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
             self.assertTrue(args.resume)
             self.assertEqual(args.run_dir, str(run_dir))
 
+    def test_post_fix_continuation_arguments_preserve_run_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            run_dir = base / "2026-08-31"
+            with mock.patch.object(workflow, "RUN_DIR_BASE", base):
+                args = workflow._setup_args([
+                    "--resume",
+                    "--run-dir",
+                    str(run_dir),
+                    "--continue-after-fixes",
+                    "--started-at",
+                    "1234.5",
+                ])
+            self.assertTrue(args.continue_after_fixes)
+            self.assertEqual(args.run_dir, str(run_dir))
+            self.assertEqual(args.started_at, 1234.5)
+
     def test_run_directory_requires_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
@@ -187,6 +204,109 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
                 fingerprint[str(helper)],
                 workflow.file_sha256(helper),
             )
+
+    def test_p7b_source_change_completes_before_clean_process_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            artifact = run_dir / "07b-fixes.json"
+            state = WorkflowState(run_dir, workflow.WORKFLOW_NAME, run_id="test")
+            source = str(
+                Path(workflow.__file__).resolve().parent.parent
+                / "workflow_state.py"
+            )
+            args = argparse.Namespace(
+                resume=False,
+                _startup_code_fingerprint={source: "before"},
+            )
+            with mock.patch.object(
+                workflow,
+                "_code_fingerprint",
+                side_effect=[{source: "before"}, {source: "after"}],
+            ):
+                data, resumed = workflow._run_phase(
+                    state,
+                    phase="fixes",
+                    artifact=artifact,
+                    inputs={"code_hash": "before"},
+                    args=args,
+                    operation=lambda: {"sections": []},
+                    source_reload_boundary=True,
+                )
+
+            self.assertFalse(resumed)
+            self.assertEqual(data["phase_status"], "succeeded")
+            self.assertEqual(state.phase_record("fixes")["status"], "succeeded")
+            self.assertEqual(args._post_fix_source_changes, (source,))
+            packet = workflow.json.loads(artifact.read_text())
+            self.assertNotIn("phase_failed", packet)
+
+    def test_p7b_policy_change_still_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            artifact = run_dir / "07b-fixes.json"
+            state = WorkflowState(run_dir, workflow.WORKFLOW_NAME, run_id="test")
+            policy = str(run_dir / "policy.yml")
+            args = argparse.Namespace(
+                resume=False,
+                _startup_code_fingerprint={policy: "before"},
+            )
+            with mock.patch.object(
+                workflow,
+                "_code_fingerprint",
+                side_effect=[{policy: "before"}, {policy: "after"}],
+            ):
+                with self.assertRaises(workflow.StartupFingerprintChanged):
+                    workflow._run_phase(
+                        state,
+                        phase="fixes",
+                        artifact=artifact,
+                        inputs={"code_hash": "before"},
+                        args=args,
+                        operation=lambda: {"sections": []},
+                        source_reload_boundary=True,
+                    )
+
+            self.assertEqual(state.phase_record("fixes")["status"], "failed")
+            self.assertTrue(workflow.json.loads(artifact.read_text())["phase_failed"])
+
+    def test_post_fix_handoff_requires_exact_completed_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            artifact = run_dir / "00-setup.json"
+            state = WorkflowState(run_dir, workflow.WORKFLOW_NAME, run_id="test")
+            state.begin_phase(
+                "setup",
+                inputs={"code_hash": "old"},
+                artifact_path=artifact,
+                schema_version=workflow.SCHEMA_VERSION,
+            )
+            state.complete_json("setup", {"run_dir": str(run_dir)})
+
+            self.assertEqual(
+                workflow._load_completed_json_phase(state, "setup", artifact),
+                {"run_dir": str(run_dir)},
+            )
+            artifact.write_text('{"run_dir": "tampered"}', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "changed setup state"):
+                workflow._load_completed_json_phase(state, "setup", artifact)
+
+    def test_post_fix_reload_reexecs_same_run_at_reporting_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            args = argparse.Namespace(
+                dry_run=False,
+                _post_fix_source_changes=("/home/carter/scripts/workflow_state.py",),
+            )
+            with mock.patch.object(workflow.os, "execv") as execv:
+                with self.assertRaisesRegex(RuntimeError, "returned unexpectedly"):
+                    workflow._restart_after_fixes(args, run_dir, 1234.5)
+
+            command = execv.call_args.args[1]
+            self.assertEqual(command[0], workflow.sys.executable)
+            self.assertIn("--resume", command)
+            self.assertEqual(command[command.index("--run-dir") + 1], str(run_dir))
+            self.assertIn("--continue-after-fixes", command)
+            self.assertEqual(command[command.index("--started-at") + 1], "1234.5")
 
     def test_pending_push_retries_exact_oid_and_rejects_divergence(self) -> None:
         commit = "a" * 40
