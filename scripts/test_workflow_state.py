@@ -52,6 +52,21 @@ class WorkflowStateTests(unittest.TestCase):
         payload = {"ok": True, "value": value if value is not None else "done"}
         state.complete_json("fetch", payload)
 
+    def run_record(self, state: WorkflowState) -> dict[str, Any]:
+        connection = state._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM workflow_runs
+                WHERE workflow = ? AND run_id = ?
+                """,
+                (state.workflow, state.run_id),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        return dict(row)
+
     def test_roundtrip_records_and_loads_valid_json(self) -> None:
         state = self.make_state()
         self.begin(state, schema_version=3)
@@ -209,6 +224,72 @@ class WorkflowStateTests(unittest.TestCase):
         self.assertFalse(
             state.resume_valid("fetch", inputs=self.inputs, artifact_path=self.artifact)
         )
+
+
+    def test_interrupted_phases_become_terminal_and_nonresumable(self) -> None:
+        state = self.make_state()
+        research_path = self.run_dir / "01-research.json"
+        publication_path = self.run_dir / "publication.json"
+        state.begin_phase(
+            "research",
+            inputs={"stage": "research"},
+            artifact_path=research_path,
+        )
+        state.begin_phase(
+            "archive",
+            inputs={"stage": "archive"},
+            artifact_path=publication_path,
+        )
+        state.complete_json("archive", {"published": True})
+
+        state.abort_interrupted_phases("interrupted by signal 15")
+
+        research = state.phase_record("research")
+        archive = state.phase_record("archive")
+        run = self.run_record(state)
+        self.assertEqual(research["status"], "aborted")
+        self.assertEqual(research["completion_outcome"], "aborted")
+        self.assertEqual(research["resume_valid"], 0)
+        self.assertIsNotNone(research["completed_at"])
+        self.assertEqual(archive["status"], "succeeded")
+        self.assertEqual(run["status"], "aborted")
+        self.assertEqual(run["error"], "interrupted by signal 15")
+        self.assertIsNotNone(run["completed_at"])
+
+    def test_published_run_finalization_is_idempotent_and_preserves_failures(
+        self,
+    ) -> None:
+        state = self.make_state()
+        state.begin_phase(
+            "research",
+            inputs={"stage": "research"},
+            artifact_path=self.run_dir / "01-research.json",
+        )
+        state.begin_phase(
+            "archive",
+            inputs={"stage": "archive"},
+            artifact_path=self.run_dir / "publication.json",
+        )
+        state.complete_json("archive", {"published": True})
+
+        self.assertTrue(state.finalize_published())
+        self.assertFalse(state.finalize_published())
+        self.assertEqual(state.phase_record("research")["status"], "aborted")
+        run = self.run_record(state)
+        self.assertEqual(run["status"], "succeeded")
+        self.assertIsNone(run["error"])
+        self.assertIsNotNone(run["completed_at"])
+
+        failed = self.make_state(run_id="failed-run")
+        failed.begin_phase(
+            "research",
+            inputs={"stage": "research"},
+            artifact_path=self.run_dir / "failed-research.json",
+        )
+        failed.fail_phase("research", "source validation failed")
+        self.assertFalse(failed.finalize_published())
+        self.assertEqual(self.run_record(failed)["status"], "failed")
+
 
     def test_empty_and_skipped_outcomes_require_and_record_reasons(self) -> None:
         state = self.make_state()

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sys
 import time
 import traceback
@@ -13,6 +15,8 @@ try:
     import yaml
 except ImportError:  # pragma: no cover - preflight reports dependency
     yaml = None
+
+from workflow_state import WorkflowState
 
 from . import archive, attention, catalog, contracts, editorial, research, runtime
 from .catalog import TOPICS
@@ -161,6 +165,22 @@ def run_digest(category: str, dry_run: bool = False) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     model_note = f" [model: {runtime.MODEL_OVERRIDE}]" if runtime.MODEL_OVERRIDE else ""
+    if not runtime.TEST_MODE:
+        def _interrupt_handler(signum: int, _frame: Any) -> None:
+            """Record an interrupted final state instead of leaving 'running'."""
+            try:
+                WorkflowState(
+                    run_dir, runtime.WORKFLOW_NAME, run_id=run_dir.name
+                ).abort_interrupted_phases(
+                    error=f"interrupted by signal {signum}"
+                )
+            except BaseException as error:  # never mask the original signal
+                print(f"  [interrupt] could not record aborted state: {error}")
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        for _signal in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(_signal, _interrupt_handler)
     print(f"\n{'=' * 60}")
     print(f"  {topic['title']} — {today_str}{model_note}")
     print(f"  Run dir: {run_dir}")

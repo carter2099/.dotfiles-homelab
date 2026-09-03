@@ -13,6 +13,58 @@ from . import runtime
 from .catalog import STANDFIRST_PROMPT_VERSION
 from .contracts import parse_date
 
+# Periods inside these short tokens do not end a sentence: "U.S.", "Aug.",
+# "Mr.", "e.g.", etc. Splitting on them truncated standfirst copy in the
+# 2026-09-02 world edition ("The U.S. Nepal's Foreign Ministry said ... after
+# the Aug."), so sentence extraction and validation must treat them as
+# mid-token punctuation rather than sentence boundaries.
+_ABBREVIATION_TOKENS = frozenset({
+    # Honorifics and titles
+    "mr", "mrs", "ms", "mx", "dr", "prof", "rev", "sir", "sr", "jr",
+    "st", "sgt", "capt", "gen", "col", "lt", "gov", "sen", "rep",
+    # Common abbreviated words
+    "vs", "etc", "e.g", "i.e", "dept", "est", "inc", "ltd", "co",
+    "approx", "mt", "ft", "min", "max", "avg",
+    # Month abbreviations
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec",
+    # Geographic and credential short forms used mid-sentence
+    "u.s", "u.k", "u.n", "u.s.s.r", "u.a.e", "d.c", "ph.d",
+})
+_MIN_SENTENCE_WORDS = 3
+_SENTENCE_END_RE = re.compile(r"""[.!?…]["'’”)]*(?=\s|$)""")
+_ABBREVIATION_ENDING_RE = re.compile(r"""\b([A-Za-z0-9’'.&-]+)\.["'’”)]*$""")
+
+
+def _is_abbreviation_period(text: str, start: int) -> bool:
+    """True when the period at ``start`` terminates a known abbreviation token."""
+    end = start
+    while end > 0 and (text[end - 1].isalnum() or text[end - 1] in "’.'&-"):
+        end -= 1
+    return text[end:start].rstrip(".").casefold() in _ABBREVIATION_TOKENS
+
+
+def _sentence_ends(text: str) -> list[int]:
+    """End indices of genuine sentence boundaries, skipping abbreviation periods."""
+    ends: list[int] = []
+    for match in _SENTENCE_END_RE.finditer(text):
+        if (
+            match.group().startswith(".")
+            and _is_abbreviation_period(text, match.start())
+        ):
+            continue
+        ends.append(match.end())
+    return ends
+
+
+def _ends_abbreviated(text: str) -> bool:
+    """True when the final punctuation closes a known abbreviation token."""
+    match = _ABBREVIATION_ENDING_RE.search(text)
+    if match is None:
+        return False
+    return match.group(1).rstrip(".").casefold() in _ABBREVIATION_TOKENS
+
+
 def validate_standfirst(standfirst: str, stories: list[dict]) -> tuple[bool, str]:
     text = " ".join(standfirst.split()) if isinstance(standfirst, str) else ""
     if len(text) < 40:
@@ -21,6 +73,8 @@ def validate_standfirst(standfirst: str, stories: list[dict]) -> tuple[bool, str
         return False, "standfirst exceeds 900 characters"
     if not re.search(r"""[.!?…]["'’”)]*$""", text):
         return False, "standfirst ends mid-sentence"
+    if _ends_abbreviated(text):
+        return False, "standfirst ends mid-sentence (abbreviation period)"
     if re.search(r"https?://|www\.", text, re.IGNORECASE):
         return False, "standfirst contains a URL"
     if "<" in text or ">" in text:
@@ -67,18 +121,41 @@ def validate_standfirst(standfirst: str, stories: list[dict]) -> tuple[bool, str
         )
     return True, ""
 
+
 def first_complete_sentence(value: Any) -> str:
+    """Extract the first complete sentence, ignoring abbreviation periods.
+
+    Periods inside known abbreviations (U.S., Aug., Mr.) are not sentence
+    boundaries, and a captured sentence must contain at least
+    ``_MIN_SENTENCE_WORDS`` words, so fragments like "The U.S." or
+    "...after the Aug." are never returned as complete newspaper copy.
+    """
     text = " ".join(value.split()) if isinstance(value, str) else ""
     if not text:
         return ""
-    match = re.match(r"""^.*?[.!?…]["'’”)]*(?:\s|$)""", text)
-    if match and len(match.group(0).strip()) <= 850:
-        return match.group(0).strip()
-    if len(text) <= 850:
+    candidate = ""
+    for end in _sentence_ends(text):
+        sentence = text[:end]
+        if len(re.findall(r"\S+", sentence)) >= _MIN_SENTENCE_WORDS:
+            candidate = sentence
+            break
+    if candidate and len(candidate) <= 850:
+        return candidate
+    # No boundary produced a usable sentence. Accept the whole short text
+    # only when it is not truncated on an abbreviation period ("...after the
+    # Aug."); such an ending means the sentence continues past the text.
+    if len(text) <= 850 and not candidate and not _ends_abbreviated(text):
         return text if re.search(r"""[.!?…]["'’”)]*$""", text) else f"{text}."
     return ""
 
+
 def fallback_standfirst(fresh: list[dict], ongoing: list[dict]) -> str:
+    """Deterministic standfirst from complete summary sentences.
+
+    The sentence-based output is re-validated against the source stories and
+    degrades to a lead-title standfirst when it does not validate, so a
+    truncated fragment like "...after the Aug." can never be published.
+    """
     stories = fresh or ongoing
     if not stories:
         return "No publishable stories were selected for this section."
@@ -87,13 +164,22 @@ def fallback_standfirst(fresh: list[dict], ongoing: list[dict]) -> str:
         for story in stories[:3]
     ]
     sentences = [sentence for sentence in sentences if sentence]
-    if not sentences:
-        title = " ".join(str(stories[0].get("title", "Lead story")).split())
-        return title if re.search(r"[.!?…]$", title) else f"{title}."
-    standfirst = sentences[0]
-    if len(sentences) > 1 and len(f"{standfirst} {sentences[1]}") <= 850:
-        standfirst = f"{standfirst} {sentences[1]}"
-    return standfirst
+    candidates: list[str] = []
+    if sentences:
+        standfirst = sentences[0]
+        if len(sentences) > 1 and len(f"{standfirst} {sentences[1]}") <= 850:
+            standfirst = f"{standfirst} {sentences[1]}"
+        candidates.append(standfirst)
+    title = " ".join(str(stories[0].get("title", "Lead story")).split())
+    candidates.append(title if re.search(r"[.!?…]$", title) else f"{title}.")
+    for candidate in candidates:
+        valid, _ = validate_standfirst(candidate, stories)
+        if valid:
+            return candidate
+    # Neither candidate validated (usually a short title); keep the
+    # sentence-based copy as the closest match to newspaper prose.
+    return candidates[0]
+
 
 def standfirst_story_fingerprint(stories: list[dict]) -> str:
     payload = [

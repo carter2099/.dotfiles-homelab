@@ -1835,6 +1835,41 @@ def test_standfirst_boundary_and_deterministic_render() -> None:
         [{"summary": "A verified change occurred. Additional detail follows."}], []
     )
     check(fallback == "A verified change occurred.", fallback)
+    abbreviation_sentence = (
+        "The U.S. military struck two tankers. Further details followed."
+    )
+    check(
+        copy_module.first_complete_sentence(abbreviation_sentence)
+        == "The U.S. military struck two tankers.",
+        abbreviation_sentence,
+    )
+    garbled = (
+        "The U.S. Nepal's Foreign Ministry said 324 foreign nationals were "
+        "rescued and 590 from 39 countries remained missing after the Aug."
+    )
+    check(copy_module.first_complete_sentence(garbled) == "", garbled)
+    valid, reason = copy_module.validate_standfirst(garbled, [])
+    check(not valid and "abbreviation period" in reason, reason)
+    fallback = copy_module.fallback_standfirst(
+        [
+            {
+                "title": "Flood rescue remains incomplete",
+                "summary": garbled,
+            },
+            {
+                "title": "Evacuations continue",
+                "summary": (
+                    "Emergency crews moved residents to safer ground. "
+                    "Officials opened more shelters."
+                ),
+            },
+        ],
+        [],
+    )
+    check(
+        fallback == "Emergency crews moved residents to safer ground.",
+        fallback,
+    )
     clipped = editorial.clean_editorial_text("word " * 300, limit=80)
     check(clipped.endswith("word…") and len(clipped) <= 81, clipped)
 

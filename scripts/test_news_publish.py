@@ -166,6 +166,7 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         assets = write_assets(root)
         current_date = "2026-08-25"
         older_date = "2026-06-15"
+        interrupted_state: WorkflowState | None = None
 
         for key in news.TOPIC_ORDER:
             topic = news.TOPICS[key]
@@ -177,7 +178,25 @@ def test_publish_builds_separate_history_and_one_email() -> None:
                 publication["fresh"][0]["title"] = "AI <script>alert(1)</script> lead"
             if key == "gaming":
                 publication["fresh"][0]["priority_score"] = 99.0
-            (run_dir / "publication.json").write_text(json.dumps(publication))
+            publication_path = run_dir / "publication.json"
+            if key == "ai-tech":
+                interrupted_state = WorkflowState(
+                    run_dir, "daily-news", run_id=run_dir.name
+                )
+                interrupted_state.begin_phase(
+                    "research",
+                    inputs={"fixture": "interrupted"},
+                    artifact_path=run_dir / "01-research-raw.json",
+                )
+                interrupted_state.begin_phase(
+                    "archive",
+                    inputs={"fixture": "publication"},
+                    artifact_path=publication_path,
+                    schema_version=news.PUBLICATION_SCHEMA_VERSION,
+                )
+                interrupted_state.complete_json("archive", publication)
+            else:
+                publication_path.write_text(json.dumps(publication))
 
         gaming_dir = digests / news.TOPICS["gaming"]["category"]
         (gaming_dir / f"{older_date}.html").write_text("""
@@ -204,6 +223,25 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check(result["dates"] == 2, result)
         check(result["email_sent"], result)
         check(len(sent) == 1, sent)
+        check(interrupted_state is not None, "interrupted fixture was not created")
+        research = interrupted_state.phase_record("research")
+        check(research["status"] == "aborted", research)
+        check(research["completion_outcome"] == "aborted", research)
+        connection = interrupted_state._connect()
+        try:
+            run = connection.execute(
+                """
+                SELECT status, completed_at, error
+                FROM workflow_runs
+                WHERE workflow = ? AND run_id = ?
+                """,
+                (interrupted_state.workflow, interrupted_state.run_id),
+            ).fetchone()
+        finally:
+            connection.close()
+        check(run["status"] == "succeeded", dict(run))
+        check(run["completed_at"] is not None, dict(run))
+        check(run["error"] is None, dict(run))
         email_body = sent[0][1]
         check(email_body.count('data-summary="overall"') == 1, email_body)
         check("<h2" not in email_body, email_body)

@@ -391,6 +391,40 @@ def collect_source_publication(
     return None
 
 
+def _finalize_published_runs(
+    digests_dir: Path,
+    issue_date: str,
+    date_editions: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Finalize interrupted workflow runs whose artifacts were just published.
+
+    Publish-recovery (digest-quality audit 2026-09-03): when an edition is
+    built from a run whose phases were interrupted (SIGTERM or a crash left
+    phase rows 'running'), record those rows as 'aborted' and mark the run
+    'succeeded' with completed_at once its validated artifacts go live,
+    instead of leaving tracker rows stuck in 'running' forever.
+    """
+    finalized: list[str] = []
+    for key in TOPIC_ORDER:
+        topic = TOPICS[key]
+        slug = topic["web_slug"]
+        if slug not in date_editions:
+            continue
+        run_dir = digests_dir / topic["category"] / issue_date
+        configured_db = os.environ.get("WORKFLOW_STATE_DB")
+        state_db = (
+            Path(configured_db) if configured_db else run_dir / "workflow-state.sqlite3"
+        )
+        if not state_db.exists():
+            continue
+        state = WorkflowState(
+            run_dir, "daily-news", run_id=run_dir.name, db_path=state_db
+        )
+        if state.finalize_published():
+            finalized.append(slug)
+    return finalized
+
+
 def _atomic_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -1034,6 +1068,15 @@ def publish(
 
     release = build_site(editions, news_dir, asset_dir)
     print(f"[site] activated {release.name} ({len(editions)} dates)")
+
+    finalized = _finalize_published_runs(
+        digests_dir, issue_date, editions[issue_date]
+    )
+    if finalized:
+        print(
+            f"[state] finalized {len(finalized)} interrupted run(s): "
+            f"{', '.join(sorted(finalized))}"
+        )
 
     mailed = False
     if send_email:

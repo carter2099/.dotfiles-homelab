@@ -400,6 +400,13 @@ class WorkflowState:
         elif statuses and all(item == "succeeded" for item in statuses):
             status = "succeeded"
             completed_at = now
+        elif statuses and all(item in ("succeeded", "aborted") for item in statuses):
+            # Interrupted (aborted) phases with no still-running work make the
+            # run itself interrupted, not perpetually 'running' (digest-quality
+            # audit 2026-09-03: ai-tech 2026-09-02 stayed 'running' after a
+            # SIGTERM mid-run even though the edition was later published).
+            status = "aborted"
+            completed_at = now
         else:
             status = "running"
             completed_at = None
@@ -413,8 +420,10 @@ class WorkflowState:
         ).fetchone()
         stored_error = None if existing is None else existing["error"]
         stored_invalid_reason = None if existing is None else existing["invalid_reason"]
-        run_error = error if status == "failed" and error is not None else (
-            stored_error if status == "failed" else None
+        run_error = (
+            error
+            if status in ("failed", "aborted") and error is not None
+            else stored_error if status in ("failed", "aborted") else None
         )
         run_invalid_reason = (
             invalid_reason
@@ -1013,6 +1022,81 @@ class WorkflowState:
         if not isinstance(phase, str) or not phase:
             raise ValueError("phase must be a non-empty string")
         return self._phase_dict(phase)
+
+    def abort_interrupted_phases(
+        self,
+        error: str | BaseException | None = None,
+    ) -> None:
+        """Terminally record interrupted 'running' phases and finalize the run.
+
+        Used when a run is stopped mid-phase (SIGTERM, crash, operator stop):
+        those phases will never complete, so they are recorded as 'aborted'
+        and the run row leaves 'running' with a completed_at instead of being
+        stuck forever (digest-quality audit 2026-09-03).
+        """
+
+        bounded_error = None if error is None else _bounded_text(error)
+        now = _utc_now()
+        with self._transition() as connection:
+            connection.execute(
+                """
+                UPDATE phase_state
+                SET status = 'aborted', completed_at = ?, updated_at = ?,
+                    error = ?, resume_valid = 0, invalid_reason = NULL,
+                    completion_outcome = 'aborted', completion_reason = ?
+                WHERE workflow = ? AND run_id = ? AND status = 'running'
+                """,
+                (
+                    now,
+                    now,
+                    bounded_error,
+                    bounded_error,
+                    self.workflow,
+                    self.run_id,
+                ),
+            )
+            self._refresh_run_status(connection, now=now, error=bounded_error)
+
+    def finalize_published(self) -> bool:
+        """Finalize an interrupted run once its artifacts were published.
+
+        The publish/recovery path calls this after the edition built from this
+        run's validated artifacts goes live: 'running' phase rows that never
+        finished (e.g. research killed by SIGTERM) are recorded as 'aborted'
+        and the run row is finalized to 'succeeded' with completed_at.
+        Returns whether the run row was transitioned.
+        """
+
+        now = _utc_now()
+        with self._transition() as connection:
+            connection.execute(
+                """
+                UPDATE phase_state
+                SET status = 'aborted', completed_at = ?, updated_at = ?,
+                    error = ?, resume_valid = 0, invalid_reason = NULL,
+                    completion_outcome = 'aborted', completion_reason = ?
+                WHERE workflow = ? AND run_id = ? AND status = 'running'
+                """,
+                (
+                    now,
+                    now,
+                    "phase interrupted; run artifacts validated and published",
+                    "phase interrupted; run artifacts validated and published",
+                    self.workflow,
+                    self.run_id,
+                ),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE workflow_runs
+                SET status = 'succeeded', updated_at = ?, completed_at = ?,
+                    error = NULL, invalid_reason = NULL
+                WHERE workflow = ? AND run_id = ?
+                  AND status IN ('running', 'aborted')
+                """,
+                (now, now, self.workflow, self.run_id),
+            )
+            return int(cursor.rowcount) > 0
 
 
 __all__: Final[tuple[str, ...]] = (
