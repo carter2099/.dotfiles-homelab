@@ -156,6 +156,17 @@ def test_front_page_guarantees_sections_then_applies_global_floor() -> None:
         selected,
     )
     check(lead and lead["priority_score"] == 100.0, lead)
+    email_body = news.render_headline_email("2026-08-25", date_editions)
+    check(email_body.count("<li ") == len(selected), email_body)
+    for story in selected:
+        expected = story["title"].replace("&", "&amp;")
+        check(expected in email_body, story)
+    check("AI &amp; Tech secondary" not in email_body, email_body)
+    check(email_body.count('href="') == 1, email_body)
+    check(
+        f'href="{news.BASE_URL}/2026-08-25/"' in email_body,
+        email_body,
+    )
 
 
 def test_publish_builds_separate_history_and_one_email() -> None:
@@ -243,8 +254,15 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check(run["completed_at"] is not None, dict(run))
         check(run["error"] is None, dict(run))
         email_body = sent[0][1]
-        check(email_body.count('data-summary="overall"') == 1, email_body)
+        check(email_body.count("<li ") == len(news.TOPIC_ORDER), email_body)
+        check('data-summary="overall"' not in email_body, email_body)
         check("<h2" not in email_body, email_body)
+        check("source-backed summary" not in email_body, email_body)
+        check(email_body.count('href="') == 1, email_body)
+        check(
+            f'href="{news.BASE_URL}/{current_date}/"' in email_body,
+            email_body,
+        )
         check("#f2f0ea" not in email_body.casefold(), email_body)
         check("#fffdfa" not in email_body.casefold(), email_body)
         check("#f3f4f6" in email_body.casefold(), email_body)
@@ -252,7 +270,14 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         for key in news.TOPIC_ORDER:
             topic = news.TOPICS[key]
             marker = topic["web_title"].replace("&", "&amp;")
-            check(f"{marker} reporting details" in email_body, email_body)
+            expected = (
+                "AI &lt;script&gt;alert(1)&lt;/script&gt; lead"
+                if key == "ai-tech"
+                else f"{marker} lead story"
+            )
+            check(expected in email_body, email_body)
+            check(f"{marker} reporting details" not in email_body, email_body)
+            check(f"{marker} developing story" not in email_body, email_body)
             check(f"/{current_date}/{topic['web_slug']}/" not in email_body, email_body)
 
         current = news_dir / "current"

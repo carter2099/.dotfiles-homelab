@@ -989,23 +989,35 @@ def build_site(
     return release
 
 
-def render_summary_email(
+def render_headline_email(
     issue_date: str,
     editions: dict[str, dict[str, Any]],
     base_url: str = BASE_URL,
 ) -> str:
-    summaries = []
-    for key in TOPIC_ORDER:
-        topic = TOPICS[key]
-        publication = editions.get(topic["web_slug"])
-        if publication is None:
-            continue
-        standfirst = _clean_text(publication.get("standfirst"))
-        if standfirst:
-            summaries.append(standfirst)
-
-    overall_summary = html.escape(
-        " ".join(summaries) or "No coverage was selected for this edition."
+    lead, sections = _front_page_sections(editions)
+    lead_url = _safe_url(lead.get("url")) if lead is not None else ""
+    front_page_stories = [lead] if lead is not None else []
+    front_page_stories.extend(
+        story
+        for section in sections
+        for story in section["stories"]
+        if _safe_url(story.get("url")) != lead_url
+    )
+    headline_items = "".join(
+        '<li style="margin:0 0 12px;padding-left:2px;color:#171716;'
+        'font:700 18px/1.35 Georgia,serif;">'
+        f'{html.escape(_clean_text(story.get("title")))}</li>'
+        for story in front_page_stories
+    )
+    headline_list = (
+        '<ul style="margin:0 0 22px;padding-left:22px;">'
+        f"{headline_items}</ul>"
+        if headline_items
+        else (
+            '<p style="margin:0 0 20px;color:#444b54;'
+            'font:15px/1.65 Arial,sans-serif;">'
+            "No front-page stories were selected.</p>"
+        )
     )
     today_link = f"{base_url}/{issue_date}/"
     return f'''<!doctype html>
@@ -1015,8 +1027,8 @@ def render_summary_email(
 <table role="presentation" width="620" cellpadding="0" cellspacing="0" style="width:100%;max-width:620px;background:#ffffff;border:1px solid #d7dbe0;">
 <tr><td style="padding:30px;border-top:4px solid #171716;">
   <p style="margin:0 0 7px;color:#626a73;font:600 11px/1.3 Arial,sans-serif;text-transform:uppercase;letter-spacing:1.2px;">{html.escape(_edition_date(issue_date))}</p>
-  <h1 style="margin:0 0 16px;color:#171716;font:700 32px/1.05 Georgia,serif;">Today’s news</h1>
-  <p data-summary="overall" style="margin:0 0 20px;color:#444b54;font:15px/1.65 Arial,sans-serif;">{overall_summary}</p>
+  <h1 style="margin:0 0 16px;color:#171716;font:700 32px/1.05 Georgia,serif;">Today’s headlines</h1>
+  {headline_list}
   <a href="{html.escape(today_link, quote=True)}" style="display:inline-block;background:#171716;color:#ffffff;padding:10px 15px;font:700 13px/1 Arial,sans-serif;text-decoration:none;">Open the front page</a>
 </td></tr>
 <tr><td style="padding:18px 30px;border-top:1px solid #d7dbe0;color:#626a73;font:12px/1.5 Arial,sans-serif;">news.carter2099.com</td></tr>
@@ -1025,7 +1037,7 @@ def render_summary_email(
 
 
 
-def send_summary_once(
+def send_headline_email_once(
     issue_date: str,
     editions: dict[str, dict[str, Any]],
     news_dir: Path = NEWS_DIR,
@@ -1038,7 +1050,7 @@ def send_summary_once(
     if marker.exists():
         print(f"[mail] already sent for {issue_date}; skipping")
         return False
-    body = render_summary_email(issue_date, editions, base_url=base_url)
+    body = render_headline_email(issue_date, editions, base_url=base_url)
     subject = f"Daily News — {date.fromisoformat(issue_date).strftime('%B %-d, %Y')}"
     send_func(subject, body, [recipient])
     _atomic_json(marker, {
@@ -1080,7 +1092,7 @@ def publish(
 
     mailed = False
     if send_email:
-        mailed = send_summary_once(
+        mailed = send_headline_email_once(
             issue_date,
             editions[issue_date],
             news_dir,
