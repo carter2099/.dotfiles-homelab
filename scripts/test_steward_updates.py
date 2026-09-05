@@ -414,6 +414,24 @@ class DelayedUpdateTests(unittest.TestCase):
                 "security-posture", resolved, "PASS", []
             )
             self.assertEqual((verdict, confirmed), ("PASS", []))
+    def test_local_apt_timeout_is_explicit_and_bounded(self):
+        timeout = subprocess.TimeoutExpired(
+            ["sudo", "apt", "upgrade", "-y"], updates.P1_APT_TIMEOUT
+        )
+        with patch.object(
+            updates,
+            "run",
+            side_effect=[Mock(), timeout],
+        ) as run_mock:
+            result = updates._p1_apt_upgrade()
+
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(result["stage"], "apt upgrade")
+        self.assertIn("timed out", result["error"])
+        self.assertEqual(
+            run_mock.call_args_list[-1].kwargs["timeout"],
+            updates.P1_APT_TIMEOUT,
+        )
 
 
 class GamingRigMaintenanceTests(unittest.TestCase):
@@ -972,6 +990,28 @@ class GamingRigMaintenanceTests(unittest.TestCase):
         deterministic = report._tldr_deterministic(facts)
         self.assertTrue(deterministic.startswith("Health issues:"))
         self.assertIn("apt unavailable", deterministic)
+    def test_phase_failure_without_steps_is_visible_to_reports(self):
+        applied = {
+            "phase": "apply",
+            "phase_status": "failed",
+            "phase_failed": True,
+            "error": "apt upgrade timed out after 900s",
+        }
+        rendered = report._html_updates(applied)
+        updates, failures = report._tldr_collect_updates(applied)
+        facts = report._build_tldr_facts(
+            applied,
+            {"sections": []},
+            {"plans": {}, "ideas": {}},
+            {"sections": []},
+            {},
+        )
+
+        self.assertIn("Maintenance: FAILED", rendered)
+        self.assertEqual(failures, 1)
+        self.assertIn("P1 maintenance failed", updates[0])
+        self.assertIn("apt upgrade timed out", facts["health_issues"][0])
+        self.assertTrue(any("maintenance" in item for item in facts["needs_carter"]))
     def test_gamingrig_runs_before_local_apt_failure(self):
         calls = []
         remote = {
@@ -1004,6 +1044,38 @@ class GamingRigMaintenanceTests(unittest.TestCase):
                 result = updates.phase_1_apply(run_dir)
         self.assertEqual(calls, ["rig", "apt"])
         self.assertEqual(result["steps"][0]["step"], "gamingrig_maintenance")
+    def test_phase_one_timeout_preserves_prior_remote_packet(self):
+        remote = {
+            "step": "gamingrig_maintenance",
+            "host": updates.RIG_SSH_ALIAS,
+            "status": "ok",
+            "local_mutation": False,
+            "substeps": [],
+        }
+        timeout = subprocess.TimeoutExpired(
+            ["sudo", "apt", "upgrade", "-y"], updates.P1_APT_TIMEOUT
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            with (
+                patch.object(
+                    updates,
+                    "_p1_gamingrig_maintenance",
+                    return_value=remote,
+                ),
+                patch.object(
+                    updates,
+                    "_p1_apt_upgrade",
+                    side_effect=timeout,
+                ),
+            ):
+                result = updates.phase_1_apply(run_dir)
+            artifact = json.loads((run_dir / "01-applied.json").read_text())
+
+        self.assertEqual(result["phase_status"], "failed")
+        self.assertEqual(artifact["steps"][0], remote)
+        self.assertEqual(artifact["steps"][1]["status"], "timeout")
+        self.assertIn("timed out", artifact["steps"][1]["error"])
 
 class DotfilesP9bTests(unittest.TestCase):
     def _git(self, *args, cwd=None):

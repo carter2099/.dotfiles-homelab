@@ -227,10 +227,10 @@ def _html_gamingrig_update(step):
             count = sub.get("upgraded_count", 0)
             if count:
                 row(f'{host} apt: {html.escape(str(count))} packages upgraded')
-            if sub_status in ("failed", "error"):
+            if sub_status in _P1_FAILURE_STATUSES:
                 row(
-                    f'{host} apt: FAILED — '
-                    f'{html.escape(str(sub.get("error") or ""))}',
+                    f'{host} apt: {_p1_status_label(sub_status)} — '
+                    f'{html.escape(str(sub.get("error") or sub.get("reason") or ""))}',
                     "#c62828",
                 )
         elif name == "herdr_update":
@@ -240,9 +240,9 @@ def _html_gamingrig_update(step):
                     f'{html.escape(str(sub.get("pre_version", "?")))} -> '
                     f'{html.escape(str(sub.get("post_version", "?")))}'
                 )
-            elif sub_status in ("failed", "error"):
+            elif sub_status in _P1_FAILURE_STATUSES:
                 row(
-                    f'{host} herdr: FAILED — '
+                    f'{host} herdr: {_p1_status_label(sub_status)} — '
                     f'{html.escape(str(sub.get("error") or sub.get("reason") or ""))}',
                     "#c62828",
                 )
@@ -260,24 +260,24 @@ def _html_gamingrig_update(step):
                     '(post-update check failed)',
                     "#e65100",
                 )
-            elif sub_status in ("failed", "error"):
+            elif sub_status in _P1_FAILURE_STATUSES:
                 row(
-                    f'{host} omp: FAILED — '
-                    f'{html.escape(str(sub.get("error") or ""))}',
+                    f'{host} omp: {_p1_status_label(sub_status)} — '
+                    f'{html.escape(str(sub.get("error") or sub.get("reason") or ""))}',
                     "#c62828",
                 )
         elif name in ("health", "post_reboot_health"):
             check_failures = []
             for check in sub.get("checks", []) or []:
                 check_status = check.get("status", "")
-                if check_status in ("failed", "error", "warning"):
+                if check_status in (_P1_FAILURE_STATUSES | {"warning"}):
                     detail = check.get("error") or check.get("reason") or check_status
                     check_failures.append(
                         f'{check.get("step", "check")}: {detail}'
                     )
-            if name == "post_reboot_health" and sub_status in ("failed", "error"):
+            if name == "post_reboot_health" and sub_status in _P1_FAILURE_STATUSES:
                 row(
-                    f'{host} post_reboot_health: FAILED — '
+                    f'{host} post_reboot_health: {_p1_status_label(sub_status)} — '
                     f'{html.escape(str(sub.get("error") or "health gate failed"))}',
                     "#c62828",
                 )
@@ -288,9 +288,9 @@ def _html_gamingrig_update(step):
                     f'{html.escape(failure.split(":", 1)[1].strip() if ":" in failure else failure)}',
                     color,
                 )
-            if sub_status in ("failed", "error") and not check_failures:
+            if sub_status in _P1_FAILURE_STATUSES and not check_failures:
                 row(
-                    f'{host} health: FAILED — '
+                    f'{host} health: {_p1_status_label(sub_status)} — '
                     f'{html.escape(str(sub.get("error") or sub.get("reason") or sub_status))}',
                     "#c62828",
                 )
@@ -304,24 +304,63 @@ def _html_gamingrig_update(step):
         elif name in (
             "reboot_required", "pre_reboot_boot_id", "bootnext",
             "reboot", "ssh_return",
-        ) and sub_status in ("failed", "error"):
+        ) and sub_status in _P1_FAILURE_STATUSES:
             row(
-                f'{host} {html.escape(name)}: FAILED — '
+                f'{host} {html.escape(name)}: {_p1_status_label(sub_status)} — '
                 f'{html.escape(str(sub.get("error") or sub.get("reason") or sub_status))}',
                 "#c62828",
             )
 
-    if status in ("failed", "error") and not lines:
+    if status in _P1_FAILURE_STATUSES and not lines:
         row(
-            f'{host}: FAILED — {html.escape(str(step.get("error") or ""))}',
+            f'{host}: {_p1_status_label(status)} — {html.escape(str(step.get("error") or ""))}',
             "#c62828",
         )
     return "\n".join(lines)
+
+_P1_FAILURE_STATUSES = frozenset({"failed", "error", "timeout", "started"})
+
+
+def _p1_phase_failed(applied_data):
+    return bool(
+        isinstance(applied_data, dict)
+        and (
+            applied_data.get("phase_failed")
+            or applied_data.get("phase_status") == "failed"
+        )
+    )
+
+
+def _p1_failure_detail(applied_data):
+    if not isinstance(applied_data, dict):
+        return "phase returned no result"
+    return str(
+        applied_data.get("reason")
+        or applied_data.get("error")
+        or "phase failed before producing step results"
+    )[:240]
+
+def _p1_status_label(status):
+    return {
+        "timeout": "TIMED OUT",
+        "started": "STARTED (INCOMPLETE)",
+        "error": "ERROR",
+    }.get(status, "FAILED")
+
+
+def _p1_phase_failure_row(applied_data):
+    return (
+        '<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+        '<strong>Maintenance: FAILED</strong> — '
+        f'{html.escape(_p1_failure_detail(applied_data))}</p>'
+    )
 
 def _html_updates(applied_data):
     """Render update steps — signal only, no no-op greys."""
     steps = applied_data.get("steps", [])
     if not steps:
+        if _p1_phase_failed(applied_data):
+            return _p1_phase_failure_row(applied_data)
         if applied_data.get("dry_run"):
             return '<p style="margin:0; color:#888; font-size:13px;">Dry run — no mutations applied.</p>'
         return '<p style="margin:0; color:#888; font-size:13px;">No update steps executed.</p>'
@@ -352,10 +391,10 @@ def _html_updates(applied_data):
                     f'llama.cpp: update rolled back to '
                     f'{html.escape(str(s.get("reverted_to") or "?"))}</p>'
                 )
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(
                     f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                    f'llama.cpp: FAILED — '
+                    f'llama.cpp: {_p1_status_label(status)} — '
                     f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>'
                 )
 
@@ -366,9 +405,10 @@ def _html_updates(applied_data):
             if n > 0:
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'apt: {n} packages upgraded</p>')
-            elif status == "failed":
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'apt: FAILED — {s.get("error","")}</p>')
+                             f'apt: {_p1_status_label(status)} — '
+                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
         # auto_* packages: show only ok or failed
         elif name.startswith("auto_"):
@@ -376,9 +416,10 @@ def _html_updates(applied_data):
             if status == "ok":
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'{pkg}: {s.get("pre_version","?")} -> {s.get("post_version","?")}</p>')
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'{pkg}: FAILED — {s.get("error","")}</p>')
+                             f'{pkg}: {_p1_status_label(status)} — '
+                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
         # Open WebUI updates are manual; surface availability and check failures.
         elif name == "openwebui":
@@ -386,18 +427,20 @@ def _html_updates(applied_data):
                 lines.append(f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
                              f'open-webui update available: {s.get("current_tag")} -> '
                              f'{s.get("latest_tag")} — run /update-openweb-ui</p>')
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'open-webui: {status} — {s.get("error",s.get("reason",""))}</p>')
+                             f'open-webui: {_p1_status_label(status)} — '
+                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
         # freshrss: show only bumped/failed/error
         elif name == "freshrss":
             if status == "bumped":
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'freshrss: {s.get("current_tag")} -> {s.get("latest_tag")}</p>')
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'freshrss: {status} — {s.get("error",s.get("reason",""))}</p>')
+                             f'freshrss: {_p1_status_label(status)} — '
+                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
         # herdr: show only bumped or failed/error
         elif name == "herdr_update":
@@ -406,9 +449,10 @@ def _html_updates(applied_data):
             if status == "ok":
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'herdr: {pre} -> {post}</p>')
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'herdr: {status} — {s.get("error",s.get("reason",""))}</p>')
+                             f'herdr: {_p1_status_label(status)} — '
+                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
         # omp: show only updated, reverted, or failed/error
         elif name == "omp_update":
@@ -421,27 +465,38 @@ def _html_updates(applied_data):
                 lines.append(f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
                              f'omp: update rolled back to {s.get("reverted_to","?")} '
                              f'(post-update check failed)</p>')
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'omp: {status} — {s.get("error",s.get("reason",""))}</p>')
+                             f'omp: {_p1_status_label(status)} — '
+                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
         # searxng: show only updated or failed/error
         elif name == "searxng":
             if status == "ok":
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'searxng: pulled latest :latest image</p>')
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'searxng: {status} — {s.get("error",s.get("reason",""))}</p>')
+                             f'searxng: {_p1_status_label(status)} — '
+                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
         # Generic fallback: show any step with real change/failure
         else:
             if status in ("ok", "bumped"):
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'{name}: ok</p>')
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'{name}: FAILED — {s.get("error","")}</p>')
+                             f'{name}: {_p1_status_label(status)} — '
+                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
+    if _p1_phase_failed(applied_data):
+        lines.append(_p1_phase_failure_row(applied_data))
+    elif applied_data.get("phase_status") == "degraded":
+        lines.append(
+            '<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
+            '<strong>Maintenance: DEGRADED</strong> — '
+            f'{html.escape(_p1_failure_detail(applied_data))}</p>'
+        )
 
     return "\n".join(lines) if lines else '<p style="margin:0; color:#888; font-size:13px;">No updates tonight.</p>'
 
@@ -468,15 +523,25 @@ def _mini_bar(pct, color="#37474f"):
     )
 
 
-def _html_health(validation_data, hb_data):
-    """Merged health section: validation checks + system status from heartbeat.
-    No 30-day trends."""
+def _html_health(validation_data, hb_data, applied_data=None):
+    """Merged update/validation health section with system status."""
     out = []
 
-    # If heartbeat phase failed, show the error
+    if _p1_phase_failed(applied_data):
+        out.append(
+            '<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+            f'{_dot("danger")}Maintenance failed: '
+            f'{html.escape(_p1_failure_detail(applied_data))}</p>'
+        )
+
+    # If heartbeat phase failed, show the error and retain the maintenance
+    # failure above instead of replacing it with a generic health packet.
     if hb_data.get("phase_failed"):
         err = hb_data.get("error", "unknown error")
-        out.append(f'<p style="margin:0; color:#c62828; font-size:13px;">{_dot("danger")}Heartbeat failed: {err}</p>')
+        out.append(
+            f'<p style="margin:0; color:#c62828; font-size:13px;">'
+            f'{_dot("danger")}Heartbeat failed: {html.escape(str(err))}</p>'
+        )
         return "".join(out)
 
     # ── A. Checks table ──
@@ -1023,11 +1088,12 @@ def _tldr_collect_gamingrig_updates(step):
             count = sub.get("upgraded_count", 0)
             if count:
                 updates.append(f"{host} apt: {count} packages upgraded")
-            if status in ("failed", "error"):
+            if status in _P1_FAILURE_STATUSES:
                 n_failed += 1
                 emitted_failure = True
                 updates.append(
-                    f"{host} apt failed: {str(sub.get('error') or '')[:120]}"
+                    f"{host} apt {_p1_status_label(status).lower()}: "
+                    f"{str(sub.get('error') or '')[:120]}"
                 )
         elif name == "herdr_update":
             if status == "ok":
@@ -1035,11 +1101,12 @@ def _tldr_collect_gamingrig_updates(step):
                 post = str(sub.get("post_version") or "")
                 if pre and post and pre != post:
                     updates.append(f"{host} herdr: {pre} -> {post}")
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 n_failed += 1
                 emitted_failure = True
                 updates.append(
-                    f"{host} herdr failed: {str(sub.get('error') or '')[:120]}"
+                    f"{host} herdr {_p1_status_label(status).lower()}: "
+                    f"{str(sub.get('error') or '')[:120]}"
                 )
         elif name == "omp_update":
             if status == "ok":
@@ -1054,18 +1121,19 @@ def _tldr_collect_gamingrig_updates(step):
                     f"{host} omp update rolled back to "
                     f"{sub.get('reverted_to') or '?'} (post-update check failed)"
                 )
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 n_failed += 1
                 emitted_failure = True
                 updates.append(
-                    f"{host} omp failed: {str(sub.get('error') or '')[:120]}"
+                    f"{host} omp {_p1_status_label(status).lower()}: "
+                    f"{str(sub.get('error') or '')[:120]}"
                 )
         elif name in ("health", "post_reboot_health"):
             check_failures = []
             for check in sub.get("checks", []) or []:
                 check_status = check.get("status", "")
-                if check_status in ("failed", "error", "warning"):
-                    if check_status in ("failed", "error"):
+                if check_status in (_P1_FAILURE_STATUSES | {"warning"}):
+                    if check_status in _P1_FAILURE_STATUSES:
                         n_failed += 1
                         emitted_failure = True
                     detail = check.get("error") or check.get("reason") or check_status
@@ -1073,37 +1141,40 @@ def _tldr_collect_gamingrig_updates(step):
                         f"{host} {check.get('step') or 'health'} "
                         f"{check_status}: {str(detail)[:120]}"
                     )
-            if name == "post_reboot_health" and status in ("failed", "error"):
+            if name == "post_reboot_health" and status in _P1_FAILURE_STATUSES:
                 if check_failures:
                     updates.append(
-                        f"{host} post_reboot_health failed: "
+                        f"{host} post_reboot_health "
+                        f"{_p1_status_label(status).lower()}: "
                         f"{str(sub.get('error') or 'health gate failed')[:120]}"
                     )
                 else:
                     n_failed += 1
                     emitted_failure = True
                     updates.append(
-                        f"{host} post_reboot_health failed: "
+                        f"{host} post_reboot_health "
+                        f"{_p1_status_label(status).lower()}: "
                         f"{str(sub.get('error') or '')[:120]}"
                     )
             updates.extend(check_failures)
             if (
-                status in ("failed", "error")
+                status in _P1_FAILURE_STATUSES
                 and not (sub.get("checks") or [])
                 and name != "post_reboot_health"
             ):
                 n_failed += 1
                 emitted_failure = True
                 updates.append(
-                    f"{host} health failed: {str(sub.get('error') or '')[:120]}"
+                    f"{host} health {_p1_status_label(status).lower()}: "
+                    f"{str(sub.get('error') or '')[:120]}"
                 )
         elif name in (
             "reboot_required", "pre_reboot_boot_id", "bootnext",
             "reboot", "ssh_return",
-        ) and status in ("failed", "error"):
+        ) and status in _P1_FAILURE_STATUSES:
             n_failed += 1
             updates.append(
-                f"{host} {name} failed: "
+                f"{host} {name} {_p1_status_label(status).lower()}: "
                 f"{str(sub.get('error') or sub.get('reason') or status)[:120]}"
             )
         elif name == "reboot" and status == "ok":
@@ -1116,10 +1187,11 @@ def _tldr_collect_gamingrig_updates(step):
                     f"{host} reboot requested; Linux SSH return was not validated"
                 )
 
-    if step.get("status") in ("failed", "error") and not emitted_failure:
+    if step.get("status") in _P1_FAILURE_STATUSES and not emitted_failure:
         n_failed += 1
         updates.append(
-            f"{host} maintenance failed: {str(step.get('error') or '')[:120]}"
+            f"{host} maintenance {_p1_status_label(step.get('status')).lower()}: "
+            f"{str(step.get('error') or '')[:120]}"
         )
     return updates, n_failed
 
@@ -1135,24 +1207,24 @@ def _tldr_collect_gamingrig_failures(step):
             checks = sub.get("checks") or []
             check_failures = [
                 check for check in checks
-                if check.get("status") in ("failed", "error")
+                if check.get("status") in _P1_FAILURE_STATUSES
             ]
             for check in check_failures:
                 detail = check.get("error") or check.get("reason") or check.get("status")
                 failures.append(
                     f"{host} {name}/{check.get('step') or 'check'}: {str(detail)[:180]}"
                 )
-            if status in ("failed", "error") and not check_failures:
+            if status in _P1_FAILURE_STATUSES and not check_failures:
                 failures.append(
                     f"{host} {name}: "
                     f"{str(sub.get('error') or 'health gate failed')[:180]}"
                 )
-        elif status in ("failed", "error", "reverted"):
+        elif status in (_P1_FAILURE_STATUSES | {"reverted"}):
             failures.append(
                 f"{host} {name}: "
                 f"{str(sub.get('error') or sub.get('reason') or status)[:180]}"
             )
-    if step.get("status") in ("failed", "error") and not failures:
+    if step.get("status") in _P1_FAILURE_STATUSES and not failures:
         failures.append(
             f"{host} maintenance: "
             f"{str(step.get('error') or step.get('reason') or 'failed')[:180]}"
@@ -1184,16 +1256,19 @@ def _tldr_collect_updates(applied):
                     f"llama.cpp update rolled back to "
                     f"{s.get('reverted_to') or '?'}"
                 )
-            elif status in ("failed", "error"):
+            elif status in _P1_FAILURE_STATUSES:
                 n_failed += 1
                 updates.append(
                     f"llama.cpp failed: {str(s.get('error') or s.get('reason') or '')[:120]}"
                 )
             continue
 
-        if status == "failed":
+        if status in _P1_FAILURE_STATUSES:
             n_failed += 1
-            updates.append(f"{step} failed: {str(s.get('error', ''))[:80]}")
+            updates.append(
+                f"{step} {_p1_status_label(status).lower()}: "
+                f"{str(s.get('error') or s.get('reason') or '')[:80]}"
+            )
             continue
         if step == "apt_upgrade" and s.get("upgraded_count", 0) > 0:
             updates.append(f"apt: {s['upgraded_count']} packages upgraded")
@@ -1224,8 +1299,34 @@ def _tldr_collect_updates(applied):
                            f"(post-update check failed)")
         elif step == "searxng" and status == "ok":
             updates.append("searxng: pulled latest image")
+    apply_failures = _tldr_collect_apply_failures(applied)
+    if apply_failures:
+        updates.insert(0, apply_failures[0])
+        if n_failed == 0:
+            n_failed = len(apply_failures)
+    elif (applied or {}).get("phase_status") == "degraded":
+        updates.insert(
+            0,
+            f"P1 maintenance degraded: {_p1_failure_detail(applied)}",
+        )
     return updates, n_failed
 
+def _tldr_collect_apply_failures(applied):
+    """Return one deterministic local maintenance failure for TLDR health."""
+    if _p1_phase_failed(applied):
+        return [f"P1 maintenance failed: {_p1_failure_detail(applied)}"]
+    failures = []
+    for step in (applied or {}).get("steps", []) or []:
+        if not isinstance(step, dict):
+            continue
+        name = step.get("step") or "maintenance"
+        if name in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
+            continue
+        status = str(step.get("status") or "").lower()
+        if status in _P1_FAILURE_STATUSES:
+            detail = step.get("error") or step.get("reason") or status
+            failures.append(f"{name} {_p1_status_label(status)}: {str(detail)[:180]}")
+    return failures
 
 def _tldr_collect_health(heartbeat, validation=None):
     """End-state host issues (empty list = healthy)."""
@@ -1349,12 +1450,15 @@ def _tldr_audit_end_state(audit, fixes):
 def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
     """End-state facts for TLDR (LLM + deterministic)."""
     updates, n_failed_apply = _tldr_collect_updates(applied)
+    apply_failures = _tldr_collect_apply_failures(applied)
     rig_apply_failures = []
     for step in applied.get("steps", []) or []:
         if step.get("step") in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
             rig_apply_failures.extend(_tldr_collect_gamingrig_failures(step))
     health_issues = (
-        rig_apply_failures + _tldr_collect_health(heartbeat, validation)
+        apply_failures
+        + rig_apply_failures
+        + _tldr_collect_health(heartbeat, validation)
     )
     audit_state = _tldr_audit_end_state(audit, fixes)
 
@@ -1367,6 +1471,9 @@ def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
 
     plans = (queue or {}).get("plans", {}) or {}
     needs_carter = [
+        f"maintenance apply failure — {failure}"
+        for failure in apply_failures
+    ] + [
         f"gaming-rig apply failure — {failure}"
         for failure in rig_apply_failures
     ]
@@ -1390,6 +1497,7 @@ def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
     return {
         "health_ok": not health_issues,
         "health_issues": health_issues,
+        "apply_failures": apply_failures,
         "rig_apply_failures": rig_apply_failures,
         "updates": updates,
         "n_failed_apply": n_failed_apply,
@@ -1488,9 +1596,10 @@ def _tldr_deterministic(facts):
     parts = []
 
     if facts.get("health_issues"):
+        apply_failures = facts.get("apply_failures") or []
         rig_failures = facts.get("rig_apply_failures") or []
-        other_issues = facts["health_issues"][len(rig_failures):]
-        issue_text = rig_failures + other_issues[:3]
+        other_issues = facts["health_issues"][len(apply_failures) + len(rig_failures):]
+        issue_text = apply_failures + rig_failures + other_issues[:3]
         parts.append("Health issues: " + "; ".join(issue_text) + ".")
     else:
         parts.append("Host healthy.")
@@ -1618,7 +1727,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         .replace("{{TLDR}}", tldr)
         .replace("{{UPDATES}}", _html_updates(applied))
         .replace("{{TROUBLESHOOT}}", troubleshoot_html)
-        .replace("{{HEALTH}}", _html_health(validation, heartbeat))
+        .replace("{{HEALTH}}", _html_health(validation, heartbeat, applied))
         .replace("{{AUDIT}}", _html_audit(audit, fixes))
         .replace("{{QUEUE}}", _html_queue(queue))
         .replace("{{USAGE}}", _html_usage(usage))
@@ -1675,6 +1784,10 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
         "",
         "## Update Status",
     ]
+    if _p1_phase_failed(applied):
+        lines.append(f"- Maintenance: FAILED — {_p1_failure_detail(applied)}")
+    elif applied.get("phase_status") == "degraded":
+        lines.append(f"- Maintenance: DEGRADED — {_p1_failure_detail(applied)}")
     for s in applied.get("steps", []):
         if s.get("dry_run"):
             lines.append("- Dry run — no mutations")
@@ -1698,7 +1811,7 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
             elif status == "skipped":
                 lines.append(f"- {pkg}: already current ({s.get('pre_version')})")
             else:
-                lines.append(f"- {pkg}: FAILED")
+                lines.append(f"- {pkg}: {_p1_status_label(status)}")
         elif name == "openwebui":
             if status == "available":
                 lines.append(
@@ -1737,6 +1850,12 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     runs_entry = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "duration_s": round(elapsed_s),
+        "maintenance_status": applied.get("phase_status", "unknown"),
+        **(
+            {"maintenance_failure": _p1_failure_detail(applied)}
+            if _p1_phase_failed(applied)
+            else {}
+        ),
         "applied": sum(1 for s in applied.get("steps", []) if s.get("status") in ("ok", "bumped")),
         "usage_accounts": len(usage.get("accounts", [])),
         "sections_fired": n_sections_fired,

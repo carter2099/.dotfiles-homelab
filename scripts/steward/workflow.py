@@ -246,11 +246,13 @@ def _phase_inputs(
 
 
 def _failure_payload(phase: str, error: BaseException) -> dict[str, Any]:
+    detail = str(error)[:2048]
     return {
         "phase": phase,
         "phase_status": "failed",
         "phase_failed": True,
-        "error": str(error)[:2048],
+        "error": detail,
+        "reason": detail,
     }
 
 
@@ -288,10 +290,10 @@ def _infer_apply_outcome(data: dict[str, Any]) -> None:
     def visit(value: Any, path: str = "") -> None:
         if isinstance(value, dict):
             status = str(value.get("status") or "").strip().lower()
-            if status in {"failed", "error", "timeout", "reverted", "warning", "degraded"}:
+            if status in {"failed", "error", "timeout", "started", "reverted", "warning", "degraded"}:
                 detail = value.get("error") or value.get("reason") or value.get("step") or status
                 item = f"{path}: {str(detail)[:400]}" if path else str(detail)[:400]
-                (retryable if status in {"failed", "error", "timeout"} else degraded).append(item)
+                (retryable if status in {"failed", "error", "timeout", "started"} else degraded).append(item)
             for key in ("steps", "substeps", "checks"):
                 children = value.get(key)
                 if isinstance(children, list):
@@ -358,6 +360,85 @@ def _write_failure_artifact(
         atomic_write_text(artifact, f"<p>{phase} failed: {error}</p>\n")
     return failure
 
+def _owned_phase_progress(
+    state: WorkflowState,
+    phase: str,
+    artifact: Path,
+    attempt: Any,
+) -> Callable[[dict[str, Any]], None]:
+    """Return an atomic progress writer owned by one WorkflowState attempt."""
+
+    def persist(payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            raise TypeError("phase progress payload must be an object")
+        record = state.phase_record(phase)
+        if (
+            not record
+            or record.get("status") != "running"
+            or int(record.get("attempt") or 0) != int(attempt.attempt)
+            or str(record.get("updated_at") or "") != str(attempt.updated_at)
+        ):
+            raise RuntimeError(f"phase attempt no longer owns progress: {phase}")
+        owned = dict(payload)
+        owned["_phase_attempt"] = {
+            "workflow": attempt.workflow,
+            "run_id": attempt.run_id,
+            "phase": attempt.phase,
+            "attempt": attempt.attempt,
+            "started_at": attempt.updated_at,
+        }
+        atomic_write_json(artifact, owned)
+
+    return persist
+
+
+def _failure_payload_from_partial(
+    phase: str,
+    error: BaseException,
+    artifact: Path,
+    *,
+    artifact_existed: bool,
+    artifact_hash: str | None,
+    attempt: Any,
+    json_artifact: bool,
+) -> dict[str, Any]:
+    """Merge an owned current-attempt artifact into a terminal failure packet."""
+
+    failure = _failure_payload(phase, error)
+    if not json_artifact:
+        return failure
+    if not _artifact_created_or_changed(
+        artifact,
+        existed=artifact_existed,
+        before_hash=artifact_hash,
+    ):
+        return failure
+    try:
+        partial = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return failure
+    if not isinstance(partial, dict):
+        return failure
+    marker = partial.get("_phase_attempt")
+    if marker is not None:
+        if not isinstance(marker, dict):
+            return failure
+        try:
+            marker_attempt = int(marker.get("attempt") or 0)
+            expected_attempt = int(getattr(attempt, "attempt", 0))
+        except (TypeError, ValueError):
+            return failure
+        if (
+            marker.get("workflow") != getattr(attempt, "workflow", None)
+            or marker.get("run_id") != getattr(attempt, "run_id", None)
+            or marker.get("phase") != getattr(attempt, "phase", None)
+            or marker_attempt != expected_attempt
+            or marker.get("started_at") != getattr(attempt, "updated_at", None)
+        ):
+            return failure
+    partial.update(failure)
+    return partial
+
 
 def _run_phase(
     state: WorkflowState,
@@ -369,6 +450,7 @@ def _run_phase(
     operation: Callable[[], Any],
     json_artifact: bool = True,
     source_reload_boundary: bool = False,
+    progress_operation: Callable[[Callable[[dict[str, Any]], None]], Any] | None = None,
 ) -> tuple[Any, bool]:
     """Resume only a matching succeeded state row; otherwise run atomically."""
     _code_fingerprint_changed(args)
@@ -391,16 +473,24 @@ def _run_phase(
         ):
             print(f"[{phase}] skipped (validated resume)")
             return None, True
-
     artifact_existed, artifact_hash = _artifact_snapshot(artifact)
-    state.begin_phase(
+    attempt = state.begin_phase(
         phase,
         inputs=inputs,
         artifact_path=artifact,
         schema_version=SCHEMA_VERSION,
     )
+    progress_writer = (
+        _owned_phase_progress(state, phase, artifact, attempt)
+        if progress_operation is not None
+        else None
+    )
     try:
-        data = operation()
+        data = (
+            progress_operation(progress_writer)
+            if progress_operation is not None
+            else operation()
+        )
         if source_reload_boundary:
             _record_restartable_fix_changes(args)
         else:
@@ -459,17 +549,47 @@ def _run_phase(
         )
         return data, False
     except StartupFingerprintChanged as error:
+        failure = _failure_payload_from_partial(
+            phase,
+            error,
+            artifact,
+            artifact_existed=artifact_existed,
+            artifact_hash=artifact_hash,
+            attempt=attempt,
+            json_artifact=json_artifact,
+        )
+        _write_failure_artifact(
+            phase,
+            artifact,
+            error,
+            json_artifact=json_artifact,
+            payload=failure,
+        )
         state.fail_phase(phase, error)
-        _write_failure_artifact(phase, artifact, error, json_artifact=json_artifact)
         print(f"[{phase}] FAILED: {error}")
         raise
     except Exception as error:
-        state.fail_phase(phase, error)
+        failure = _failure_payload_from_partial(
+            phase,
+            error,
+            artifact,
+            artifact_existed=artifact_existed,
+            artifact_hash=artifact_hash,
+            attempt=attempt,
+            json_artifact=json_artifact,
+        )
+        _write_failure_artifact(
+            phase,
+            artifact,
+            error,
+            json_artifact=json_artifact,
+            payload=failure,
+        )
         # Keep visible artifact names and diagnostics, but deliberately do not
         # complete the state row: failed rows are never resumable.
-        _write_failure_artifact(phase, artifact, error, json_artifact=json_artifact)
+        state.fail_phase(phase, error)
         print(f"[{phase}] FAILED: {error}")
-        return _failure_payload(phase, error), False
+        return failure, False
 
 
 
@@ -612,8 +732,26 @@ def _finish_after_fixes(
             print("[cleanup] dependabot-webhook restarted")
         except Exception as error:
             print(f"[cleanup] dependabot restart failed: {error}")
-    print(f"\nDone in {elapsed:.0f}s")
-    return 0
+    outcomes = []
+    failed = False
+    for phase in _PHASE_ARTIFACTS:
+        record = state.phase_record(phase)
+        if not record:
+            continue
+        status = record.get("status")
+        outcome = record.get("completion_outcome")
+        if status != "failed" and outcome != "degraded":
+            continue
+        label = "failed" if status == "failed" else "degraded"
+        failed = failed or status == "failed"
+        outcomes.append(
+            f"{phase} {label}: "
+            f"{str(record.get('error') or record.get('completion_reason') or 'incomplete')[:240]}"
+        )
+    if outcomes:
+        print("[maintenance] final outcome: " + "; ".join(outcomes))
+    print(f"\nMaintenance {'failed' if failed else 'finished'} in {elapsed:.0f}s")
+    return 1 if failed else 0
 
 
 def _setup_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -717,6 +855,11 @@ def main(argv: list[str] | None = None) -> int:
         inputs=_phase_inputs("apply", args, run_dir, ["00-setup.json"]),
         args=args,
         operation=lambda: updates.phase_1_apply(run_dir, dry_run=args.dry_run),
+        progress_operation=lambda persist: updates.phase_1_apply(
+            run_dir,
+            dry_run=args.dry_run,
+            progress=persist,
+        ),
     )
     _run_phase(
         state,

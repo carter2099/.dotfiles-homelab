@@ -163,6 +163,67 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
             self.assertEqual(record["completion_outcome"], "failed")
             self.assertFalse(record["resume_valid"])
 
+    def test_phase_exception_preserves_prior_progress_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            artifact = run_dir / "01-applied.json"
+            state = WorkflowState(run_dir, workflow.WORKFLOW_NAME, run_id="test")
+
+            def operation():
+                workflow.atomic_write_json(
+                    artifact,
+                    {
+                        "steps": [{
+                            "step": "gamingrig_maintenance",
+                            "status": "ok",
+                        }],
+                    },
+                )
+                raise RuntimeError("apt upgrade timed out after 900s")
+
+            data, resumed = workflow._run_phase(
+                state,
+                phase="apply",
+                artifact=artifact,
+                inputs={"code_hash": "stable"},
+                args=argparse.Namespace(resume=False),
+                operation=operation,
+            )
+
+            self.assertFalse(resumed)
+            self.assertEqual(data["phase_status"], "failed")
+            self.assertTrue(data["phase_failed"])
+            self.assertEqual(
+                data["steps"][0]["step"],
+                "gamingrig_maintenance",
+            )
+            self.assertIn("apt upgrade timed out", data["error"])
+            self.assertEqual(state.phase_record("apply")["status"], "failed")
+
+    def test_phase_exception_without_progress_still_writes_terminal_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            artifact = run_dir / "01-applied.json"
+            state = WorkflowState(run_dir, workflow.WORKFLOW_NAME, run_id="test")
+
+            data, resumed = workflow._run_phase(
+                state,
+                phase="apply",
+                artifact=artifact,
+                inputs={"code_hash": "stable"},
+                args=argparse.Namespace(resume=False),
+                operation=lambda: (_ for _ in ()).throw(
+                    RuntimeError("apt unavailable before any step")
+                ),
+            )
+
+            self.assertFalse(resumed)
+            self.assertEqual(data["phase_status"], "failed")
+            self.assertTrue(data["phase_failed"])
+            self.assertNotIn("steps", data)
+            self.assertIn("apt unavailable before any step", data["error"])
+            self.assertEqual(state.phase_record("apply")["status"], "failed")
+
     def test_startup_fingerprint_mutation_aborts_and_records_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -382,6 +443,41 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
                 state.phase_record("render")["completion_outcome"], "failed"
             )
             self.assertIn("email send failed", artifact.read_text())
+
+    def test_failed_maintenance_returns_nonzero_after_successful_reporting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            state = WorkflowState(run_dir, workflow.WORKFLOW_NAME, run_id="test")
+            args = argparse.Namespace(resume=False, dry_run=True)
+            workflow._run_phase(
+                state,
+                phase="apply",
+                artifact=run_dir / "01-applied.json",
+                inputs={"code_hash": "stable"},
+                args=args,
+                operation=lambda: {"steps": [{"step": "apt_upgrade", "status": "failed", "error": "apt timed out"}]},
+            )
+
+            def render(*_args, **_kwargs):
+                (run_dir / "08-email.html").write_text("<p>Maintenance failed</p>", encoding="utf-8")
+
+            def archive(*_args, **_kwargs):
+                (run_dir / "summary.md").write_text("Maintenance failed\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(workflow, "_phase_inputs", return_value={"code_hash": "stable"}),
+                mock.patch.object(report, "phase_8_render_send", side_effect=render),
+                mock.patch.object(report, "phase_9_archive", side_effect=archive),
+                mock.patch.object(dotfiles, "phase_9b_dotfiles", return_value={"status": "skipped", "reason": "dry run"}),
+            ):
+                exit_code = workflow._finish_after_fixes(
+                    state, args, run_dir, {}, workflow.time.time()
+                )
+
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(state.phase_record("apply")["status"], "failed")
+            for phase in ("render", "archive", "dotfiles"):
+                self.assertEqual(state.phase_record(phase)["status"], "succeeded")
 
 if __name__ == "__main__":
     unittest.main()

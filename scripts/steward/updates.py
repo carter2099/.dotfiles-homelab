@@ -95,12 +95,96 @@ from .runtime import (
     write_json,
 )
 
-def _p1_apt_upgrade():
-    """Run apt update + apt upgrade -y."""
-    print("  [1a] apt update + upgrade")
+# Local apt is deliberately bounded independently of the runtime command
+# default.  A package transaction may legitimately outlive the 120s helper
+# default, but it must still leave a finite, reportable attempt.
+P1_APT_TIMEOUT = 900
+_P1_FAILURE_STATUSES = frozenset({"failed", "error", "timeout", "started"})
+
+
+def _p1_output_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _p1_exception_packet(step, error, *, timeout_s=None):
+    """Turn an unexpected substep exception into durable result data."""
+    timed_out = isinstance(error, subprocess.TimeoutExpired)
+    status = "timeout" if timed_out else "failed"
+    if timed_out:
+        limit = timeout_s if timeout_s is not None else getattr(error, "timeout", None)
+        detail = (
+            f"{step} timed out after {limit}s"
+            if limit is not None
+            else f"{step} timed out"
+        )
+    else:
+        detail = f"{step} failed: {error}"
+    output = "\n".join(
+        part for part in (
+            _p1_output_text(getattr(error, "stdout", None)),
+            _p1_output_text(getattr(error, "stderr", None)),
+        ) if part
+    )
+    packet = {"step": step, "status": status, "error": str(detail)[:2048]}
+    if timeout_s is not None:
+        packet["timeout_s"] = timeout_s
+    if output:
+        packet["output"] = output[-4000:]
+    return packet
+
+
+def _p1_run_step(steps, name, operation, persist):
+    """Persist ``started`` before running one operation, then its outcome."""
+    steps.append({"step": name, "status": "started"})
+    persist()
     try:
-        run(["sudo", "apt", "update"], capture_output=True, text=True)
-        upgrade = run(["sudo", "apt", "upgrade", "-y"], capture_output=True, text=True)
+        result = operation()
+    except subprocess.TimeoutExpired as error:
+        result = _p1_exception_packet(name, error)
+    except Exception as error:
+        result = _p1_exception_packet(name, error)
+    if not isinstance(result, dict):
+        result = {
+            "step": name,
+            "status": "failed",
+            "error": f"substep returned {type(result).__name__}, not an object",
+        }
+    else:
+        result.setdefault("step", name)
+    steps[-1] = result
+    persist()
+    return result
+
+
+def _p1_progress_payload(steps, *, dry_run=False):
+    payload = {"steps": list(steps)}
+    if dry_run:
+        payload["dry_run"] = True
+    return payload
+
+
+def _p1_apt_upgrade():
+    """Run the bounded local apt update + upgrade operation."""
+    print("  [1a] apt update + upgrade")
+    stage = "apt update"
+    try:
+        run(
+            ["sudo", "apt", "update"],
+            capture_output=True,
+            text=True,
+            timeout=P1_APT_TIMEOUT,
+        )
+        stage = "apt upgrade"
+        upgrade = run(
+            ["sudo", "apt", "upgrade", "-y"],
+            capture_output=True,
+            text=True,
+            timeout=P1_APT_TIMEOUT,
+        )
         stdout = upgrade.stdout or ""
         m = re.search(r"(\d+)\s+upgraded", stdout)
         upgraded = int(m.group(1)) if m else 0
@@ -120,9 +204,23 @@ def _p1_apt_upgrade():
             "docker_touched": docker_touched,
             "output_tail": "\n".join(stdout.strip().splitlines()[-20:]),
         }
-    except subprocess.CalledProcessError as e:
-        return {"step": "apt_upgrade", "status": "failed", "error": str(e),
-                "output": e.stdout if e.stdout else ""}
+    except subprocess.TimeoutExpired as error:
+        packet = _p1_exception_packet(
+            "apt_upgrade",
+            error,
+            timeout_s=P1_APT_TIMEOUT,
+        )
+        packet["error"] = f"{stage} timed out after {P1_APT_TIMEOUT}s"
+        packet["stage"] = stage
+        return packet
+    except subprocess.CalledProcessError as error:
+        return {
+            "step": "apt_upgrade",
+            "status": "failed",
+            "error": str(error),
+            "output": _p1_output_text(error.stdout),
+            "stage": stage,
+        }
 
 
 def _wait_docker_stack_ready(timeout_s=120):
@@ -173,26 +271,52 @@ def _wait_docker_stack_ready(timeout_s=120):
     return {"status": "timeout", **last}
 
 
-def _p1_auto_pkgs():
-    """Auto-apply docker-* and cloudflared upgrades with pre-version capture."""
+def _p1_auto_pkgs(progress=None):
+    """Auto-apply docker-* and cloudflared upgrades with durable progress."""
     results = []
     for pkg in AUTO_PKGS:
+        step_name = f"auto_{pkg}"
         print(f"  [1b] auto-apply {pkg}")
-        pre_ver = apt_installed_version(pkg)
+        results.append({"step": step_name, "status": "started"})
+        if progress is not None:
+            progress(list(results))
+        pre_ver = None
         try:
-            run(["sudo", "apt", "install", "--only-upgrade", pkg, "-y"],
-                capture_output=True, text=True)
+            pre_ver = apt_installed_version(pkg)
+            run(
+                ["sudo", "apt", "install", "--only-upgrade", pkg, "-y"],
+                capture_output=True,
+                text=True,
+                timeout=P1_APT_TIMEOUT,
+            )
             post_ver = apt_installed_version(pkg)
-            results.append({
-                "step": f"auto_{pkg}", "status": "ok" if post_ver != pre_ver else "skipped",
-                "pre_version": pre_ver, "post_version": post_ver,
-            })
-        except subprocess.CalledProcessError as e:
-            results.append({
-                "step": f"auto_{pkg}", "status": "failed",
-                "pre_version": pre_ver, "error": str(e),
-                "output": e.stdout.strip() if e.stdout else "",
-            })
+            result = {
+                "step": step_name,
+                "status": "ok" if post_ver != pre_ver else "skipped",
+                "pre_version": pre_ver,
+                "post_version": post_ver,
+            }
+        except subprocess.TimeoutExpired as error:
+            result = _p1_exception_packet(
+                step_name,
+                error,
+                timeout_s=P1_APT_TIMEOUT,
+            )
+            result["pre_version"] = pre_ver
+        except subprocess.CalledProcessError as error:
+            result = {
+                "step": step_name,
+                "status": "failed",
+                "pre_version": pre_ver,
+                "error": str(error),
+                "output": _p1_output_text(error.stdout).strip(),
+            }
+        except Exception as error:
+            result = _p1_exception_packet(step_name, error)
+            result["pre_version"] = pre_ver
+        results[-1] = result
+        if progress is not None:
+            progress(list(results))
     return results
 
 
@@ -395,7 +519,7 @@ def _p1_deploy_step_ok(step):
     return False
 
 
-_P1_RETRYABLE_STATUSES = frozenset({"failed", "error", "timeout"})
+_P1_RETRYABLE_STATUSES = _P1_FAILURE_STATUSES
 _P1_DEGRADED_STATUSES = frozenset({"reverted", "warning", "degraded"})
 
 
@@ -425,7 +549,7 @@ def _p1_packet_detail(path, packet):
     return f"{label}{str(detail)[:400]}"
 
 
-def _finish_p1(run_dir, data):
+def _finish_p1(run_dir, data, progress=None):
     """Persist P1's durable outcome while retaining every step packet."""
     packets = list(_p1_status_packets(data.get("steps", [])))
     retryable = [
@@ -451,7 +575,10 @@ def _finish_p1(run_dir, data):
         })
     else:
         data.setdefault("phase_status", "succeeded")
-    write_json(run_dir / "01-applied.json", data)
+    if progress is None:
+        write_json(run_dir / "01-applied.json", data)
+    else:
+        progress(data)
     return data
 
 
@@ -1642,92 +1769,130 @@ def _p1_gamingrig_maintenance(dry_run=False):
         return result
 
 
-def phase_1_apply(run_dir, dry_run=False):
-    """Phase 1: apply safe updates. Skip if --dry-run."""
+def phase_1_apply(run_dir, dry_run=False, *, progress=None):
+    """Phase 1: apply safe updates, checkpointing each substep atomically."""
+    if progress is None:
+        progress = lambda payload: write_json(run_dir / "01-applied.json", payload)
+
+    steps = []
+
+    def persist():
+        progress(_p1_progress_payload(steps, dry_run=dry_run))
+
+    # Replace any prior attempt's artifact before the first operation.  The
+    # workflow-owned callback also stamps and validates the current attempt.
+    persist()
+    print("[P1] applying safe updates" if not dry_run
+          else "[P1] DRY RUN — skipping all mutations")
+
     # Remote maintenance is first so local P1 failures cannot skip it.
-    steps = [_p1_gamingrig_maintenance(dry_run=dry_run)]
+    _p1_run_step(
+        steps,
+        "gamingrig_maintenance",
+        lambda: _p1_gamingrig_maintenance(dry_run=dry_run),
+        persist,
+    )
     if dry_run:
-        print("[P1] DRY RUN — skipping all mutations")
-        data = {"dry_run": True, "steps": steps}
-        return _finish_p1(run_dir, data)
+        return _finish_p1(
+            run_dir,
+            {"dry_run": True, "steps": steps},
+            progress,
+        )
 
-    print("[P1] applying safe updates")
+    # 1a: apt upgrade.  Keep the existing stop boundary, but leave its timeout
+    # packet in the artifact rather than allowing an exception to erase prior
+    # remote evidence.
+    apt_result = _p1_run_step(steps, "apt_upgrade", _p1_apt_upgrade, persist)
+    if apt_result.get("status") in _P1_FAILURE_STATUSES:
+        print(f"  FAILED: apt upgrade — {apt_result.get('error')}")
+        return _finish_p1(run_dir, {"steps": steps}, progress)
 
-    # 1a: apt upgrade
-    result = _p1_apt_upgrade()
-    steps.append(result)
-    if result["status"] == "failed":
-        print(f"  FAILED: apt upgrade — {result.get('error')}")
-        data = {"steps": steps}
-        return _finish_p1(run_dir, data)
-
-    # 1b: auto-apply docker + cloudflared
-    auto_results = _p1_auto_pkgs()
+    # 1b: auto-apply docker + cloudflared.  The callback checkpoints each
+    # package, including a package currently marked started if the process is
+    # interrupted between invocation and completion.
+    auto_results = _p1_auto_pkgs(
+        progress=lambda partial: progress({"steps": steps + partial})
+    )
     steps.extend(auto_results)
-    for r in auto_results:
-        if r["status"] == "failed":
-            print(f"  FAILED: {r['step']} — {r.get('error')}")
-            data = {"steps": steps}
-            return _finish_p1(run_dir, data)
+    persist()
+    for auto_result in auto_results:
+        if auto_result.get("status") in _P1_FAILURE_STATUSES:
+            print(f"  FAILED: {auto_result.get('step')} — {auto_result.get('error')}")
+            return _finish_p1(run_dir, {"steps": steps}, progress)
 
     # 1c: settle docker after apt/auto path restarts the daemon.
     # apt needrestart may bounce docker even when auto_* later reports "skipped"
     # (versions already match). open-webui takes >30s after daemon restart.
     docker_upgraded = any(
-        s["step"].startswith("auto_docker") and s["status"] == "ok"
+        s.get("step", "").startswith("auto_docker") and s.get("status") == "ok"
         for s in auto_results
     )
-    docker_touched = bool(result.get("docker_touched")) or docker_upgraded
+    docker_touched = bool(apt_result.get("docker_touched")) or docker_upgraded
     if docker_touched:
-        settle = _wait_docker_stack_ready(timeout_s=120)
-        steps.append({
-            "step": "docker_settle",
-            "status": settle.get("status", "ok"),
-            "endpoints": settle.get("endpoints", {}),
-            "reason": "apt_docker_touched" if result.get("docker_touched") else "auto_docker_upgrade",
-        })
-        steps.append(_p1_docker_assert())
+        reason = (
+            "apt_docker_touched"
+            if apt_result.get("docker_touched")
+            else "auto_docker_upgrade"
+        )
 
-    # 1d: cloudflared restart if upgraded
+        def settle_docker():
+            settle = _wait_docker_stack_ready(timeout_s=120)
+            return {
+                "step": "docker_settle",
+                "status": settle.get("status", "ok"),
+                "endpoints": settle.get("endpoints", {}),
+                "reason": reason,
+            }
+
+        _p1_run_step(
+            steps,
+            "docker_settle",
+            settle_docker,
+            persist,
+        )
+        _p1_run_step(steps, "docker_daemon_assert", _p1_docker_assert, persist)
+
+    # 1d: cloudflared restart if upgraded.
     cloudflared_upgraded = any(
-        s["step"] == "auto_cloudflared" and s["status"] == "ok"
+        s.get("step") == "auto_cloudflared" and s.get("status") == "ok"
         for s in auto_results
     )
     if cloudflared_upgraded:
         print("  [1d] restart cloudflared")
-        try:
-            run(["sudo", "systemctl", "restart", "cloudflared"], capture_output=True, text=True)
+
+        def restart_cloudflared():
+            run(
+                ["sudo", "systemctl", "restart", "cloudflared"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
             time.sleep(5)
-            steps.append({"step": "cloudflared_restart", "status": "ok"})
-        except subprocess.CalledProcessError as e:
-            steps.append({"step": "cloudflared_restart", "status": "failed", "error": str(e)})
+            return {"step": "cloudflared_restart", "status": "ok"}
 
-    # 1e: freshrss update
-    steps.append(_p1_freshrss_update())
+        _p1_run_step(
+            steps,
+            "cloudflared_restart",
+            restart_cloudflared,
+            persist,
+        )
 
-    # 1f: open-webui
-    steps.append(_p1_openwebui())
+    # Remaining independent update checks continue and are each checkpointed.
+    _p1_run_step(steps, "freshrss", _p1_freshrss_update, persist)
+    _p1_run_step(steps, "openwebui", _p1_openwebui, persist)
+    _p1_run_step(steps, "herdr_update", _p1_herdr_update, persist)
+    _p1_run_step(steps, "searxng", _p1_searxng_update, persist)
+    _p1_run_step(steps, "llama_cpp", _p1_llama_cpp_update, persist)
+    _p1_run_step(steps, "omp_update", _p1_omp_update, persist)
 
-    # 1g: herdr self-update (refuses inside a herdr session → skipped, not failed)
-    steps.append(_p1_herdr_update())
-
-    # 1h: searxng — advance seven-day-old immutable pins with rollback
-    steps.append(_p1_searxng_update())
-
-    # 1i: llama.cpp — build seven-day-old Linux releases with atomic rollback
-    steps.append(_p1_llama_cpp_update())
-
-    # 1j: omp self-update (last local mutation; swaps the steward's own agents)
-    steps.append(_p1_omp_update())
-
-
-    data = {"steps": steps}
-    data = _finish_p1(run_dir, data)
-    n_ok = sum(1 for s in steps if s["status"] == "ok")
-    n_bumped = sum(1 for s in steps if s["status"] == "bumped")
-    n_available = sum(1 for s in steps if s["status"] == "available")
-    n_skipped = sum(1 for s in steps if s["status"] == "skipped")
-    n_failed = sum(1 for s in steps if s["status"] == "failed")
+    data = _finish_p1(run_dir, {"steps": steps}, progress)
+    n_ok = sum(1 for s in steps if s.get("status") == "ok")
+    n_bumped = sum(1 for s in steps if s.get("status") == "bumped")
+    n_available = sum(1 for s in steps if s.get("status") == "available")
+    n_skipped = sum(1 for s in steps if s.get("status") == "skipped")
+    n_failed = sum(
+        1 for s in steps if s.get("status") in _P1_FAILURE_STATUSES
+    )
     print(f"[P1] done -> {run_dir / '01-applied.json'}")
     print(f"  {n_ok} ok, {n_bumped} bumped, {n_available} available, "
           f"{n_skipped} skipped, {n_failed} failed")

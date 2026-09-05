@@ -3,6 +3,8 @@
 .zcompdump
 .config/nvim/lazy-lock.json
 .config/cloudflare/
+.config/homelab-monitor/
+.config/.wrangler/
 k3s/middleware/auth/
 # Host-local credentials and one-off recovery handoffs.
 /.ssh/
@@ -21,6 +23,7 @@ dev/
 # steward session noise
 scripts/**/__pycache__/
 scripts/**/*.pyc
+system-config/__pycache__/
 scripts/.smtp_config
 scripts/.claude-digests-backup/
 .config/systemd/user/*.wants/
@@ -31,6 +34,7 @@ scripts/.claude-digests-backup/
 
 # Deployment-only paths; canonical sources are maintained elsewhere.
 /homelab-backup/
+/vib/
 /.config/prompt-guard/
 /.local/lib/prompt-guard/
 /.config/rig-dashboard/

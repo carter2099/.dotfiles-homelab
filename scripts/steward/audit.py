@@ -768,8 +768,9 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Judge the security posture from the evidence: listening sockets vs the documented set "
-            "(loopback-only: open-webui 48100, searxng 8080, prompt-guard 8090, news 30144, herdr-web 30145; "
-            "ufw-gated: llm-proxy 8081, opencode-go-proxy 8082; LAN: blog 33099), ufw ruleset intact "
+            "(loopback-only: open-webui 48100, searxng 8080, prompt-guard 8090, news 30144, herdr-web 30145, "
+            "beatz 30142, blog 33099; "
+            "ufw-gated: llm-proxy 8081, opencode-go-proxy 8082), ufw ruleset intact "
             "(cni0/flannel.1/docker bridges), unattended-upgrades active, carter2099.com RDAP expiry "
             "(>30d out = ok), CF tunnel ingress vs expected hostnames (chat, hooks, freshrss, blog, "
             "omp, ssh, beatz, rig, news, remote), SSH failed-password volume. Flag anything unexpected. "
