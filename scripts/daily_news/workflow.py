@@ -1,7 +1,7 @@
 """Daily News workflow orchestration and executable-facing preflight."""
 from __future__ import annotations
 
-import json
+import math
 import os
 import signal
 import sys
@@ -29,6 +29,12 @@ def validate_runtime_contract() -> None:
         "REFERENCED_URLS_SCHEMA_VERSION": getattr(catalog, "REFERENCED_URLS_SCHEMA_VERSION", None),
         "RANKING_SCHEMA_VERSION": getattr(catalog, "RANKING_SCHEMA_VERSION", None),
         "ATTENTION_SCHEMA_VERSION": getattr(attention, "SCHEMA_VERSION", None),
+        "ATTENTION_STAGE_BUDGET_SECONDS": getattr(
+            attention, "ATTENTION_STAGE_BUDGET_SECONDS", None
+        ),
+        "MAX_ATTENTION_STAGE_BUDGET_SECONDS": getattr(
+            attention, "MAX_ATTENTION_STAGE_BUDGET_SECONDS", None
+        ),
     }
     for name, minimum in (
         ("CROSS_DAY_DEDUP_DAYS", 1),
@@ -39,6 +45,24 @@ def validate_runtime_contract() -> None:
         value = contract_values[name]
         if not isinstance(value, int) or value < minimum:
             errors.append(f"{name} must be an integer >= {minimum} (got {value!r})")
+    budget = contract_values["ATTENTION_STAGE_BUDGET_SECONDS"]
+    budget_ceiling = contract_values["MAX_ATTENTION_STAGE_BUDGET_SECONDS"]
+    if (
+        isinstance(budget, bool)
+        or not isinstance(budget, (int, float))
+        or isinstance(budget_ceiling, bool)
+        or not isinstance(budget_ceiling, (int, float))
+        or not math.isfinite(float(budget))
+        or not math.isfinite(float(budget_ceiling))
+        or budget_ceiling <= 0
+        or budget < 0
+        or budget > budget_ceiling
+    ):
+        errors.append(
+            "ATTENTION_STAGE_BUDGET_SECONDS must be a number between 0 and "
+            f"MAX_ATTENTION_STAGE_BUDGET_SECONDS (got {budget!r}, ceiling "
+            f"{budget_ceiling!r})"
+        )
     if len(TOPICS) != 5:
         errors.append(f"TOPICS must contain five sections (got {len(TOPICS)})")
     for key, config in TOPICS.items():

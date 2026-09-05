@@ -12,17 +12,19 @@ import hashlib
 import json
 import math
 import re
+import signal
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
 import requests
 from workflow_state import atomic_write_json
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PROVIDER = "GDELT DOC 2.0"
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 CACHE_TTL_HOURS = 6
@@ -31,6 +33,16 @@ REQUEST_TIMEOUT_SECONDS = 45
 REQUEST_ATTEMPTS = 2
 RETRY_BASE_DELAY_SECONDS = 30.0
 RETRY_MAX_DELAY_SECONDS = 300.0
+
+# Attention is optional. Bound provider I/O, including continuously streamed
+# response bodies, and retry waits so it cannot consume the research budget.
+ATTENTION_STAGE_BUDGET_SECONDS = 15 * 60.0
+MAX_ATTENTION_STAGE_BUDGET_SECONDS = ATTENTION_STAGE_BUDGET_SECONDS
+
+ATTENTION_BUDGET_SCOPE = (
+    "provider I/O including streamed bodies and retry waits; "
+    "local scoring and cache writes are not interrupted"
+)
 
 EDITORIAL_POINTS = {
     "high": 100.0,
@@ -472,6 +484,41 @@ def _retry_delay_seconds(response: Any | None, attempt: int) -> float:
         RETRY_MAX_DELAY_SECONDS,
     )
 
+@contextmanager
+def _request_wall_clock_timeout(seconds: float) -> Iterator[None]:
+    """Bound the single-threaded attention phase's complete HTTP request.
+
+    Requests' socket timeout restarts when bytes arrive. A POSIX alarm also
+    interrupts a peer that never becomes idle. Never replace another owner's
+    timer; calling outside the main thread likewise fails before any request.
+    """
+    if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+        raise RuntimeError("attention request cannot replace an active process timer")
+
+    def expired(_signum: int, _frame: Any) -> None:
+        raise TimeoutError("GDELT request exceeded its wall-clock allowance")
+
+    previous_handler = signal.signal(signal.SIGALRM, expired)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _remaining_deadline_seconds(
+    deadline: float | None,
+    clock: Callable[[], float],
+) -> float | None:
+    """Return time left before a shared monotonic deadline, if configured."""
+    if deadline is None:
+        return None
+    try:
+        return max(0.0, float(deadline) - float(clock()))
+    except (TypeError, ValueError):
+        return 0.0
+
 
 def fetch_gdelt_attention(
     candidate: dict[str, Any],
@@ -479,11 +526,24 @@ def fetch_gdelt_attention(
     *,
     request_get: Callable[..., Any] = requests.get,
     sleep: Callable[[float], None] = time.sleep,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    budget_seconds: float | int | None = None,
 ) -> dict[str, Any]:
-    """Fetch one event's rolling GDELT coverage timeline with bounded retry."""
+    """Fetch one event's rolling GDELT timeline with bounded retry.
+
+    ``deadline`` is shared with the enclosing attention stage. New requests
+    and retries cannot cross it. The HTTP request's wall-clock alarm covers
+    both connection setup and the complete response body, even when a peer
+    continuously supplies bytes faster than Requests' idle socket timeout.
+    """
     observed_at = now or datetime.now(timezone.utc)
     query = gdelt_query(candidate)
     terms = event_terms(candidate)
+    budget_value = (
+        _bounded_budget_seconds(budget_seconds)
+        if budget_seconds is not None else None
+    )
     if not _terms_are_sufficient(terms) or not query:
         return {
             "status": "unavailable",
@@ -506,21 +566,41 @@ def fetch_gdelt_attention(
     }
     errors: list[str] = []
     next_request_delay = 0.0
+    deadline_exhausted = False
     for attempt in range(REQUEST_ATTEMPTS):
+        remaining = _remaining_deadline_seconds(deadline, clock)
+        if remaining is not None and remaining <= 0:
+            deadline_exhausted = True
+            break
         response = None
         try:
-            response = request_get(
-                GDELT_DOC_URL,
-                params=params,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
+            request_timeout = float(REQUEST_TIMEOUT_SECONDS)
+            if remaining is not None:
+                request_timeout = min(request_timeout, remaining)
+            if request_timeout <= 0:
+                deadline_exhausted = True
+                break
+            with _request_wall_clock_timeout(request_timeout):
+                response = request_get(
+                    GDELT_DOC_URL,
+                    params=params,
+                    headers=headers,
+                    timeout=request_timeout,
+                )
             if response.status_code == 429 or response.status_code >= 500:
                 errors.append(f"HTTP {response.status_code}")
                 retry_delay = _retry_delay_seconds(response, attempt)
                 next_request_delay = max(next_request_delay, retry_delay)
                 if attempt + 1 < REQUEST_ATTEMPTS:
+                    remaining = _remaining_deadline_seconds(deadline, clock)
+                    if remaining is not None and retry_delay >= remaining:
+                        deadline_exhausted = True
+                        break
                     sleep(retry_delay)
+                    remaining = _remaining_deadline_seconds(deadline, clock)
+                    if remaining is not None and remaining <= 0:
+                        deadline_exhausted = True
+                        break
                 continue
             response.raise_for_status()
             payload = response.json()
@@ -532,19 +612,35 @@ def fetch_gdelt_attention(
             return observation
         except Exception as error:
             errors.append(" ".join(str(error).split())[:240])
+            remaining = _remaining_deadline_seconds(deadline, clock)
+            if remaining is not None and remaining <= 0:
+                deadline_exhausted = True
+                break
             retry_delay = _retry_delay_seconds(response, attempt)
             next_request_delay = max(next_request_delay, retry_delay)
             if attempt + 1 < REQUEST_ATTEMPTS:
+                remaining = _remaining_deadline_seconds(deadline, clock)
+                if remaining is not None and retry_delay >= remaining:
+                    deadline_exhausted = True
+                    break
                 sleep(retry_delay)
-    return {
-        "status": "unavailable",
-        "provider": PROVIDER,
-        "query": query,
-        "terms": event_terms(candidate),
-        "observed_at": observed_at.isoformat(),
-        "error": "; ".join(errors),
-        "_next_request_delay_seconds": next_request_delay,
-    }
+                remaining = _remaining_deadline_seconds(deadline, clock)
+                if remaining is not None and remaining <= 0:
+                    deadline_exhausted = True
+                    break
+    if deadline_exhausted:
+        errors.append("optional attention-stage budget exhausted")
+    observation = _unavailable_observation(
+        candidate,
+        observed_at,
+        "; ".join(errors),
+        unavailable_reason=(
+            "attention_stage_budget_exhausted" if deadline_exhausted else None
+        ),
+        budget_seconds=budget_value,
+    )
+    observation["_next_request_delay_seconds"] = next_request_delay
+    return observation
 
 
 def _cache_path(candidate: dict[str, Any], cache_dir: Path) -> Path:
@@ -663,6 +759,80 @@ def priority_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _bounded_budget_seconds(value: float | int | None) -> float:
+    """Return a finite optional-stage allowance within the hard ceiling."""
+    if value is None:
+        return float(ATTENTION_STAGE_BUDGET_SECONDS)
+    try:
+        budget = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("attention budget must be a finite number") from error
+    if not math.isfinite(budget):
+        raise ValueError("attention budget must be a finite number")
+    if budget < 0 or budget > MAX_ATTENTION_STAGE_BUDGET_SECONDS:
+        raise ValueError(
+            "attention budget must be between 0 and "
+            f"{MAX_ATTENTION_STAGE_BUDGET_SECONDS:.0f} seconds"
+        )
+    return budget
+
+
+def _unavailable_observation(
+    candidate: dict[str, Any],
+    observed_at: datetime,
+    error: str,
+    *,
+    unavailable_reason: str | None = None,
+    budget_seconds: float | None = None,
+    elapsed_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Build the same confidence-zero observation for provider or budget failure."""
+    observation: dict[str, Any] = {
+        "status": "unavailable",
+        "provider": PROVIDER,
+        "query": gdelt_query(candidate),
+        "terms": event_terms(candidate),
+        "observed_at": observed_at.isoformat(),
+        "error": " ".join(str(error).split())[:240],
+    }
+    if unavailable_reason is not None:
+        observation["unavailable_reason"] = unavailable_reason
+    if budget_seconds is not None:
+        observation["budget_seconds"] = budget_seconds
+    if elapsed_seconds is not None:
+        observation["elapsed_seconds"] = round(max(0.0, elapsed_seconds), 3)
+    return observation
+
+
+def _budget_exhausted_observation(
+    candidate: dict[str, Any],
+    observed_at: datetime,
+    budget_seconds: float,
+    elapsed_seconds: float,
+) -> dict[str, Any]:
+    return _unavailable_observation(
+        candidate,
+        observed_at,
+        "optional attention-stage budget exhausted before observation",
+        unavailable_reason="attention_stage_budget_exhausted",
+        budget_seconds=budget_seconds,
+        elapsed_seconds=elapsed_seconds,
+    )
+
+
+def _attention_work_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    """Use editorial priority plus production tie-breakers before observation."""
+    baseline = copy.copy(item)
+    normalize_editorial_significance(baseline)
+    baseline["priority_score"] = EDITORIAL_POINTS[baseline["editorial_significance"]]
+    baseline["attention"] = {
+        "digest_prominence": 0.0,
+        "attention_now": 0.0,
+        "confidence": 0.0,
+    }
+    return priority_sort_key(baseline)
+
+
 def score_attention(
     candidates: list[dict[str, Any]],
     cache_dir: Path,
@@ -671,41 +841,104 @@ def score_attention(
     fetcher: Callable[[dict[str, Any], datetime], dict[str, Any]] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     request_interval: float = REQUEST_INTERVAL_SECONDS,
+    budget_seconds: float | int | None = ATTENTION_STAGE_BUDGET_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Attach independent attention and final product-priority scores."""
+    """Attach measured attention and priority within a bounded optional budget.
+
+    Cached observations are always reusable and do not consume the allowance.
+    Uncached candidates are attempted in deterministic production-priority
+    order until the monotonic deadline expires; output remains in caller order.
+    Later candidates receive the normal ``unavailable``/confidence-zero
+    semantics without another provider call. ``budget_seconds`` is bounded by
+    ``MAX_ATTENTION_STAGE_BUDGET_SECONDS``.
+    """
     observed_at = now or datetime.now(timezone.utc)
+    allowance = _bounded_budget_seconds(budget_seconds)
+    stage_started = float(clock())
+    stage_deadline = stage_started + allowance
+
+    def elapsed_seconds() -> float:
+        return max(0.0, float(clock()) - stage_started)
+
+    def budget_expired() -> bool:
+        return elapsed_seconds() >= allowance
+
     effective_fetcher = fetcher or (
         lambda candidate, timestamp: fetch_gdelt_attention(
             candidate,
             timestamp,
             sleep=sleep,
+            deadline=stage_deadline,
+            clock=clock,
+            budget_seconds=allowance,
         )
     )
     scored = [enforce_editorial_significance(copy.deepcopy(item)) for item in candidates]
-    observations: list[dict[str, Any]] = []
+    observations_by_index: list[dict[str, Any] | None] = [None] * len(scored)
     requested = 0
     cache_hits = 0
     next_request_delay = request_interval
+    budget_exhausted = False
+    work_order = sorted(
+        range(len(scored)),
+        key=lambda index: _attention_work_sort_key(scored[index]),
+        reverse=True,
+    )
 
-    for candidate in scored:
+    for candidate_index in work_order:
+        candidate = scored[candidate_index]
         cached = _load_cache(candidate, cache_dir, observed_at)
         if cached is not None:
             observation = cached
             cache_hits += 1
+        elif budget_exhausted or budget_expired():
+            budget_exhausted = True
+            observation = _budget_exhausted_observation(
+                candidate,
+                observed_at,
+                allowance,
+                elapsed_seconds(),
+            )
         else:
             if requested and next_request_delay > 0:
+                remaining = max(0.0, allowance - elapsed_seconds())
+                # Never sleep through the allowance only to start a request
+                # that cannot finish inside it.  Equality is the deterministic
+                # boundary: the next candidate becomes unavailable.
+                if next_request_delay >= remaining:
+                    budget_exhausted = True
+                    observation = _budget_exhausted_observation(
+                        candidate,
+                        observed_at,
+                        allowance,
+                        elapsed_seconds(),
+                    )
+                    observation.setdefault("term_source", event_term_source(candidate))
+                    observation.setdefault("wait_seconds", next_request_delay)
+                    observations_by_index[candidate_index] = observation
+                    continue
                 sleep(next_request_delay)
+                if budget_expired():
+                    budget_exhausted = True
+                    observation = _budget_exhausted_observation(
+                        candidate,
+                        observed_at,
+                        allowance,
+                        elapsed_seconds(),
+                    )
+                    observation.setdefault("term_source", event_term_source(candidate))
+                    observation.setdefault("wait_seconds", next_request_delay)
+                    observations_by_index[candidate_index] = observation
+                    continue
             try:
                 observation = effective_fetcher(candidate, observed_at)
             except Exception as error:
-                observation = {
-                    "status": "unavailable",
-                    "provider": PROVIDER,
-                    "query": gdelt_query(candidate),
-                    "terms": event_terms(candidate),
-                    "observed_at": observed_at.isoformat(),
-                    "error": " ".join(str(error).split())[:240],
-                }
+                observation = _unavailable_observation(
+                    candidate,
+                    observed_at,
+                    str(error),
+                )
             requested += 1
             try:
                 adaptive_delay = float(
@@ -715,9 +948,21 @@ def score_attention(
                 adaptive_delay = 0.0
             next_request_delay = max(request_interval, adaptive_delay)
             _save_cache(candidate, cache_dir, observation)
+            if (
+                observation.get("unavailable_reason")
+                == "attention_stage_budget_exhausted"
+            ):
+                budget_exhausted = True
+            elif budget_expired():
+                budget_exhausted = True
         observation.setdefault("term_source", event_term_source(candidate))
-        observations.append(observation)
+        observations_by_index[candidate_index] = observation
 
+    observations = [
+        observation
+        for observation in observations_by_index
+        if observation is not None
+    ]
     comparable = [
         observation for observation in observations
         if observation.get("status") == "ok"
@@ -796,6 +1041,11 @@ def score_attention(
                 f"{significance.title()} editorial significance; no matching GDELT coverage "
                 "was observed in the rolling 24-hour window."
             )
+        elif observation.get("unavailable_reason") == "attention_stage_budget_exhausted":
+            explanation = (
+                f"{significance.title()} editorial significance; the optional attention-stage "
+                "budget expired, so priority uses editorial significance only."
+            )
         else:
             explanation = (
                 f"{significance.title()} editorial significance; observed attention was "
@@ -821,6 +1071,7 @@ def score_attention(
                 "sample_relevance": observation.get("sample_relevance"),
                 "query": observation.get("query", ""),
                 "term_source": observation.get("term_source"),
+                "unavailable_reason": observation.get("unavailable_reason"),
                 "channels_available": ["news_coverage"],
                 "channels_unavailable": ["homepage_prominence", "social", "video"],
             },
@@ -828,10 +1079,28 @@ def score_attention(
         candidate["priority_score"] = priority
         candidate["priority_explanation"] = explanation
 
+    elapsed = elapsed_seconds()
+    budget_exhausted_candidates = sum(
+        observation.get("unavailable_reason")
+        == "attention_stage_budget_exhausted"
+        for observation in observations
+    )
     artifact = {
         "schema_version": SCHEMA_VERSION,
         "provider": PROVIDER,
         "observed_at": observed_at.isoformat(),
+        "budget_seconds": allowance,
+        "budget_scope": ATTENTION_BUDGET_SCOPE,
+        "elapsed_seconds": round(elapsed, 3),
+        "budget_exhausted": budget_exhausted or budget_exhausted_candidates > 0,
+        "observation_order": [
+            {
+                "title": scored[index].get("title", ""),
+                "url": scored[index].get("url", ""),
+            }
+            for index in work_order
+        ],
+        "budget_exhausted_candidates": budget_exhausted_candidates,
         "requests": requested,
         "cache_hits": cache_hits,
         "available": sum(
@@ -854,3 +1123,219 @@ def score_attention(
         ],
     }
     return scored, artifact
+
+
+def _analysis_duration(value: Any) -> float | None:
+    """Normalize an optional measured duration for offline analysis output."""
+    if value is None:
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(duration):
+        return None
+    return round(max(0.0, duration), 3)
+
+
+def _analysis_identity(item: dict[str, Any]) -> str:
+    url = _clean_text(item.get("url"))
+    title = _clean_text(item.get("title"))
+    return url or title or "(untitled candidate)"
+
+
+def _analysis_rank_indices(items: list[dict[str, Any]]) -> dict[int, int]:
+    """Rank items with the production tie-breakers and no input-order fallback."""
+    return {
+        index: rank
+        for rank, index in enumerate(
+            sorted(
+                range(len(items)),
+                key=lambda index: (
+                    priority_sort_key(items[index]),
+                    _analysis_identity(items[index]).casefold(),
+                ),
+                reverse=True,
+            ),
+            start=1,
+        )
+    }
+
+
+def analyze_attention_artifact(
+    artifact: dict[str, Any],
+    *,
+    phase_elapsed_seconds: float | int | None = None,
+    run_elapsed_seconds: float | int | None = None,
+) -> dict[str, Any]:
+    """Compare recorded attention with an editorial-only baseline offline.
+
+    This consumes an existing ``02b-attention.json`` payload only.  It performs
+    no provider or model calls and reports measured coverage status, score
+    deltas, deterministic rank changes, and (when supplied) phase/runtime
+    attribution.  ``phase_elapsed_seconds`` and ``run_elapsed_seconds`` are
+    intentionally explicit so callers can source them from durable workflow
+    state rather than infer runtime from provider timestamps.
+    """
+    if not isinstance(artifact, dict):
+        raise TypeError("attention artifact must be a JSON object")
+
+    raw_observations = artifact.get("observations")
+    observations = (
+        [row for row in raw_observations if isinstance(row, dict)]
+        if isinstance(raw_observations, list)
+        else []
+    )
+    raw_fresh = artifact.get("fresh")
+    fresh = (
+        [item for item in raw_fresh if isinstance(item, dict)]
+        if isinstance(raw_fresh, list)
+        else []
+    )
+    items = [copy.deepcopy(item) for item in (fresh or observations)]
+    if not fresh:
+        # Observation rows have the scored candidate fields at their top level;
+        # keep that legacy shape usable without fabricating source evidence.
+        items = [copy.deepcopy(item) for item in observations]
+
+    baseline: list[dict[str, Any]] = []
+    recorded: list[dict[str, Any]] = []
+    statuses: list[str] = []
+    delta_rows: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        normalize_editorial_significance(item)
+        observation = observations[index] if index < len(observations) else {}
+        attention = item.get("attention")
+        attention = attention if isinstance(attention, dict) else {}
+        raw = observation.get("raw")
+        raw = raw if isinstance(raw, dict) else {}
+        status = _clean_text(
+            attention.get("status") or raw.get("status") or "unavailable"
+        ).lower()
+        statuses.append(status)
+
+        significance = item["editorial_significance"]
+        baseline_item = copy.deepcopy(item)
+        baseline_item["priority_score"] = EDITORIAL_POINTS[significance]
+        baseline_item["attention"] = {
+            "digest_prominence": 0.0,
+            "attention_now": 0.0,
+            "confidence": 0.0,
+        }
+        baseline.append(baseline_item)
+
+        recorded_item = copy.deepcopy(item)
+        recorded_item["priority_score"] = (
+            _numeric(item.get("priority_score"))
+            if item.get("priority_score") is not None
+            else EDITORIAL_POINTS[significance]
+        )
+        recorded.append(recorded_item)
+        baseline_score = EDITORIAL_POINTS[significance]
+        recorded_score = _numeric(recorded_item["priority_score"])
+        delta_rows.append({
+            "title": _clean_text(item.get("title")),
+            "url": _clean_text(item.get("url")),
+            "editorial_significance": significance,
+            "attention_status": status,
+            "editorial_only_priority": baseline_score,
+            "recorded_priority": recorded_score,
+            "priority_delta": round(recorded_score - baseline_score, 1),
+        })
+
+    baseline_ranks = _analysis_rank_indices(baseline)
+    recorded_ranks = _analysis_rank_indices(recorded)
+    for index, row in enumerate(delta_rows):
+        editorial_rank = baseline_ranks[index]
+        recorded_rank = recorded_ranks[index]
+        row["editorial_only_rank"] = editorial_rank
+        row["recorded_rank"] = recorded_rank
+        row["rank_delta"] = editorial_rank - recorded_rank
+
+    candidate_count = len(items)
+    available = sum(status in {"ok", "no_matches"} for status in statuses)
+    unavailable = sum(status == "unavailable" for status in statuses)
+    score_deltas = [float(row["priority_delta"]) for row in delta_rows]
+    rank_deltas = [int(row["rank_delta"]) for row in delta_rows]
+    status_counts: dict[str, int] = {}
+    for status in statuses:
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    baseline_order = [
+        _analysis_identity(baseline[index])
+        for index, _rank in sorted(baseline_ranks.items(), key=lambda pair: pair[1])
+    ]
+    recorded_order = [
+        _analysis_identity(recorded[index])
+        for index, _rank in sorted(recorded_ranks.items(), key=lambda pair: pair[1])
+    ]
+    top_n = min(5, candidate_count)
+    top_overlap = (
+        len(set(baseline_order[:top_n]) & set(recorded_order[:top_n]))
+        if top_n
+        else 0
+    )
+
+    summary: dict[str, Any] = {
+        "schema_version": 1,
+        "provider": artifact.get("provider", PROVIDER),
+        "observed_at": artifact.get("observed_at", ""),
+        "coverage": {
+            "candidates": candidate_count,
+            "available": available,
+            "unavailable": unavailable,
+            "coverage_rate": round(available / candidate_count, 3)
+            if candidate_count else 0.0,
+            "status_counts": dict(sorted(status_counts.items())),
+            "requests": int(artifact.get("requests") or 0),
+            "cache_hits": int(artifact.get("cache_hits") or 0),
+            "budget_seconds": _analysis_duration(artifact.get("budget_seconds")),
+            "budget_scope": artifact.get("budget_scope"),
+            "budget_exhausted": bool(artifact.get("budget_exhausted", False)),
+            "budget_exhausted_candidates": int(
+                artifact.get("budget_exhausted_candidates") or 0
+            ),
+        },
+        "priority": {
+            "editorial_only_mean": round(
+                sum(EDITORIAL_POINTS.get(row["editorial_significance"], 60.0)
+                    for row in delta_rows) / candidate_count,
+                2,
+            ) if candidate_count else 0.0,
+            "recorded_mean": round(
+                sum(_numeric(row["recorded_priority"]) for row in delta_rows)
+                / candidate_count,
+                2,
+            ) if candidate_count else 0.0,
+            "mean_delta": round(sum(score_deltas) / candidate_count, 2)
+            if candidate_count else 0.0,
+            "score_changed": sum(abs(delta) > 0.05 for delta in score_deltas),
+            "promoted": sum(delta > 0 for delta in rank_deltas),
+            "demoted": sum(delta < 0 for delta in rank_deltas),
+            "rank_unchanged": sum(delta == 0 for delta in rank_deltas),
+            "top_n": top_n,
+            "top_n_overlap": top_overlap,
+            "editorial_only_order": baseline_order,
+            "recorded_order": recorded_order,
+            "rank_changes": delta_rows,
+        },
+    }
+
+    phase_seconds = _analysis_duration(phase_elapsed_seconds)
+    if phase_seconds is None:
+        phase_seconds = _analysis_duration(artifact.get("elapsed_seconds"))
+    run_seconds = _analysis_duration(run_elapsed_seconds)
+    if phase_seconds is not None or run_seconds is not None:
+        runtime: dict[str, Any] = {
+            "attention_stage_seconds": phase_seconds,
+            "total_run_seconds": run_seconds,
+        }
+        if phase_seconds is not None and run_seconds is not None:
+            runtime["other_phase_seconds"] = round(
+                max(0.0, run_seconds - phase_seconds), 3
+            )
+            runtime["attention_share"] = round(
+                phase_seconds / run_seconds, 3
+            ) if run_seconds > 0 else 0.0
+        summary["runtime"] = runtime
+    return summary

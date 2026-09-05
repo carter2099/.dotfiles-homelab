@@ -196,6 +196,8 @@ run_full() {
     PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
         "$PYTHON" "$SCRIPT_DIR/test_news_attention.py"
     PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        "$PYTHON" "$SCRIPT_DIR/test_news_attention_budget.py"
+    PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
         "$PYTHON" "$SCRIPT_DIR/test_digest_pipeline.py"
     PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
         "$PYTHON" "$SCRIPT_DIR/test_news_publish.py"

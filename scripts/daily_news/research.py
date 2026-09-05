@@ -553,7 +553,10 @@ def phase_2b_attention(
     phase_inputs = runtime.phase_inputs(
         "attention", topic=topic,
         upstream={"fresh": runtime.canonical_fingerprint(fresh), "ongoing": runtime.canonical_fingerprint(ongoing)},
-        policy={"attention_schema": ATTENTION_SCHEMA_VERSION},
+        policy={
+            "attention_schema": ATTENTION_SCHEMA_VERSION,
+            "attention_budget_seconds": attention.ATTENTION_STAGE_BUDGET_SECONDS,
+        },
     )
     state, cached = runtime.begin_or_load_phase(
         run_dir, "attention", inputs=phase_inputs, artifact_path=output_path,
@@ -567,6 +570,7 @@ def phase_2b_attention(
     scored_fresh, attention_artifact = attention.score_attention(
         fresh,
         runtime.ATTENTION_CACHE_DIR,
+        budget_seconds=attention.ATTENTION_STAGE_BUDGET_SECONDS,
     )
     scored_ongoing = [
         _editorial_only_priority(copy.deepcopy(item)) for item in ongoing
