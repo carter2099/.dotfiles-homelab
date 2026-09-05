@@ -116,6 +116,20 @@ class WorkerBoundaryTests(unittest.TestCase):
         self.assertEqual(result["status"], "publish-rejected")
         self.assertEqual(self.git("for-each-ref", "refs/steward-review"), "")
 
+    def test_failed_validation_retains_the_real_command_error(self):
+        (self.repo / "test_broken.py").write_text(
+            "import unittest\n"
+            "class BrokenTest(unittest.TestCase):\n"
+            "    def test_content(self):\n"
+            "        raise RuntimeError('attachment content is missing')\n"
+        )
+        home = self.root / "validation-home"
+        home.mkdir()
+        with patch.object(worker, "WORKER_PRIVATE_HOME", home):
+            with self.assertRaises(worker.WorkerExecutionError) as failure:
+                worker._run_validations(self.repo, [["python3", "-m", "unittest", "discover"]])
+        self.assertIn("RuntimeError: attachment content is missing", str(failure.exception))
+
     def test_judge_and_validation_observe_the_exact_repaired_candidate(self):
         (self.repo / "test_answer.py").write_text(
             "import unittest\nfrom main import answer\n"

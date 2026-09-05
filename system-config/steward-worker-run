@@ -335,7 +335,7 @@ def write_internal_request(request: Mapping[str, Any], path: Path) -> None:
             pass
 
 
-def copy_result(source: Path, target: Path, owner: int) -> None:
+def copy_result(source: Path, target: Path, owner: int, *, service_failed: bool = False) -> None:
     if source.is_symlink() or not source.is_file():
         fail("worker returned no regular result packet")
     st = source.stat()
@@ -350,6 +350,8 @@ def copy_result(source: Path, target: Path, owner: int) -> None:
         fail(f"worker returned invalid result JSON: {exc}")
     if not isinstance(packet, dict) or packet.get("protocol_version") != PROTOCOL_VERSION:
         fail("worker returned invalid protocol packet")
+    if service_failed and packet.get("status") != "worker-failed":
+        fail("failed worker service returned a non-failure packet")
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if target.exists() or target.is_symlink():
         if target.is_symlink() or target.stat().st_uid != owner:
@@ -517,10 +519,12 @@ def main() -> int:
             ["/usr/bin/systemctl", "start", "--wait", unit],
             timeout=expanded["timeout"] + 60,
         )
-        if started.returncode != 0:
+        stop_worker_unit(unit)
+        unit = None
+        if started.returncode != 0 and not internal_result.exists():
             detail = started.stderr or started.stdout or ""
             fail(f"worker service failed: {detail[:800]}")
-        copy_result(internal_result, args.result, owner)
+        copy_result(internal_result, args.result, owner, service_failed=started.returncode != 0)
         return 0
     finally:
         try:

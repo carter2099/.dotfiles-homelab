@@ -1457,7 +1457,10 @@ def _run_validations(root: Path, commands: Sequence[Sequence[str]]) -> list[dict
             }
         )
         if cp.returncode != 0:
-            raise WorkerExecutionError(f"validation failed: {' '.join(argv)}")
+            diagnostic = (cp.stderr or cp.stdout or "no command output").strip()[-1600:]
+            raise WorkerExecutionError(
+                f"validation failed (exit {cp.returncode}): {' '.join(argv)}\n{diagnostic}"
+            )
     return records
 
 
