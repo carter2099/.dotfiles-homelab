@@ -65,6 +65,15 @@ MAX_WORKERS = 3
 FIX_MAX_ITERS = max(1, int(os.environ.get("STEWARD_FIX_MAX_ITERS", "3")))
 P7B_REPORT_ONLY_SECTIONS = {"version-currency", "security-posture"}
 
+# P7b code repairs are delegated to the separately provisioned
+# ``steward-worker`` identity.  The helper is root-owned and validates every
+# request; this process never falls back to Carter's OMP/home context.
+STEWARD_WORKER_HELPER = Path(
+    os.environ.get("STEWARD_WORKER_HELPER", "/usr/local/libexec/steward-worker-run")
+)
+STEWARD_WORKER_POLICY_VERSION = "steward-worker-v1"
+STEWARD_WORKER_MAX_SECONDS = 2700
+
 # Timeout and model for headless omp JSON calls
 OMP_JSON_TIMEOUT = 2700
 OMP_JSON_MODEL = "openai-codex/gpt-5.6-luna:high"

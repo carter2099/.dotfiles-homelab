@@ -1,4 +1,11 @@
-"""Command execution, OMP protocol parsing, and durable artifact helpers."""
+"""Command execution, OMP protocol parsing, and durable artifact helpers.
+
+P7b repair model/tool/test execution deliberately does not use this module's
+Carter-home headless OMP path.  It is delegated to ``steward.worker`` and the
+provisioned ``steward-worker`` service; the helpers below remain for
+read-only audit/report phases and deterministic maintenance owned by the
+orchestrator.
+"""
 from __future__ import annotations
 
 from .config import (
@@ -295,8 +302,10 @@ def _call_omp_p(
     often end on a prose ack while the real ```json packet was on an earlier turn.
     Never returns raw NDJSON for the caller to scavenge.
     """
-    if mode not in ("text", "json"):
-        raise ValueError(f"unsupported omp mode: {mode!r}")
+    # P7b is intentionally absent from this path: fixes.py delegates model,
+    # tool, and validation activity to steward.worker.  This Carter-home
+    # invocation is retained for audit/report/maintenance roles that need the
+    # orchestrator's read-only host context.
     # Model-driven children may edit as Carter but cannot cross the host's
     # passwordless-sudo boundary. Deterministic steward phases retain sudo.
     cmd = [
