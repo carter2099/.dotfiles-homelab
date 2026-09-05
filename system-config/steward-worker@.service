@@ -48,14 +48,13 @@ ReadOnlyPaths=/usr/local/libexec/steward-worker /etc/steward-worker
 TemporaryFileSystem=/var/lib/steward-worker:ro
 BindReadOnlyPaths=/var/lib/steward-worker/requests/%i.json
 BindReadOnlyPaths=/run/steward-worker/proxy.sock
-BindReadWritePaths=/var/lib/steward-worker/runs/%i
+BindPaths=/var/lib/steward-worker/runs/%i
 
 # Bounded CPU, memory, process, and wall-clock use for model/tool loops.
 CPUQuota=200%
 MemoryHigh=1536M
 MemoryMax=2G
 TasksMax=256
-RuntimeMaxSec=2700
 TimeoutStartSec=2700
 
 [Install]
