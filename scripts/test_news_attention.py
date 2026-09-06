@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,6 +168,119 @@ def test_gdelt_timeline_observation_and_syndication_dedup() -> None:
     check(observation["independent_source_groups"] == 2, observation)
     check(observation["age_bucket"] in {"1-3h", "3-6h"}, observation)
     check(len(observation["timeline"]) == 96, observation)
+
+
+def test_malformed_gdelt_responses_do_not_demote_stories() -> None:
+    now = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
+    candidate = {
+        "title": "Company releases a developer tool",
+        "editorial_significance": "medium",
+        "event_terms": ["Company developer tool", "tool release"],
+    }
+    malformed = [
+        {"error": "backend unavailable"},
+        {"timeline": [{"data": [{"date": "invalid", "value": 1.0}]}]},
+        {"timeline": [{"data": [{"date": "20260906T120000Z", "value": "NaN"}]}]},
+    ]
+    for payload in malformed:
+        observation = observation_from_response(candidate, payload, now)
+        with tempfile.TemporaryDirectory() as temporary:
+            scored, _ = score_attention(
+                [candidate], Path(temporary), now=now,
+                fetcher=lambda *_: observation, request_interval=0,
+            )
+        check(scored[0]["attention"]["status"] == "unavailable", scored)
+        check(scored[0]["attention"]["confidence"] == 0.0, scored)
+        check(scored[0]["priority_score"] == 60.0, scored)
+
+
+def test_zero_timeline_is_measured_zero_attention() -> None:
+    now = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
+    candidate = {
+        "title": "Company releases a developer tool",
+        "editorial_significance": "medium",
+        "event_terms": ["Company developer tool", "tool release"],
+    }
+    observation = observation_from_response(
+        candidate,
+        {"timeline": [{"data": [{"date": "20260906T120000Z", "value": 0}]}]},
+        now,
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        scored, _ = score_attention(
+            [candidate], Path(temporary), now=now,
+            fetcher=lambda *_: observation, request_interval=0,
+        )
+    attention = scored[0]["attention"]
+    check(attention["status"] == "no_matches", attention)
+    check(attention["attention_now"] == 0.0, attention)
+    check(attention["digest_prominence"] == 0.0, attention)
+    check(attention["confidence"] > 0, attention)
+    check(scored[0]["priority_score"] < 60.0, scored)
+
+
+def test_timeline_preserves_provider_timestamp_alignment() -> None:
+    now = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
+    observation = observation_from_response(
+        {"title": "Company releases a developer tool"},
+        {"timeline": [{"data": [
+            {"date": "20260906T110500Z", "value": 0.5},
+            {"date": "20260906T112000Z", "value": 1.0},
+        ]}]},
+        now,
+    )
+    check(observation["status"] == "ok", observation)
+    check(observation["peak_coverage_share"] == 1.0, observation)
+    check(observation["current_coverage_share"] == 0.375, observation)
+
+
+def test_zero_momentum_and_breadth_do_not_become_median_signals() -> None:
+    now = datetime(2026, 9, 7, 0, 0, tzinfo=timezone.utc)
+    candidate = {
+        "title": "Company releases a developer tool",
+        "event_terms": ["Company developer tool", "tool release"],
+    }
+    data = [
+        {"date": f"20260906T{hour:02d}{minute:02d}00Z", "value": 0.5}
+        for hour in range(24) for minute in (0, 15, 30, 45)
+    ]
+    observation = observation_from_response(candidate, {"timeline": [{"data": data}]}, now)
+    with tempfile.TemporaryDirectory() as temporary:
+        scored, _ = score_attention(
+            [candidate], Path(temporary), now=now,
+            fetcher=lambda *_: observation, request_interval=0,
+        )
+    signals = scored[0]["attention"]["normalized_signals"]
+    check(signals["peak_attention"] > 0, signals)
+    check(signals["coverage_velocity"] == 0.0, signals)
+    check(signals["current_momentum"] == 0.0, signals)
+    check(signals["source_breadth"] == 0.0, signals)
+
+
+def test_unversioned_observation_cache_is_remeasured() -> None:
+    now = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
+    candidate = {
+        "title": "Company releases a developer tool",
+        "event_terms": ["Company developer tool", "tool release"],
+    }
+    with tempfile.TemporaryDirectory() as temporary:
+        cache_dir = Path(temporary)
+        score_attention(
+            [candidate], cache_dir, now=now, request_interval=0,
+            fetcher=lambda *_: observation_from_response(candidate, {"timeline": []}, now),
+        )
+        cache_path = next(cache_dir.glob("*.json"))
+        legacy = json.loads(cache_path.read_text())
+        legacy.pop("schema_version", None)
+        cache_path.write_text(json.dumps(legacy))
+        scored, _ = score_attention(
+            [candidate], cache_dir, now=now, request_interval=0,
+            fetcher=lambda *_: observation_from_response(candidate, {"timeline": [{"data": [
+                {"date": "20260906T120000Z", "value": 0.5},
+            ]}]}, now),
+        )
+    check(scored[0]["attention"]["status"] == "ok", scored)
+    check(scored[0]["attention"]["digest_prominence"] > 0, scored)
 
 
 def test_attention_and_editorial_significance_remain_separate() -> None:
@@ -440,6 +554,11 @@ def main() -> None:
         test_gdelt_query_uses_explicit_or_alternatives,
         test_gdelt_rate_limit_honors_retry_after_and_paces_candidates,
         test_gdelt_timeline_observation_and_syndication_dedup,
+        test_malformed_gdelt_responses_do_not_demote_stories,
+        test_zero_timeline_is_measured_zero_attention,
+        test_timeline_preserves_provider_timestamp_alignment,
+        test_zero_momentum_and_breadth_do_not_become_median_signals,
+        test_unversioned_observation_cache_is_remeasured,
         test_attention_and_editorial_significance_remain_separate,
         test_unavailable_attention_falls_back_to_editorial_only,
         test_high_significance_requires_grounded_broad_impact,

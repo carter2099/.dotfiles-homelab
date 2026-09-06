@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 import requests
 from workflow_state import atomic_write_json
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 PROVIDER = "GDELT DOC 2.0"
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 CACHE_TTL_HOURS = 6
@@ -339,11 +339,26 @@ def observation_from_response(
     candidate: dict[str, Any], payload: dict[str, Any], now: datetime,
 ) -> dict[str, Any]:
     query = gdelt_query(candidate)
-    timeline = payload.get("timeline", []) if isinstance(payload, dict) else []
-    data = []
-    if timeline and isinstance(timeline[0], dict):
-        data = timeline[0].get("data", [])
-    if not isinstance(data, list) or not data:
+    timeline = payload.get("timeline") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("error")
+        or not isinstance(timeline, list)
+        or (
+            timeline
+            and (
+                len(timeline) != 1
+                or not isinstance(timeline[0], dict)
+                or not isinstance(timeline[0].get("data"), list)
+            )
+        )
+    ):
+        return _unavailable_observation(
+            candidate, now, "invalid GDELT timeline response",
+            unavailable_reason="invalid_provider_response",
+        )
+    data = timeline[0]["data"] if timeline else []
+    if not data:
         return {
             "status": "no_matches",
             "provider": PROVIDER,
@@ -368,15 +383,24 @@ def observation_from_response(
     point_map: dict[datetime, dict[str, Any]] = {}
     articles: list[dict[str, Any]] = []
     for raw_point in data:
-        if not isinstance(raw_point, dict):
-            continue
-        timestamp = _parse_gdelt_time(raw_point.get("date"))
-        if timestamp is None:
-            continue
         try:
-            value = max(0.0, float(raw_point.get("value", 0.0)))
-        except (TypeError, ValueError):
-            value = 0.0
+            if not isinstance(raw_point, dict):
+                raise ValueError("invalid timeline point")
+            timestamp = _parse_gdelt_time(raw_point.get("date"))
+            raw_value = raw_point.get("value")
+            value = float(raw_value)
+            if (
+                timestamp is None
+                or isinstance(raw_value, bool)
+                or not math.isfinite(value)
+                or not 0.0 <= value <= 100.0
+            ):
+                raise ValueError("invalid timeline date or coverage share")
+        except (TypeError, ValueError, OverflowError):
+            return _unavailable_observation(
+                candidate, now, "invalid GDELT timeline date or coverage share",
+                unavailable_reason="invalid_provider_response",
+            )
         toparts = raw_point.get("toparts", [])
         if not isinstance(toparts, list):
             toparts = []
@@ -388,13 +412,7 @@ def observation_from_response(
             "toparts": clean_articles,
         }
 
-    if not point_map:
-        return observation_from_response(candidate, {}, now)
-
     latest = max(point_map)
-    latest = latest.replace(
-        minute=(latest.minute // 15) * 15, second=0, microsecond=0
-    )
     slots = [latest - timedelta(minutes=15 * offset) for offset in reversed(range(96))]
     values = [float(point_map.get(slot, {}).get("value", 0.0)) for slot in slots]
     positive_slots = [slot for slot, value in zip(slots, values) if value > 0]
@@ -430,7 +448,9 @@ def observation_from_response(
         for slot, value in zip(slots, values)
     ]
     return {
-        "status": "unavailable" if low_quality else "ok",
+        "status": (
+            "unavailable" if low_quality else "ok" if positive_slots else "no_matches"
+        ),
         "provider": PROVIDER,
         "query": query,
         "terms": event_terms(candidate),
@@ -567,6 +587,7 @@ def fetch_gdelt_attention(
     errors: list[str] = []
     next_request_delay = 0.0
     deadline_exhausted = False
+    response = None
     for attempt in range(REQUEST_ATTEMPTS):
         remaining = _remaining_deadline_seconds(deadline, clock)
         if remaining is not None and remaining <= 0:
@@ -635,7 +656,10 @@ def fetch_gdelt_attention(
         observed_at,
         "; ".join(errors),
         unavailable_reason=(
-            "attention_stage_budget_exhausted" if deadline_exhausted else None
+            "attention_stage_budget_exhausted" if deadline_exhausted
+            else "provider_rate_limited"
+            if response is not None and response.status_code == 429
+            else None
         ),
         budget_seconds=budget_value,
     )
@@ -654,6 +678,8 @@ def _load_cache(candidate: dict[str, Any], cache_dir: Path, now: datetime) -> di
         return None
     try:
         cached = json.loads(path.read_text())
+        if not isinstance(cached, dict) or cached.get("schema_version") != SCHEMA_VERSION:
+            return None
         observed = datetime.fromisoformat(cached["observed_at"])
         if observed.tzinfo is None:
             observed = observed.replace(tzinfo=timezone.utc)
@@ -671,17 +697,17 @@ def _save_cache(candidate: dict[str, Any], cache_dir: Path, observation: dict[st
         return
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = _cache_path(candidate, cache_dir)
-    atomic_write_json(path, observation)
+    atomic_write_json(path, {**observation, "schema_version": SCHEMA_VERSION})
 
 
 def _percentile(value: float, values: list[float]) -> float:
+    if value <= 0:
+        return 0.0
     if not values:
         return 50.0
-    transformed = [math.log1p(max(0.0, candidate)) for candidate in values]
-    target = math.log1p(max(0.0, value))
-    below = sum(candidate < target for candidate in transformed)
-    equal = sum(candidate == target for candidate in transformed)
-    return round(100.0 * (below + 0.5 * equal) / len(transformed), 1)
+    below = sum(candidate < value for candidate in values)
+    equal = sum(candidate == value for candidate in values)
+    return round(100.0 * (below + 0.5 * equal) / len(values), 1)
 
 
 def _cohort_values(
@@ -848,7 +874,8 @@ def score_attention(
 
     Cached observations are always reusable and do not consume the allowance.
     Uncached candidates are attempted in deterministic production-priority
-    order until the monotonic deadline expires; output remains in caller order.
+    order until the monotonic deadline expires or GDELT remains rate-limited
+    after its retry; output remains in caller order and caches remain usable.
     Later candidates receive the normal ``unavailable``/confidence-zero
     semantics without another provider call. ``budget_seconds`` is bounded by
     ``MAX_ATTENTION_STAGE_BUDGET_SECONDS``.
@@ -880,6 +907,7 @@ def score_attention(
     cache_hits = 0
     next_request_delay = request_interval
     budget_exhausted = False
+    rate_limited = False
     work_order = sorted(
         range(len(scored)),
         key=lambda index: _attention_work_sort_key(scored[index]),
@@ -899,6 +927,13 @@ def score_attention(
                 observed_at,
                 allowance,
                 elapsed_seconds(),
+            )
+        elif rate_limited:
+            observation = _unavailable_observation(
+                candidate,
+                observed_at,
+                "GDELT remained rate-limited after retry; skipped uncached observation",
+                unavailable_reason="provider_rate_limit_stop",
             )
         else:
             if requested and next_request_delay > 0:
@@ -940,6 +975,8 @@ def score_attention(
                     str(error),
                 )
             requested += 1
+            if observation.get("unavailable_reason") == "provider_rate_limited":
+                rate_limited = True
             try:
                 adaptive_delay = float(
                     observation.pop("_next_request_delay_seconds", 0.0) or 0.0
@@ -1033,8 +1070,8 @@ def score_attention(
         if observation.get("status") == "ok":
             explanation = (
                 f"{significance.title()} editorial significance; coverage peaked at the "
-                f"{normalized['peak_attention']:.0f}th percentile across {groups} independent "
-                f"source {'group' if groups == 1 else 'groups'}."
+                f"{normalized['peak_attention']:.0f}th percentile; sampled headlines formed "
+                f"{groups} near-duplicate {'group' if groups == 1 else 'groups'}."
             )
         elif observation.get("status") == "no_matches":
             explanation = (
@@ -1093,6 +1130,11 @@ def score_attention(
         "budget_scope": ATTENTION_BUDGET_SCOPE,
         "elapsed_seconds": round(elapsed, 3),
         "budget_exhausted": budget_exhausted or budget_exhausted_candidates > 0,
+        "rate_limited": rate_limited,
+        "rate_limit_skipped_candidates": sum(
+            observation.get("unavailable_reason") == "provider_rate_limit_stop"
+            for observation in observations
+        ),
         "observation_order": [
             {
                 "title": scored[index].get("title", ""),
