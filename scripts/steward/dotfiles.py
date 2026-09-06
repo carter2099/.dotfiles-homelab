@@ -70,79 +70,17 @@ def _bounded(value: object, limit: int) -> str:
     return text[:limit]
 
 
-def _normalise_status_path(raw: str) -> str:
-    value = raw.strip()
-    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-        try:
-            value = bytes(value[1:-1], "utf-8").decode("unicode_escape")
-        except UnicodeDecodeError:
-            value = value[1:-1]
-    return value.strip().strip("\"'")
-
-
-def parse_status_paths(status: str | bytes) -> list[str]:
-    """Parse porcelain status into unique repository-relative paths.
-
-    Both line-delimited ``--short`` output and NUL-delimited porcelain output
-    are accepted.  Renames contribute both sides so neither exact path can be
-    accidentally left out of a commit or race check.
-    """
-    if isinstance(status, bytes):
-        status = status.decode("utf-8", "replace")
-    nul_delimited = "\x00" in status
-    lines = status.split("\x00") if nul_delimited else status.splitlines()
-    paths: list[str] = []
-    seen: set[str] = set()
-    for line in lines:
-        if not line or line.isspace():
-            continue
-        if nul_delimited and (len(line) < 3 or not line[2].isspace()):
-            payload = line
-        else:
-            payload = line[3:] if len(line) >= 3 else line[2:]
-        payload = payload.strip()
-        rename_parts = re.split(r"\s+->\s+", payload, maxsplit=1)
-        candidates = rename_parts if len(rename_parts) == 2 else [payload]
-        for candidate in candidates:
-            path = _normalise_status_path(candidate)
-            if path and path not in seen:
-                seen.add(path)
-                paths.append(path)
-    return paths
-
-
 def _status_map(status: str | bytes) -> dict[str, str]:
-    """Return exact path -> two-character porcelain status."""
-    if isinstance(status, bytes):
-        status = status.decode("utf-8", "replace")
+    """Return exact paths and status codes from Git's NUL-delimited porcelain."""
+    items = iter(os.fsdecode(status).split("\x00"))
     result: dict[str, str] = {}
-    if "\x00" in status:
-        items = status.split("\x00")
-        index = 0
-        while index < len(items):
-            line = items[index]
-            index += 1
-            if not line or len(line) < 3:
-                continue
-            code = line[:2]
-            path = _normalise_status_path(line[3:])
-            if path:
-                result[path] = code
-            if ("R" in code or "C" in code) and index < len(items):
-                source = _normalise_status_path(items[index])
-                index += 1
-                if source:
-                    result[source] = code
-        return result
-    for line in status.splitlines():
-        if not line or len(line) < 3:
+    for record in items:
+        if not record:
             continue
-        code = line[:2]
-        parts = re.split(r"\s+->\s+", line[3:].strip(), maxsplit=1)
-        for part in parts:
-            path = _normalise_status_path(part)
-            if path:
-                result[path] = code
+        code, path = record[:2], record[3:]
+        result[path] = code
+        if "R" in code or "C" in code:
+            result[next(items)] = code
     return result
 
 
@@ -520,10 +458,11 @@ def _snapshot(git_dir: Path, home: Path) -> tuple[dict[str, str], str | None]:
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
-        )
+        ),
+        text=False,
     )
     if code != 0:
-        return {}, stderr or stdout or "git status failed"
+        return {}, os.fsdecode(stderr or stdout) or "git status failed"
     return _status_map(stdout), None
 
 
@@ -537,22 +476,12 @@ def _staged_paths(git_dir: Path, home: Path) -> tuple[set[str], str | None]:
             "--no-renames",
             "--name-only",
             "-z",
-        )
+        ),
+        text=False,
     )
     if code != 0:
-        return set(), stderr or stdout or "git staged diff failed"
-    if "\x00" in stdout:
-        paths = {
-            _normalise_status_path(item)
-            for item in stdout.split("\x00")
-            if item
-        }
-        return {path for path in paths if path}, None
-    return {
-        _normalise_status_path(item)
-        for item in stdout.splitlines()
-        if _normalise_status_path(item)
-    }, None
+        return set(), os.fsdecode(stderr or stdout) or "git staged diff failed"
+    return {path for path in os.fsdecode(stdout).split("\x00") if path}, None
 
 
 def _current_branch(git_dir: Path, home: Path) -> str | None:

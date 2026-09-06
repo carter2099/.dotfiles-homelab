@@ -218,26 +218,14 @@ class DelayedUpdateTests(unittest.TestCase):
         invalid = [
             [],
             {"verdict": "PASS", "confirmed": {}, "rejected": []},
-            {"verdict": "PASS", "confirmed": [{"id": "", "claim": "x"}], "rejected": []},
+            {"verdict": "PASS", "confirmed": [{"id": "", "evidence": "x"}], "rejected": []},
             {"verdict": "UNKNOWN", "confirmed": [], "rejected": []},
             {"verdict": "PASS", "confirmed": [], "rejected": []},
             {
                 "verdict": "PASS",
                 "confirmed": [{
                     "id": "finding-1",
-                    "claim": "tracked config differs",
                     "evidence": "reproduced diff",
-                    "fix": "sync the tracked copy",
-                }],
-                "rejected": [],
-            },
-            {
-                "verdict": "ATTENTION",
-                "confirmed": [{
-                    "id": "finding-1",
-                    "claim": "different claim",
-                    "evidence": "claimed reproduction",
-                    "fix": "sync the tracked copy",
                 }],
                 "rejected": [],
             },
@@ -245,16 +233,53 @@ class DelayedUpdateTests(unittest.TestCase):
         for packet in invalid:
             with self.assertRaises(ValueError):
                 audit._validate_audit_judge_packet(packet, worker)
-        valid = {
+
+        canonical = audit._validate_audit_judge_packet({
+            "verdict": "ATTENTION",
+            "confirmed": [{
+                "id": "finding-1",
+                "claim": "judge paraphrase is ignored",
+                "evidence": "reproduced diff",
+                "fix": "judge rewrite is ignored",
+            }],
+            "rejected": [],
+        }, worker)
+        self.assertEqual(canonical["confirmed"][0]["claim"], "tracked config differs")
+        self.assertEqual(canonical["confirmed"][0]["fix"], "sync the tracked copy")
+
+        rejected = audit._validate_audit_judge_packet({
             "verdict": "PASS",
             "confirmed": [],
             "rejected": [{
                 "id": "finding-1",
-                "claim": "tracked config differs",
                 "reason": "not reproduced",
             }],
-        }
-        self.assertIs(audit._validate_audit_judge_packet(valid, worker), valid)
+        }, worker)
+        self.assertEqual(rejected["rejected"][0]["claim"], "tracked config differs")
+
+        normalized_rejection = audit._validate_audit_judge_packet({
+            "verdict": "DRIFT",
+            "confirmed": [],
+            "rejected": [{
+                "id": "finding-1",
+                "reason": "not an unresolved problem",
+            }],
+        }, worker)
+        self.assertEqual(normalized_rejection["verdict"], "PASS")
+        self.assertEqual(normalized_rejection["verdict_normalized_from"], "DRIFT")
+
+        clean_worker = audit._prepare_audit_worker_packet({
+            "verdict": "PASS",
+            "findings": [],
+        })
+        normalized = audit._validate_audit_judge_packet({
+            "verdict": "DRIFT",
+            "confirmed": [],
+            "rejected": [],
+        }, clean_worker)
+        self.assertEqual(normalized["verdict"], "PASS")
+        self.assertEqual(normalized["verdict_normalized_from"], "DRIFT")
+
         with self.assertRaises(ValueError):
             audit._prepare_audit_worker_packet({
                 "verdict": "ATTENTION",
@@ -296,37 +321,108 @@ class DelayedUpdateTests(unittest.TestCase):
         ) as mock_call:
             result = audit._run_audit_agent_pair(section, {}, "hash1")
         self.assertEqual(result["verdict"], "worker-failed")
-        self.assertIn("retry also failed", result["error"])
         self.assertEqual(mock_call.call_count, 2)
 
-    def test_audit_cache_requires_complete_judge_provenance(self):
+    def test_judge_packet_retries_once_after_invalid_output(self):
+        section = {"name": "digest-quality", "guidance": "inspect", "timeout": 600}
+        worker_packet = '```json\n{"verdict": "PASS", "findings": []}\n```'
+        invalid_judge = (
+            '```json\n{"verdict": "UNKNOWN", "confirmed": [], "rejected": []}\n```'
+        )
+        valid_judge = (
+            '```json\n{"verdict": "PASS", "confirmed": [], "rejected": []}\n```'
+        )
+        with patch.object(
+            audit, "_call_omp_p",
+            side_effect=[worker_packet, invalid_judge, valid_judge],
+        ) as mock_call:
+            result = audit._run_audit_agent_pair(section, {}, "hash1")
+
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["judge_attempts"], 2)
+        self.assertEqual(len(result["judge_retry_errors"]), 1)
+        self.assertEqual(mock_call.call_count, 3)
+
+    def test_judge_failure_persists_only_after_retry(self):
+        section = {"name": "digest-quality", "guidance": "inspect", "timeout": 600}
+        worker_packet = '```json\n{"verdict": "PASS", "findings": []}\n```'
+        invalid_judge = "judge prose without a JSON packet"
+        with patch.object(
+            audit, "_call_omp_p",
+            side_effect=[worker_packet, invalid_judge, invalid_judge],
+        ) as mock_call:
+            result = audit._run_audit_agent_pair(section, {}, "hash1")
+
+        self.assertEqual(result["verdict"], "judge-failed")
+        self.assertEqual(result["judge_attempts"], 2)
+        self.assertEqual(len(result["judge_retry_errors"]), 2)
+        self.assertEqual(mock_call.call_count, 3)
+
+    def test_audit_cache_requires_clean_judge_provenance(self):
         worker = audit._prepare_audit_worker_packet({
-            "verdict": "ATTENTION",
-            "findings": [{
-                "claim": "tracked config differs",
-                "evidence": "diff output",
-                "fix": "sync tracked config",
-            }],
+            "verdict": "PASS",
+            "findings": [],
         })
         artifact = {
-            "verdict": "ATTENTION",
-            "worker_verdict": "ATTENTION",
-            "judge_verdict": "ATTENTION",
+            "verdict": "PASS",
+            "worker_verdict": "PASS",
+            "judge_verdict": "PASS",
             "worker_findings": worker["findings"],
-            "judge_confirmed": [{
-                "id": "finding-1",
-                "claim": "tracked config differs",
-                "evidence": "reproduced diff",
-                "fix": "sync tracked config",
-            }],
+            "judge_confirmed": [],
             "judge_rejected": [],
             "judge_error": "",
         }
         self.assertTrue(audit._audit_artifact_cacheable(artifact))
-        artifact["judge_confirmed"] = []
+
+        artifact["verdict"] = "ATTENTION"
+        artifact["judge_verdict"] = "ATTENTION"
         self.assertFalse(audit._audit_artifact_cacheable(artifact))
+
+        artifact["verdict"] = "PASS"
+        artifact["judge_verdict"] = "PASS"
         artifact["judge_error"] = "timeout"
         self.assertFalse(audit._audit_artifact_cacheable(artifact))
+
+    def test_report_only_open_item_uses_concrete_claim(self):
+        audit_data = {"sections": [{
+            "name": "security-posture",
+            "verdict": "DRIFT",
+            "judge_confirmed": [{
+                "claim": "gaming rig 8082 firewall allowance is undocumented",
+            }],
+        }]}
+        fixes_data = {
+            "sections": [],
+            "report_only": [{"section": "security-posture"}],
+        }
+        facts = report._build_tldr_facts(
+            {"steps": []},
+            audit_data,
+            {"plans": {}, "ideas": {}},
+            fixes_data,
+            {},
+        )
+        self.assertTrue(facts["audit_open"][0]["manual"])
+        self.assertIn("gaming rig 8082", facts["needs_carter"][0])
+
+    def test_judge_failure_is_automation_not_carter_action(self):
+        audit_data = {"sections": [{
+            "name": "digest-quality",
+            "verdict": "judge-failed",
+            "judge_error": (
+                "invalid audit judge verdict; retry also failed: missing finding id"
+            ),
+        }]}
+        facts = report._build_tldr_facts(
+            {"steps": []},
+            audit_data,
+            {"plans": {}, "ideas": {}},
+            {"sections": []},
+            {},
+        )
+        self.assertEqual(facts["needs_carter"], [])
+        self.assertEqual(facts["n_sections_open"], 0)
+        self.assertEqual(facts["n_sections_incomplete"], 1)
 
     def test_version_currency_is_report_only(self):
         sections = [

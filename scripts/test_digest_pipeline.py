@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -2571,9 +2572,9 @@ def test_asset_cdn_urls_rejected() -> None:
 
 
 def test_proxy_5xx_retry_with_backoff() -> None:
-    """A transient proxy 503 must be retried with backoff before the editorial
-    stage falls back (digest-quality audit 2026-08-24: both Mimo calls 503'd on
-    08-23 and the proposal skipped the critic entirely)."""
+    """A transient proxy 503 must reuse one OpenCode session ID while retrying
+    with backoff before the editorial stage falls back (digest-quality audit
+    2026-08-24: both Mimo calls 503'd and the proposal skipped the critic)."""
     class FakeResponse:
         def __init__(self, status_code: int, body: dict | None = None) -> None:
             self.status_code = status_code
@@ -2591,15 +2592,15 @@ def test_proxy_5xx_retry_with_backoff() -> None:
     calls = []
     sleeps = []
 
-    def fake_post(url, json=None, timeout=None):
-        calls.append(url)
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append((url, dict(headers or {})))
         if len(calls) <= 2:
             return FakeResponse(503)
         return FakeResponse(200, {"choices": [{"message": {"content": "reviewed ok"}}]})
 
     with patch("daily_news.runtime.requests.post", side_effect=fake_post), \
          patch("daily_news.runtime._detect_model_provider",
-               return_value={"provider": "fake",
+               return_value={"provider": "opencode-go",
                              "chat_url": "http://proxy.test/v1/chat/completions"}), \
          patch("daily_news.runtime.time.sleep", side_effect=lambda s: sleeps.append(s)):
         content = runtime._call_llm_proxy("system", "user", model="mimo-v2.5")
@@ -2608,17 +2609,25 @@ def test_proxy_5xx_retry_with_backoff() -> None:
         check(len(sleeps) == 2, f"backoff sleeps={sleeps}")
         check(sleeps == [runtime.PROXY_5XX_BACKOFF_SECONDS,
                          runtime.PROXY_5XX_BACKOFF_SECONDS * 2], sleeps)
+        session_ids = [
+            headers.get("x-opencode-session") for _, headers in calls
+        ]
+        check(all(session_ids), f"missing OpenCode session header: {session_ids}")
+        check(len(set(session_ids)) == 1,
+              f"retry changed OpenCode session ID: {session_ids}")
+        first_session_id = session_ids[0]
+        uuid.UUID(first_session_id)
 
     # Exhausted 5xx retries still propagate so the stage-level fallback can act.
     calls.clear()
-    def always_503(url, json=None, timeout=None):
-        calls.append(url)
+    def always_503(url, json=None, headers=None, timeout=None):
+        calls.append((url, dict(headers or {})))
         return FakeResponse(503)
 
     with patch("daily_news.runtime.requests.post",
                side_effect=always_503), \
          patch("daily_news.runtime._detect_model_provider",
-               return_value={"provider": "fake",
+               return_value={"provider": "opencode-go",
                              "chat_url": "http://proxy.test/v1/chat/completions"}), \
          patch("daily_news.runtime.time.sleep"):
         raised = False
@@ -2629,6 +2638,13 @@ def test_proxy_5xx_retry_with_backoff() -> None:
         check(raised, "exhausted 503 did not raise")
         check(len(calls) == runtime.PROXY_5XX_RETRIES + 1,
               f"503 retried {len(calls)} times")
+        retry_session_ids = [
+            headers.get("x-opencode-session") for _, headers in calls
+        ]
+        check(len(set(retry_session_ids)) == 1,
+              f"exhausted retries changed session ID: {retry_session_ids}")
+        check(retry_session_ids[0] != first_session_id,
+              "separate proxy calls reused one global session ID")
 
 
 def main() -> None:

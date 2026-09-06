@@ -754,6 +754,29 @@ def _deterministic_section_summary(name, findings, fixes, fix_summary=""):
     return " ".join(parts)
 
 
+def _audit_incomplete_summary(payload):
+    """Deterministic wording for steward automation failures."""
+    label = payload["name"].replace("_", " ")
+    verdict = payload.get("verdict", "")
+    raw_error = str(payload.get("error") or "").strip()
+    short_error = raw_error.split("\n", 1)[0][:180] or verdict
+    if verdict == "judge-failed":
+        stage = (
+            "its judge returned invalid output after the automatic retry"
+            if "retry also failed" in raw_error
+            else "its judge returned invalid output"
+        )
+    elif verdict == "worker-failed":
+        stage = "its worker could not produce a valid result after the automatic retry"
+    else:
+        stage = "its evidence collector failed"
+    return (
+        f"The {label} audit was incomplete because {stage} ({short_error}). "
+        f"No underlying {label} problem was established; the steward will retry automatically "
+        "on the next run."
+    )
+
+
 def _summarize_audit_sections(section_payloads):
     """One LLM call → {section_name: summary_text}. Falls back per-section."""
     if not section_payloads:
@@ -874,14 +897,21 @@ def _html_audit(audit_data, fixes_data=None):
             "iteration_count": meta.get("iteration_count") or 0,
             "stop_reason": meta.get("stop_reason", ""),
             "remaining_unfixed": meta.get("remaining_unfixed") or 0,
-            "error": (sec.get("error") or sec.get("worker_error") or "").strip(),
+            "error": (
+                sec.get("error")
+                or sec.get("worker_error")
+                or sec.get("judge_error")
+                or ""
+            ).strip(),
             "sec": sec,
         })
 
     if not payloads:
         return '<p style="margin:0; color:#888; font-size:13px;">All audit sections clear.</p>'
 
-    summaries = _summarize_audit_sections(payloads)
+    summaries = _summarize_audit_sections([
+        p for p in payloads if not p["verdict"].endswith("-failed")
+    ])
 
     out = []
     for p in payloads:
@@ -893,9 +923,9 @@ def _html_audit(audit_data, fixes_data=None):
         n_failed = sum(1 for f in fixes if f.get("status") == "failed")
         n_deferred = sum(1 for f in fixes if f.get("status") == "deferred")
 
-        # Badge: always "N fixes" (user-facing). Color by outcome.
-        if verdict in ("collector-failed", "worker-failed"):
-            chip = _chip("Check failed", "#c62828")
+        # Badge describes the end state, not an unproven underlying failure.
+        if verdict.endswith("-failed"):
+            chip = _chip("Audit incomplete", "#e65100")
         elif n_failed:
             chip = _chip(f"{n_fixes} fixes", "#c62828")
         elif n_deferred and not any(f.get("status") == "fixed" for f in fixes):
@@ -913,21 +943,13 @@ def _html_audit(audit_data, fixes_data=None):
             f'<td align="right" style="padding:3px 0; white-space:nowrap;">{chip}</td></tr>'
         )
 
-        if verdict in ("collector-failed", "worker-failed") and p["error"]:
-            err = p["error"]
-            m = re.match(r"Could not extract JSON from ([^.]+)\.\s*Raw text.*", err, re.S)
-            if m:
-                short = f"Could not extract JSON from {m.group(1)} (agent returned prose)"
-            else:
-                short = err.split("\n", 1)[0][:160]
-            out.append(
-                f'<tr><td colspan="2" style="padding:2px 4px 2px 14px; color:#c62828; '
-                f'font-size:12px;">{html.escape(short)}</td></tr>'
-            )
 
-        summary = summaries.get(name) or _deterministic_section_summary(
-            name, p["findings"], fixes, p.get("fix_summary", "")
-        )
+        if verdict.endswith("-failed"):
+            summary = _audit_incomplete_summary(p)
+        else:
+            summary = summaries.get(name) or _deterministic_section_summary(
+                name, p["findings"], fixes, p.get("fix_summary", "")
+            )
         out.append(
             f'<tr><td colspan="2" style="padding:4px 4px 2px 0; color:#3a3a4a; '
             f'font-size:12px; line-height:1.45;">{html.escape(summary)}</td></tr>'
@@ -1350,20 +1372,21 @@ def _tldr_collect_health(heartbeat, validation=None):
 
 
 def _tldr_audit_end_state(audit, fixes):
-    """Classify each audit section by post-P7b end state.
-
-    Returns dict with open / cleared / failed / deferred_only lists of
-    short human labels — not P7 pre-fix verdict counts.
-    """
+    """Classify audit sections by post-P7b end state."""
     fix_by = {}
-    for s in (fixes or {}).get("sections", []) or []:
-        name = s.get("section") or ""
+    for section in (fixes or {}).get("sections", []) or []:
+        name = section.get("section") or ""
         if name:
-            fix_by[name] = s
+            fix_by[name] = section
+    report_only = {
+        section.get("section")
+        for section in (fixes or {}).get("report_only", []) or []
+        if section.get("section")
+    }
 
     open_items = []
     cleared = []
-    failed = []
+    incomplete = []
     deferred_only = []
 
     for sec in (audit or {}).get("sections", []) or []:
@@ -1373,35 +1396,53 @@ def _tldr_audit_end_state(audit, fixes):
         base = verdict.removeprefix("cached-")
 
         if verdict.endswith("-failed") or base in ("collector-failed", "worker-failed"):
-            err = (sec.get("error") or sec.get("worker_error") or "")[:120]
-            failed.append({
+            error = (
+                sec.get("error")
+                or sec.get("worker_error")
+                or sec.get("judge_error")
+                or verdict
+            )
+            incomplete.append({
                 "section": name,
                 "label": display,
-                "note": err or verdict,
+                "note": str(error)[:180],
             })
             continue
 
-        if base in ("PASS",) or verdict in ("PASS", "cached-PASS", "dry-run-collector-only"):
-            # Clean section — only mention if P7b still ran (shouldn't) 
+        if base == "UNVERIFIABLE":
+            incomplete.append({
+                "section": name,
+                "label": display,
+                "note": "audit could not establish a conclusion",
+            })
+            continue
+
+        if base == "PASS" or verdict == "dry-run-collector-only":
             continue
 
         fx = fix_by.get(name)
         if not fx:
-            # Non-PASS audit with no fix pass (nothing_to_fix gap or skipped)
-            if base in ("DRIFT", "ATTENTION", "UNVERIFIABLE"):
+            if base in ("DRIFT", "ATTENTION"):
+                claims = [
+                    str(item.get("claim") or "").strip()
+                    for item in sec.get("judge_confirmed", []) or []
+                    if isinstance(item, dict) and str(item.get("claim") or "").strip()
+                ]
+                note = "; ".join(claims[:2])[:360]
                 open_items.append({
                     "section": name,
                     "label": display,
-                    "note": f"audit {base.lower()}; no auto-fix result",
+                    "note": note or f"audit {base.lower()} remains unresolved",
+                    "manual": name in report_only,
                 })
             continue
 
         jv = str(fx.get("judge_verdict") or "").lower()
         rem = int(fx.get("remaining_unfixed") or 0)
         real = _real_fixes(fx.get("fixes_applied") or [])
-        n_fixed = sum(1 for f in real if f.get("status") == "fixed")
-        n_failed_fx = sum(1 for f in real if f.get("status") == "failed")
-        n_def = sum(1 for f in real if f.get("status") == "deferred")
+        n_fixed = sum(1 for fix in real if fix.get("status") == "fixed")
+        n_failed_fx = sum(1 for fix in real if fix.get("status") == "failed")
+        n_def = sum(1 for fix in real if fix.get("status") == "deferred")
         note = (fx.get("judge_summary") or fx.get("fix_summary") or "")[:180]
         iters = fx.get("iteration_count") or len(fx.get("iterations") or []) or 0
 
@@ -1419,7 +1460,7 @@ def _tldr_audit_end_state(audit, fixes):
                 cleared.append(entry)
             continue
 
-        # partial / fail / remaining / failed fixes → still open for Carter
+        # Partial/failed remediation or remaining findings are genuinely open.
         if jv in ("partial", "fail", "failed", "unknown") or rem > 0 or n_failed_fx:
             why = jv or "open"
             if rem > 0:
@@ -1430,10 +1471,10 @@ def _tldr_audit_end_state(audit, fixes):
                 "note": note or why,
                 "judge": jv,
                 "remaining_unfixed": rem,
+                "manual": True,
             })
             continue
 
-        # dry-run / skipped / odd statuses
         if jv in ("dry-run", "skipped"):
             continue
         if n_fixed or base in ("DRIFT", "ATTENTION"):
@@ -1442,7 +1483,7 @@ def _tldr_audit_end_state(audit, fixes):
     return {
         "open": open_items,
         "cleared": cleared,
-        "failed": failed,
+        "incomplete": incomplete,
         "deferred_only": deferred_only,
     }
 
@@ -1491,8 +1532,6 @@ def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
         needs_carter.append(
             f"audit still open — {o['label']}: {o.get('note') or o.get('judge') or 'needs review'}"
         )
-    for f in audit_state["failed"]:
-        needs_carter.append(f"audit check failed — {f['label']}: {f.get('note') or ''}")
 
     return {
         "health_ok": not health_issues,
@@ -1503,10 +1542,11 @@ def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
         "n_failed_apply": n_failed_apply,
         "audit_open": audit_state["open"],
         "audit_cleared": audit_state["cleared"],
-        "audit_failed": audit_state["failed"],
+        "audit_incomplete": audit_state["incomplete"],
         "audit_deferred": audit_state["deferred_only"],
         "n_sections_cleared": len(audit_state["cleared"]),
-        "n_sections_open": len(audit_state["open"]) + len(audit_state["failed"]),
+        "n_sections_open": len(audit_state["open"]),
+        "n_sections_incomplete": len(audit_state["incomplete"]),
         "n_real_fixes": n_real_fixes,
         "ideas_outstanding": (queue or {}).get("ideas", {}).get("total_outstanding", 0) or 0,
         "plans_approved": len(plans.get("approved") or []),
@@ -1535,9 +1575,9 @@ def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str, session_memor
             {"section": o["label"], "detail": (o.get("note") or "")[:160]}
             for o in facts["audit_open"][:6]
         ],
-        "audit_checks_failed": [
-            {"section": f["label"], "detail": (f.get("note") or "")[:120]}
-            for f in facts["audit_failed"][:4]
+        "audit_checks_incomplete": [
+            {"section": item["label"], "detail": (item.get("note") or "")[:120]}
+            for item in facts["audit_incomplete"][:4]
         ],
         "audit_cleared_sections": [
             {
@@ -1560,13 +1600,15 @@ def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str, session_memor
             f"{json.dumps(llm_facts, indent=2)}\n\n"
             f"Recent session memory (optional context only):\n{session_memory}\n\n"
             "Write 2-4 short plain-English sentences about the END STATE:\n"
-            "1. Lead with what still needs Carter (open audit, failed checks, health, "
-            "approved plans). If nothing needs him, say the host is in good shape.\n"
-            "2. Then what changed or was cleared tonight (real package bumps, sections "
+            "1. Lead with what still needs Carter (open audit findings, health, approved "
+            "plans). If nothing needs him, say the host is in good shape.\n"
+            "2. An incomplete audit is steward automation trouble, not an underlying service "
+            "failure and not a task for Carter. Say the steward will retry it automatically.\n"
+            "3. Then what changed or was cleared tonight (real package bumps, sections "
             "auto-fixed). Mention a retry only if load-bearing.\n"
-            "3. Skip pre-fix drift counts, badge jargon (DRIFT/ATTENTION), artifact "
+            "4. Skip pre-fix drift counts, badge jargon (DRIFT/ATTENTION), artifact "
             "names, and 'N audit items need attention' style process narration.\n"
-            "4. No bullet lists. If truly quiet: one calm sentence.\n"
+            "5. No bullet lists. If truly quiet: one calm sentence.\n"
             "Return plain text only — no JSON, no markdown fences."
         )
         summary_text = _call_omp_p(prompt, model=SMALL_MODEL, timeout=90)
@@ -1604,27 +1646,31 @@ def _tldr_deterministic(facts):
     else:
         parts.append("Host healthy.")
 
-    open_labels = [o["label"] for o in facts.get("audit_open") or []]
-    failed_labels = [f["label"] for f in facts.get("audit_failed") or []]
+    open_labels = [item["label"] for item in facts.get("audit_open") or []]
+    incomplete_labels = [
+        item["label"] for item in facts.get("audit_incomplete") or []
+    ]
     n_cleared = facts.get("n_sections_cleared") or 0
-    if open_labels or failed_labels:
-        bits = []
-        if open_labels:
-            bits.append("still open: " + ", ".join(open_labels[:5]))
-        if failed_labels:
-            bits.append("checks failed: " + ", ".join(failed_labels[:3]))
+    if open_labels:
         tail = ""
         if n_cleared:
             tail = f" ({n_cleared} other section{'s' if n_cleared != 1 else ''} cleared)"
-        parts.append("Audit " + "; ".join(bits) + tail + ".")
+        parts.append("Audit still open: " + ", ".join(open_labels[:5]) + tail + ".")
     elif n_cleared:
         parts.append(
             f"All flagged audit sections cleared ({n_cleared} auto-fixed)."
             if facts.get("n_real_fixes")
             else f"Audit clear end-of-run ({n_cleared} sections resolved)."
         )
-    else:
+    elif not incomplete_labels:
         parts.append("Audit clear.")
+
+    if incomplete_labels:
+        parts.append(
+            "Audit incomplete: "
+            + ", ".join(incomplete_labels[:3])
+            + "; the steward will retry automatically."
+        )
 
     if facts.get("updates"):
         parts.append("Updates: " + "; ".join(facts["updates"][:3]) + ".")
@@ -1640,6 +1686,7 @@ def _tldr_deterministic(facts):
     if (
         facts.get("health_ok")
         and not facts.get("n_sections_open")
+        and not facts.get("n_sections_incomplete")
         and not facts.get("updates")
         and not facts.get("plans_approved")
         and not facts.get("n_sections_cleared")

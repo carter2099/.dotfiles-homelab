@@ -114,12 +114,12 @@ def run_capture(cmd, **kwargs):
 
 
 def run_capture_ok(cmd, **kwargs):
-    """Run a command, return (stdout, stderr, exit_code). Never raises."""
+    """Run a command, return unmodified (stdout, stderr, exit_code). Never raises."""
     kwargs.setdefault("text", True)
     kwargs.setdefault("timeout", 120)
     try:
         cp = subprocess.run(cmd, capture_output=True, **kwargs)
-        return cp.stdout.strip(), cp.stderr.strip(), cp.returncode
+        return cp.stdout, cp.stderr, cp.returncode
     except Exception as e:
         return "", str(e), -1
 

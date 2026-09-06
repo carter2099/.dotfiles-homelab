@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -466,6 +467,11 @@ def _call_llm_proxy(
     if eff_model.startswith("openai-codex/"):
         return _call_omp_no_tools(system, user, eff_model, timeout)
     provider_info = _detect_model_provider(eff_model)
+    request_headers: dict[str, str] = {}
+    if provider_info["provider"] == "opencode-go":
+        # Each direct API call is one standalone conversation. Keep its ID
+        # stable across the bounded 5xx retry loop for upstream affinity.
+        request_headers["x-opencode-session"] = str(uuid.uuid4())
     date_prefix = _date_context()
     payload: dict[str, Any] = {
         "model": eff_model,
@@ -477,7 +483,12 @@ def _call_llm_proxy(
     }
     resp = None
     for _attempt in range(PROXY_5XX_RETRIES + 1):
-        resp = requests.post(provider_info["chat_url"], json=payload, timeout=timeout)
+        resp = requests.post(
+            provider_info["chat_url"],
+            json=payload,
+            headers=request_headers,
+            timeout=timeout,
+        )
         try:
             resp.raise_for_status()
             break

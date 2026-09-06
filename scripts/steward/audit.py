@@ -770,10 +770,18 @@ AUDIT_SECTIONS = [
             "Judge the security posture from the evidence: listening sockets vs the documented set "
             "(loopback-only: open-webui 48100, searxng 8080, prompt-guard 8090, news 30144, herdr-web 30145, "
             "beatz 30142, blog 33099; "
-            "ufw-gated: llm-proxy 8081, opencode-go-proxy 8082), ufw ruleset intact "
+            "ufw-gated: llm-proxy 8081 and opencode-go-proxy 8082; exact-host LAN allow: gaming rig "
+            "192.168.4.103 to opencode-go-proxy 8082), ufw ruleset intact "
             "(cni0/flannel.1/docker bridges), unattended-upgrades active, carter2099.com RDAP expiry "
             "(>30d out = ok), CF tunnel ingress vs expected hostnames (chat, hooks, freshrss, blog, "
-            "omp, ssh, beatz, rig, news, remote), SSH failed-password volume. Flag anything unexpected. "
+            "ssh, beatz, rig, news, remote), SSH failed-password volume. The tunnel's enabled WARP "
+            "routing with an empty private-route inventory is documented and inert; flag it only if "
+            "routes appear or documentation differs. Flag anything else unexpected. "
+            "For dependabot-webhook, use dependabot_maintenance evidence: maintenance-stopped "
+            "means this run successfully stopped a previously active service; its absent 9099 "
+            "listener and hooks HTTP 502 are expected until cleanup. This exception covers only "
+            "that owned pause, never an unhealthy running service, unexpected/unverifiable states, "
+            "unrelated endpoints, bind exposure, or failed restoration after a completed run. "
             "For repo_secrets: working_tree_issues means secret-pattern files are uncommitted in a "
             "repo — flag each as ATTENTION; commit_issues means a secret-pattern string appeared in "
             "recent diffs — flag as ATTENTION with the commit SHA. No findings = PASS for this sub-check."
@@ -812,9 +820,13 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Review the other unattended agents' recent runs from the evidence: hyperliquid-sdk (Mon/Thu timer — "
-            "did it fire? outcome? errors?), dependabot-webhook (jobs, failures). Also read recent session files in "
-            "~/.omp/agent/sessions-automated if you need outcomes the journal lacks. Flag failed or silently-"
-            "skipped runs."
+            "did it fire? outcome? errors?), dependabot-webhook (jobs, failures). Use the "
+            "dependabot_maintenance assessment: only maintenance-stopped is an expected current "
+            "run pause. Already-inactive, failed, or unverifiable services are not exempt. "
+            "Cleanup and systemd ExecStopPost restore the webhook; a completed prior run's "
+            "failed restoration is still a finding. "
+            "Also read recent session files in ~/.omp/agent/sessions-automated if you need outcomes the journal "
+            "lacks. Flag failed or silently-skipped runs."
         ),
     },
     {
@@ -837,7 +849,7 @@ AUDIT_SECTIONS = [
     },
 ]
 
-# Verdicts that prove a section actually ran its worker+judge — safe to cache.
+# Complete worker+judge verdicts. The delta cache further restricts these to PASS.
 _REAL_VERDICTS = {"PASS", "DRIFT", "ATTENTION", "UNVERIFIABLE"}
 
 
@@ -919,7 +931,7 @@ def _prepare_audit_worker_packet(packet):
 
 
 def _validate_audit_judge_packet(packet, worker_packet):
-    """Require a one-to-one judge disposition for worker-assigned finding IDs."""
+    """Validate ID dispositions and restore worker-owned claim/fix text."""
     if not isinstance(packet, dict):
         raise ValueError("audit judge packet must be an object")
     _validate_prepared_audit_worker_packet(worker_packet)
@@ -931,10 +943,12 @@ def _validate_audit_judge_packet(packet, worker_packet):
         if isinstance(item, dict) and item.get("id")
     }
     seen = set()
+    normalized = dict(packet)
     for key in ("confirmed", "rejected"):
         value = packet.get(key)
         if not isinstance(value, list):
             raise ValueError(f"audit judge {key} must be a list")
+        normalized_items = []
         for item in value:
             if not isinstance(item, dict):
                 raise ValueError(f"audit judge {key} items must be objects")
@@ -942,22 +956,25 @@ def _validate_audit_judge_packet(packet, worker_packet):
             worker_finding = worker_by_id.get(finding_id)
             if worker_finding is None or finding_id in seen:
                 raise ValueError(f"audit judge returned invalid/duplicate id: {finding_id!r}")
-            if item.get("claim") != worker_finding.get("claim"):
-                raise ValueError(f"audit judge claim mismatch for {finding_id}")
-            if key == "confirmed" and item.get("fix") != worker_finding.get("fix"):
-                raise ValueError(f"audit judge fix mismatch for {finding_id}")
             detail_key = "evidence" if key == "confirmed" else "reason"
             if not isinstance(item.get(detail_key), str) or not item[detail_key].strip():
                 raise ValueError(f"audit judge {key} item missing {detail_key}")
+            canonical = dict(item)
+            canonical["claim"] = worker_finding["claim"]
+            if key == "confirmed":
+                canonical["fix"] = worker_finding["fix"]
+            normalized_items.append(canonical)
             seen.add(finding_id)
+        normalized[key] = normalized_items
     if seen != set(worker_by_id):
         raise ValueError("audit judge did not disposition every worker finding")
-    confirmed_count = len(packet["confirmed"])
+    confirmed_count = len(normalized["confirmed"])
     if verdict in ("PASS", "UNVERIFIABLE") and confirmed_count:
         raise ValueError(f"audit judge {verdict} cannot confirm problems")
     if verdict in ("DRIFT", "ATTENTION") and not confirmed_count:
-        raise ValueError(f"audit judge {verdict} requires a confirmed problem")
-    return packet
+        normalized["verdict_normalized_from"] = verdict
+        normalized["verdict"] = "PASS"
+    return normalized
 
 
 def _apply_deterministic_audit_guards(section_name, evidence, verdict, confirmed):
@@ -998,6 +1015,8 @@ Rules:
 - Ground every claim in the collected evidence or in live read-only checks you run
   yourself (cite specific file:line, command output, etc.)
 - You have read tools and bash — use them to verify, never to mutate.
+- Put only unresolved problem findings in `findings`. Healthy/current observations are
+  evidence for your verdict, not findings. A PASS packet has an empty findings list.
 - Return a fenced ```json packet:
 {{"verdict": "PASS"|"DRIFT"|"ATTENTION"|"UNVERIFIABLE",
  "findings": [{{"claim": "...", "evidence": "...", "fix": "..."}}]}}
@@ -1060,6 +1079,9 @@ where needed. Keep only findings you can confirm.
 
 SECTION: {section_name}
 
+SECTION GUIDANCE:
+{section["guidance"]}
+
 COLLECTED EVIDENCE:
 {json.dumps(evidence, indent=2, default=str)[:6000]}
 
@@ -1071,28 +1093,46 @@ RECENT SESSION MEMORY (context for interpreting the state the findings describe)
 
 Return a fenced ```json packet:
 {{"verdict": "PASS"|"DRIFT"|"ATTENTION"|"UNVERIFIABLE",
- "confirmed": [{{"id": "finding-1", "claim": "...", "evidence": "...", "fix": "..."}}],
- "rejected": [{{"id": "finding-2", "claim": "...", "reason": "..."}}]}}
+ "confirmed": [{{"id": "finding-1", "evidence": "independent verification"}}],
+ "rejected": [{{"id": "finding-2", "reason": "why it is not an unresolved problem"}}]}}
 - Return every worker finding ID exactly once across `confirmed` and `rejected`.
-- A confirmed finding must copy the worker's `claim` and `fix` verbatim.
+- Refer to findings by ID; do not repeat or rewrite the worker's claim or fix.
 - `confirmed` contains unresolved problem findings only, never healthy-state confirmations.
 - `PASS` requires an empty `confirmed` list. Use `ATTENTION` for unresolved manual/security
   action and `DRIFT` for a concrete state/config mismatch.
 - CRITICAL: every yielding turn must include the fenced ```json block. If the advisor
   requests changes, emit a REVISED ```json packet — never a prose-only ack.
 """
-    try:
-        judge_text = _call_omp_p(judge_prompt, timeout=section["timeout"], mode="json")
-        judge_packet = _validate_audit_judge_packet(
-            _extract_json(judge_text, f"judge-{section_name}"),
+
+    def _run_judge(prompt_text, label):
+        raw = _call_omp_p(prompt_text, timeout=section["timeout"], mode="json")
+        return _validate_audit_judge_packet(
+            _extract_json(raw, label),
             worker_packet,
         )
+
+    judge_attempts = 1
+    judge_retry_errors = []
+    try:
+        judge_packet = _run_judge(judge_prompt, f"judge-{section_name}")
     except Exception as e:
-        judge_packet = {
-            "confirmed": [],
-            "rejected": [],
-            "judge_error": str(e),
-        }
+        judge_attempts = 2
+        judge_retry_errors.append(str(e))
+        retry_prompt = (
+            f"{judge_prompt}\n\n"
+            f"Your previous response failed steward validation: {str(e)[:500]}\n"
+            "Return a corrected fenced JSON packet only. Disposition every listed finding ID "
+            "exactly once; do not repeat claim or fix text."
+        )
+        try:
+            judge_packet = _run_judge(retry_prompt, f"judge-{section_name}-retry")
+        except Exception as e2:
+            judge_retry_errors.append(str(e2))
+            judge_packet = {
+                "confirmed": [],
+                "rejected": [],
+                "judge_error": f"{e}; retry also failed: {e2}",
+            }
 
     confirmed = judge_packet.get("confirmed", [])
     rejected = judge_packet.get("rejected", [])
@@ -1107,6 +1147,8 @@ Return a fenced ```json packet:
         "worker_verdict": worker_verdict,
         "judge_verdict": judge_packet.get("verdict", ""),
         "judge_error": judge_packet.get("judge_error", ""),
+        "judge_attempts": judge_attempts,
+        "judge_retry_errors": judge_retry_errors,
         "evidence_hash": current_hash,
         "worker_findings": worker_packet.get("findings", []),
         "judge_confirmed": confirmed,
@@ -1119,6 +1161,10 @@ def _audit_artifact_cacheable(artifact):
     if artifact.get("judge_error"):
         return False
     base_verdict = str(artifact.get("verdict", "")).removeprefix("cached-")
+    if base_verdict != "PASS":
+        # Re-check unresolved/inconclusive sections every run. Carrying their
+        # pre-fix verdict forward can resurrect an item P7b or Carter resolved.
+        return False
     if base_verdict not in _REAL_VERDICTS:
         return False
     worker_packet = {
@@ -1138,6 +1184,49 @@ def _audit_artifact_cacheable(artifact):
     return _final_audit_verdict(worker_packet["verdict"], judge_packet) == base_verdict
 
 
+def _dependabot_maintenance_evidence(run_dir, setup_data):
+    """Distinguish an owned maintenance stop from an unrelated service failure."""
+    recorded = setup_data.get("dependabot", {})
+    owned_stop = (
+        setup_data.get("run_dir") == str(run_dir)
+        and setup_data.get("phase_status") == "succeeded"
+        and not setup_data.get("dry_run")
+        and isinstance(recorded, dict)
+        and recorded.get("was_active") is True
+        and recorded.get("stopped") is True
+        and not recorded.get("error")
+    )
+    stdout, stderr, code = run_capture_ok(
+        ["systemctl", "--user", "show", DEPENDABOT_UNIT,
+         "--property=LoadState,ActiveState,SubState,Result"],
+        env=user_env(), timeout=15,
+    )
+    state = dict(
+        line.split("=", 1) for line in stdout.splitlines() if "=" in line
+    )
+    assessment = "unverifiable"
+    if code == 0 and state.get("LoadState") == "loaded":
+        if state.get("ActiveState") == "active" and state.get("SubState") == "running":
+            assessment = "running"
+        elif (
+            owned_stop
+            and state.get("ActiveState") == "inactive"
+            and state.get("SubState") == "dead"
+            and state.get("Result") == "success"
+        ):
+            assessment = "maintenance-stopped"
+        else:
+            assessment = "unexpected"
+    return {
+        "unit": DEPENDABOT_UNIT,
+        "assessment": assessment,
+        "owned_stop": owned_stop,
+        "state": state,
+        "check_error": stderr if code else "",
+        "restoration": "current-run cleanup and systemd ExecStopPost",
+    }
+
+
 def phase_7_audit(run_dir, setup_data, dry_run=False):
     """Phase 7: audit sections — collector -> delta gate -> parallel worker+judge."""
     print("[P7] audit")
@@ -1145,6 +1234,7 @@ def phase_7_audit(run_dir, setup_data, dry_run=False):
 
     all_results = []
     to_fire = []
+    dependabot_maintenance = None
 
     for section in AUDIT_SECTIONS:
         section_name = section["name"]
@@ -1160,6 +1250,11 @@ def phase_7_audit(run_dir, setup_data, dry_run=False):
             write_json(run_dir / artifact_name, result)
             all_results.append(result)
             continue
+
+        if section_name in ("security-posture", "agent-fleet-review"):
+            if dependabot_maintenance is None:
+                dependabot_maintenance = _dependabot_maintenance_evidence(run_dir, setup_data)
+            evidence = {"dependabot_maintenance": dependabot_maintenance, **evidence}
 
         write_json(run_dir / f"{artifact_name}.evidence.json", evidence)
         current_hash = _evidence_hash(evidence)
