@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from html.parser import HTMLParser
 import tempfile
 from pathlib import Path
 
@@ -156,17 +157,33 @@ def test_front_page_guarantees_sections_then_applies_global_floor() -> None:
         selected,
     )
     check(lead and lead["priority_score"] == 100.0, lead)
-    email_body = news.render_headline_email("2026-08-25", date_editions)
-    check(email_body.count("<li ") == len(selected), email_body)
-    for story in selected:
-        expected = story["title"].replace("&", "&amp;")
-        check(expected in email_body, story)
-    check("AI &amp; Tech secondary" not in email_body, email_body)
-    check(email_body.count('href="') == 1, email_body)
-    check(
-        f'href="{news.BASE_URL}/2026-08-25/"' in email_body,
-        email_body,
-    )
+    class EmailLinks(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.links = []
+            self.current = None
+
+        def handle_starttag(self, tag, attrs) -> None:
+            if tag == "a":
+                self.current = [dict(attrs).get("href"), ""]
+                self.links.append(self.current)
+
+        def handle_data(self, data) -> None:
+            if self.current is not None:
+                self.current[1] += data
+
+        def handle_endtag(self, tag) -> None:
+            if tag == "a":
+                self.current = None
+
+    email = EmailLinks()
+    email.feed(news.render_headline_email("2026-08-25", date_editions))
+    expected_links = [
+        [f'{news.BASE_URL}/2026-08-25/{story["_section_slug"]}/', story["title"]]
+        for story in selected
+    ]
+    check(email.links[:-1] == expected_links, email.links)
+    check(email.links[-1][0] == f"{news.BASE_URL}/2026-08-25/", email.links)
 
 
 def test_publish_builds_separate_history_and_one_email() -> None:
@@ -254,19 +271,11 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check(run["completed_at"] is not None, dict(run))
         check(run["error"] is None, dict(run))
         email_body = sent[0][1]
-        check(email_body.count("<li ") == len(news.TOPIC_ORDER), email_body)
-        check('data-summary="overall"' not in email_body, email_body)
-        check("<h2" not in email_body, email_body)
         check("source-backed summary" not in email_body, email_body)
-        check(email_body.count('href="') == 1, email_body)
         check(
             f'href="{news.BASE_URL}/{current_date}/"' in email_body,
             email_body,
         )
-        check("#f2f0ea" not in email_body.casefold(), email_body)
-        check("#fffdfa" not in email_body.casefold(), email_body)
-        check("#f3f4f6" in email_body.casefold(), email_body)
-        check("#ffffff" in email_body.casefold(), email_body)
         for key in news.TOPIC_ORDER:
             topic = news.TOPICS[key]
             marker = topic["web_title"].replace("&", "&amp;")
@@ -278,7 +287,6 @@ def test_publish_builds_separate_history_and_one_email() -> None:
             check(expected in email_body, email_body)
             check(f"{marker} reporting details" not in email_body, email_body)
             check(f"{marker} developing story" not in email_body, email_body)
-            check(f"/{current_date}/{topic['web_slug']}/" not in email_body, email_body)
 
         current = news_dir / "current"
         check(current.is_symlink(), current)

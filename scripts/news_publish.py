@@ -1006,7 +1006,9 @@ def render_headline_email(
     headline_items = "".join(
         '<li style="margin:0 0 12px;padding-left:2px;color:#171716;'
         'font:700 18px/1.35 Georgia,serif;">'
-        f'{html.escape(_clean_text(story.get("title")))}</li>'
+        f'<a href="{html.escape(base_url, quote=True)}/{issue_date}/{story["_section_slug"]}/" '
+        'style="color:#171716;text-decoration:underline;">'
+        f'{html.escape(_clean_text(story.get("title")))}</a></li>'
         for story in front_page_stories
     )
     headline_list = (

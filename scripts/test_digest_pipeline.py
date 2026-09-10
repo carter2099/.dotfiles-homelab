@@ -622,6 +622,7 @@ def test_attention_phase_persists_durable_observations() -> None:
         with (
             patch.object(runtime, "ATTENTION_CACHE_DIR", root / "cache"),
             patch.object(runtime, "ATTENTION_ARCHIVE_DIR", root / "attention"),
+            patch.object(runtime, "GDELT_HEALTH_LOG_PATH", root / "gdelt-health.log"),
             patch("daily_news.attention.score_attention", return_value=(scored, artifact)),
         ):
             scored_fresh, scored_ongoing = research.phase_2b_attention(
