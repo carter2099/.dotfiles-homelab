@@ -730,28 +730,43 @@ class GamingRigMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["upgraded_count"], 1)
         self.assertEqual(command.call_count, 3)
 
-    def test_apt_upgrade_parses_full_apply_output_before_tail(self):
-        full_apply = "2 upgraded, 0 newly installed, 0 to remove.\n" + ("x" * 2000)
-        responses = [
-            {"step": "apt_update", "status": "ok", "stdout_tail": "ok"},
-            {
-                "step": "apt_upgrade_plan",
-                "status": "ok",
-                "stdout_tail": "5 upgraded, 0 newly installed, 0 to remove.",
-            },
-            {
-                "step": "apt_upgrade_apply",
-                "status": "ok",
-                "stdout_tail": full_apply[-700:],
-                "_full_stdout": full_apply,
-                "_full_stderr": "",
-            },
-        ]
-        with patch.object(updates, "_rig_command_result", side_effect=responses):
+    def test_apt_upgrade_parses_long_plan_and_apply_output(self):
+        plan_output = "5 upgraded, 0 newly installed, 0 to remove.\n" + (
+            "Inst example [1.0] (1.1 Ubuntu:24.04/noble-updates [amd64])\n"
+            "Conf example (1.1 Ubuntu:24.04/noble-updates [amd64])\n"
+        ) * 100
+        apply_output = "2 upgraded, 0 newly installed, 0 to remove.\n" + (
+            "Setting up example (1.1) ...\n"
+        ) * 100
+        with patch.object(
+            updates, "_rig_ssh",
+            side_effect=[
+                ("Reading package lists...\n", "", 0),
+                (plan_output, "", 0),
+                (apply_output, "", 0),
+            ],
+        ):
             result = updates._rig_apt_upgrade()
-        self.assertEqual(result["upgraded_count"], 2)
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(result["planned_count"], 5)
-        self.assertNotIn("_full_stdout", result["substeps"][-1])
+        self.assertEqual(result["upgraded_count"], 2)
+        self.assertLess(len(json.dumps(result)), 5000)
+
+    def test_apt_upgrade_does_not_apply_an_invalid_or_failed_plan(self):
+        for output, code in (
+            ("Reading package lists...\n", 0),
+            ("5 upgraded, 0 newly installed, 0 to remove.\n", 100),
+        ):
+            with self.subTest(output=output, code=code), patch.object(
+                updates, "_rig_ssh",
+                side_effect=[
+                    ("Reading package lists...\n", "", 0),
+                    (output, "apt plan failed" if code else "", code),
+                ],
+            ):
+                result = updates._rig_apt_upgrade()
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["upgraded_count"], 0)
 
     def test_model_endpoint_requires_exact_retained_ids(self):
         expected = list(updates.RIG_REQUIRED_MODEL_IDS)

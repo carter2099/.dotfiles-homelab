@@ -1117,10 +1117,16 @@ def _rig_apt_upgrade():
     plan = _rig_command_result(
         "apt_upgrade_plan", ["apt-get", "--simulate", "upgrade"],
         timeout=RIG_APT_TIMEOUT,
+        capture_full=True,
     )
-    plan_output = _rig_tail(
-        plan.get("stdout_tail", ""), plan.get("stderr_tail"), limit=1400)
-    match = re.search(r"(?im)(\d+)\s+upgraded\b", plan_output)
+    # The summary precedes the package list and may be outside the stored tail.
+    plan_stdout = plan.pop("_full_stdout", "")
+    plan_stderr = plan.pop("_full_stderr", "")
+    if not plan_stdout and not plan_stderr:
+        plan_stdout = plan.get("stdout_tail", "")
+        plan_stderr = plan.get("stderr_tail", "")
+    plan_output = _rig_tail(plan_stdout, plan_stderr, limit=1400)
+    match = re.search(r"(?im)(\d+)\s+upgraded\b", plan_stdout + "\n" + plan_stderr)
     planned = int(match.group(1)) if match else 0
     if plan["status"] != "ok" or match is None:
         plan["status"] = "failed"
