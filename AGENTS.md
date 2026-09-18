@@ -118,6 +118,7 @@ Each app has a reference doc in `~/notes/docs/homelab/`:
 
 - **Blog** (canonical `~/dev/blog/`; transactional deploy via `deploy/deploy.sh`; production checkout `~/blog/blog/`; Docker loopback-only on 127.0.0.1:33099; public blog.carter2099.com tunnels directly to that origin, with no k3s dependency) → [`blog.md`](notes/docs/homelab/blog.md)
 - **Beatz** (public Go music player branded “Beats” in-app, localhost:30142; no Cloudflare Access; media: `~/beatz-selected/`; play history: `~/beatz-data/plays.jsonl`; canonical `~/dev/beatz/`; transactional `release.sh`; commit `8a4a285` deployed healthy; injected-health-failure rollback, restored playback, and unchanged history proved in the isolated recovery VM) → [`beatz.md`](notes/docs/homelab/beatz.md)
+- **FLAPFIRE** (public mobile-friendly Three.js bird shooter at vib.carter2099.com; canonical `~/dev/vib/`, deployment `~/vib/`; read-only nginx container `carter-vib` on loopback:30146; no accounts or server-side game state) → [`deployment.md#flapfire`](notes/docs/homelab/deployment.md#flapfire)
 - **Daily News** (public static newspaper UI, localhost:30144, news.carter2099.com; bounded `~/scripts/daily_news/` package; per-run validated SQLite workflow state; priority-ranked front page + five category pages, historical editions, one front-page-headline email, durable data in R2 backup) → [`email-digests.md`](notes/docs/homelab/email-digests.md)
 - **Hyperliquid SDK maintenance** (scheduled upstream API + dependency maintenance; Dependabot PR metadata is deterministically collected, Prompt-Guard-classified, and reconciled into the regular maintenance queue before later bounded processing; verification: `verify-dependabot-intake.sh full` and `verify-hyperliquid-guard.sh full`; no trading runtime) → [`hyperliquid-sdk.md`](notes/docs/homelab/hyperliquid-sdk.md)
 - **Homelab Backup** (canonical `~/dev/homelab-backup/`; transactional `release.sh`; deployed 32-target manifest, schema v2 / `current-v3`; coordinated Open WebUI DB/uploads/full Chroma indexes with state-preserving freeze and independent thaw; daily 03:00 UTC → R2; 2026-09-06 archive verified 32 targets and 9 DBs; isolated two-boot recovery and saved-data probes passed; prior 31- and 23-target archives remain supported) → [`homelab-backup.md`](notes/docs/homelab/homelab-backup.md)
@@ -242,6 +243,14 @@ production, copy authoritative state, or extend k3s to the rig.
 - [`environment.md`](notes/docs/homelab/environment.md) — development/tooling conventions,
   canonical configuration map, SSH/trust boundary, serving-build exception, and state
   exclusions.
+
+Reusable local-model comparisons live in `~/dev/local-model-bench/`
+(`carter2099/local-model-bench`, private). The frozen EvalScope-led suite covers
+instruction following, reasoning, executable Python, and native tool calling;
+quality and 30-second latency profiles stay separate. Its rig supervisor uses
+temporary servers, stops before steward maintenance, and restores production
+without changing serving configuration. Usage and caveats:
+[`Reusable local-model benchmark`](notes/docs/homelab/local-llm-gaming-rig.md#reusable-local-model-benchmark).
 
 ## Environment
 
