@@ -107,6 +107,7 @@ RIG_REQUIRED_MODEL_IDS = (
     "ornith-1.0-9b-q6",
     "gemma-4-12b-q6",
     "gemma-4-26b-q8",
+    "bonsai-2-27b-pq2",
 )
 RIG_REMOTE_PATH = (
     "/home/carte/.rbenv/shims:/home/carte/.bun/bin:/home/carte/.local/bin:"
